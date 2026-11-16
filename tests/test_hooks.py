@@ -130,9 +130,13 @@ def run(request, tmp_path: Path, fake: Fake):
     """Runs the script under one shell, as Claude Code does: ``run("hook", "prompt", stdin={...})``."""
     home = tmp_path / "home"
 
-    def run_(*args: str, stdin: dict | None = None, server: str | None = None, cwd: Path | None = None):
+    def run_(*args: str, stdin: dict | None = None, server: str | None = None, cwd: Path | None = None,
+             tool: str | None = None):
         env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "VYAVASTHA_HOME": str(home),
                "VYAVASTHA_SERVER": server or fake.url, "CLAUDE_PROJECT_DIR": str(cwd or tmp_path)}
+        if tool:
+            # As Codex's hooks file sets it; Claude Code's sets nothing.
+            env["VYAVASTHA_TOOL"] = tool
         started = time.monotonic()
         done = subprocess.run([request.param, str(SCRIPT), *args], input=json.dumps(stdin) if stdin else "",
                               capture_output=True, text=True, env=env, cwd=cwd or tmp_path, timeout=60)
@@ -224,7 +228,7 @@ def test_a_clear_request_reaches_claude_with_the_facts_and_sends_only_what_the_c
     (sent,) = fake.calls("/check")
     # The request word for word; the repository without its credential; nothing of the transcript or the folder.
     assert sent["body"] == {"request": prompt, "remote": "https://github.com/acme/api.git", "branch": "main",
-                            "session": "session-1"}
+                            "session": "session-1", "tool": "claude-code"}
     assert b"hunter2" not in sent["raw"] and b"transcript" not in sent["raw"] and str(repo).encode() not in sent["raw"]
 
 
@@ -375,6 +379,80 @@ def test_a_session_starts_by_saying_where_it_is_signed_in(run, fake, repo):
     signed_in(run, fake)
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo)))["systemMessage"]
     assert said.startswith("Vyavastha: signed in as sam@acme.test in Acme.") and TOKEN not in said
+
+
+# -- under Codex -----------------------------------------------------------------------------------------------------
+
+def test_under_codex_the_script_names_codex_and_says_which_tool_it_is(run, fake, repo):
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))["systemMessage"]
+    assert "Send “vyavastha sign in” to connect" in said and "Claude" not in said and "/vyavastha:" not in said
+    signed_in(run, fake)
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))["systemMessage"]
+    assert said.endswith("before Codex changes code.") and "Claude" not in said
+    run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days"), tool="codex")
+    (sent,) = fake.calls("/check")
+    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"].startswith("vyavastha-codex/")
+
+
+@pytest.mark.parametrize("typed", ["vyavastha sign in", "Vyavastha sign-in.", "  VYAVASTHA  SIGN IN  "])
+def test_the_commands_sent_as_plain_messages_are_answered_by_the_plugin_and_never_reach_the_model(
+        run, fake, repo, typed):
+    started = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt=typed), tool="codex"))
+    # Held back from the model, with what the command said as the reason the developer sees.
+    assert started["decision"] == "block" and "BCDF-GHJK" in started["reason"]
+    assert "To connect Codex on" in started["reason"] and "device-secret" not in started["reason"]
+    assert fake.calls("/pair")[0]["body"]["tool"] == "codex" and not fake.calls("/check")
+    fake.approved = True
+    status = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavastha status"),
+                        tool="codex"))
+    assert status["decision"] == "block" and "connected as sam@acme.test in Acme" in status["reason"]
+    assert "This repository, acme/api, is connected" in status["reason"] and TOKEN not in status["reason"]
+    out = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavastha sign out"),
+                     tool="codex"))
+    assert out["decision"] == "block" and "Signed out" in out["reason"]
+    assert fake.calls("/signout") and not (run.home / "credentials").exists() and not fake.calls("/check")
+
+
+def test_a_request_that_only_mentions_the_commands_is_checked_like_any_other(run, fake, repo):
+    signed_in(run, fake)
+    said = output(run("hook", "prompt", tool="codex",
+                      stdin=event("UserPromptSubmit", repo, prompt="Add a vyavastha sign in button to the page")))
+    assert "decision" not in said and fake.calls("/check") and not fake.calls("/pair")
+
+
+def test_a_held_request_under_codex_is_blocked_in_the_form_codex_reads(run, fake, repo):
+    signed_in(run, fake)
+    fake.check = {"verdict": "held", "hold": True, "notice": "On hold: Helen decides this.", "context": "c",
+                  "statements": [], "anyway": {"phrase": "Plan it anyway", "context": "Go on: c"}}
+    held = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days",
+                                                   turn_id="turn-1", model="gpt-6-luna"), tool="codex"))
+    assert held == {"decision": "block", "reason": "On hold: Helen decides this."}
+    anyway = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Plan it anyway"),
+                        tool="codex"))
+    assert anyway["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit", "additionalContext": "Go on: c"}
+    assert "Codex was shown your request" in anyway["systemMessage"]
+
+
+def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
+    hooks = json.loads((PLUGIN / "hooks" / "codex.json").read_text())["hooks"]
+    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"}
+    for groups in hooks.values():
+        for group in groups:
+            for hook in group["hooks"]:
+                assert hook["type"] == "command"
+                assert hook["command"].startswith('VYAVASTHA_TOOL=codex sh "${PLUGIN_ROOT}/scripts/vyavastha.sh" hook ')
+                assert hook["command"].rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped"}
+    # Only the report after an edit may run in the background: a check that runs there could hold nothing.
+    assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
+    manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
+    claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+    assert manifest["name"] == claude["name"] == "vyavastha" and manifest["version"] == claude["version"]
+    assert f'VERSION="{manifest["version"]}"' in SCRIPT.read_text()
+    assert (PLUGIN / manifest["hooks"]).is_file() and (PLUGIN / manifest["skills"] / "vyavastha" / "SKILL.md").is_file()
+    root = PLUGIN.parents[1]
+    (entry,) = json.loads((root / ".agents" / "plugins" / "marketplace.json").read_text())["plugins"]
+    assert (root / entry["source"]["path"]).resolve() == PLUGIN and set(entry["policy"]) == {"installation",
+                                                                                           "authentication"}
 
 
 # -- the plugin itself -------------------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Vyavastha for Claude Code: the hooks Claude Code runs, and the sign-in, sign-out and status commands.
+# Vyavastha for Claude Code and Codex: the hooks the coding tool runs, and the sign-in, sign-out and status commands.
 #
 # Written for POSIX sh with git, curl and awk only. Claude Code runs a hook's command through sh on macOS and
 # Linux and through Git Bash on Windows; this plugin needs git, and on Windows git comes as Git for Windows,
@@ -14,9 +14,19 @@ umask 077
 LC_ALL=C
 export LC_ALL
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
+# Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTHA_TOOL=codex). The tool's own name,
+# what its model is called, and how its developer gives this plugin a command.
+case "${VYAVASTHA_TOOL:-}" in
+  codex)
+    CLIENT="codex"; TOOL="Codex"; AGENT="Codex"; VERB="Send"; VERB_LOWER="send"
+    CMD_SIGN_IN="“vyavastha sign in”"; CMD_SIGN_OUT="“vyavastha sign out”"; CMD_STATUS="“vyavastha status”" ;;
+  *)
+    CLIENT="claude-code"; TOOL="Claude Code"; AGENT="Claude"; VERB="Run"; VERB_LOWER="run"
+    CMD_SIGN_IN="/vyavastha:sign-in"; CMD_SIGN_OUT="/vyavastha:sign-out"; CMD_STATUS="/vyavastha:status" ;;
+esac
 HOME_DIR="${VYAVASTHA_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/vyavastha}"
 CREDENTIALS="$HOME_DIR/credentials"
 PENDING="$HOME_DIR/pairing"
@@ -202,11 +212,11 @@ api() {
   if [ -n "${TOKEN:-}" ]; then auth="header = \"Authorization: Bearer $TOKEN\""; else auth=""; fi
   if [ -n "$3" ]; then
     STATUS=$(printf '%s\n' "$auth" | curl -sS -K - -X "$1" --max-time "$4" --connect-timeout 5 \
-      -H "Content-Type: application/json" -H "User-Agent: vyavastha-claude-code/$VERSION" \
+      -H "Content-Type: application/json" -H "User-Agent: vyavastha-$CLIENT/$VERSION" \
       --data-binary "@$3" -o "$TMP/answer" -w '%{http_code}' "$SERVER/api/v1/plugin$2" 2>/dev/null) || STATUS=000
   else
     STATUS=$(printf '%s\n' "$auth" | curl -sS -K - -X "$1" --max-time "$4" --connect-timeout 5 \
-      -H "User-Agent: vyavastha-claude-code/$VERSION" \
+      -H "User-Agent: vyavastha-$CLIENT/$VERSION" \
       -o "$TMP/answer" -w '%{http_code}' "$SERVER/api/v1/plugin$2" 2>/dev/null) || STATUS=000
   fi
   case "$STATUS" in
@@ -372,9 +382,9 @@ hook_session_start() {
   finish_pairing
   if [ -z "$TOKEN" ]; then
     if [ -f "$PENDING" ]; then
-      say "Vyavastha: waiting for you to approve the connection in your browser. Run /vyavastha:status once you have."
+      say "Vyavastha: waiting for you to approve the connection in your browser. ${VERB} ${CMD_STATUS} once you have."
     else
-      say "Vyavastha: not signed in, so requests aren’t checked against your team’s record. Run /vyavastha:sign-in to connect."
+      say "Vyavastha: not signed in, so requests aren’t checked against your team’s record. ${VERB} ${CMD_SIGN_IN} to connect."
     fi
     return
   fi
@@ -382,10 +392,10 @@ hook_session_start() {
   case "$STATUS" in
     200)
       json_get "$TMP/answer" workspace > "$TMP/workspace"
-      say "${CONNECTED:-Vyavastha: signed in as $(json_text "$(answer email)") in $(json_text "$(json_get "$TMP/workspace" name)").} Requests are checked against your team’s record before Claude changes code."
+      say "${CONNECTED:-Vyavastha: signed in as $(json_text "$(answer email)") in $(json_text "$(json_get "$TMP/workspace" name)").} Requests are checked against your team’s record before ${AGENT} changes code."
       ;;
-    401) say "Vyavastha: this computer’s connection has ended. Run /vyavastha:sign-in to connect again." ;;
-    *) say "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. Claude works as usual." ;;
+    401) say "Vyavastha: this computer’s connection has ended. ${VERB} ${CMD_SIGN_IN} to connect again." ;;
+    *) say "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual." ;;
   esac
 }
 
@@ -398,33 +408,46 @@ hook_prompt() {
   if [ "$words" = "$(printf '%s' "$PHRASE" | tr 'A-Z' 'a-z')" ] && [ -s "$dir/held" ]; then
     # The developer chose to go on with the request that was held: Claude is shown it, with what stood in the way.
     printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
-      "$(json_quote "Vyavastha: going ahead. Claude was shown your request, what stands in the way, and that you chose to go on.")" \
+      "$(json_quote "Vyavastha: going ahead. ${AGENT} was shown your request, what stands in the way, and that you chose to go on.")" \
       "$(cat "$dir/held")"
     rm -f "$dir/held"
     return
   fi
   case "$words" in /*) return ;; esac
+  # The plugin's own commands, sent as a plain message (how a tool without slash commands of ours is given them):
+  # answered here, and never sent to the model.
+  typed=""
+  case "$(printf '%s' "$words" | tr -s ' -' '  ')" in
+    "vyavastha sign in") typed=sign_in ;;
+    "vyavastha sign out") typed=sign_out ;;
+    "vyavastha status") typed=status ;;
+  esac
+  if [ -n "$typed" ]; then
+    HERE=$(json_text "$(json_get "$input" cwd)")
+    printf '{"decision":"block","reason":%s}\n' "$(json_quote "$(command_$typed)")"
+    return
+  fi
   rm -f "$dir/held"
   finish_pairing
   if [ -z "$TOKEN" ]; then
-    say_once "$dir" signed-out "Vyavastha: not signed in, so this request wasn’t checked against your team’s record. Run /vyavastha:sign-in to connect."
+    say_once "$dir" signed-out "Vyavastha: not signed in, so this request wasn’t checked against your team’s record. ${VERB} ${CMD_SIGN_IN} to connect."
     return
   fi
   folder=$(json_text "$(json_get "$input" cwd)")
   [ -n "$folder" ] || folder="${CLAUDE_PROJECT_DIR:-$PWD}"
   repository "$folder" || return
   if offline; then
-    say_once "$dir" offline "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. Claude works as usual."
+    say_once "$dir" offline "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual."
     return
   fi
-  printf '{"request":%s,"remote":%s,"branch":%s,"session":%s}' "$prompt" "$(json_quote "$REMOTE")" \
-    "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$dir")")" > "$TMP/check"
+  printf '{"request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s"}' "$prompt" "$(json_quote "$REMOTE")" \
+    "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$dir")")" "$CLIENT" > "$TMP/check"
   api POST /check "$TMP/check" "$CHECK_SECONDS"
   case "$STATUS" in
     200) ;;
-    401) say_once "$dir" ended "Vyavastha: this computer’s connection has ended, so this request wasn’t checked. Run /vyavastha:sign-in to connect again."; return ;;
-    429) say_once "$dir" busy "Vyavastha: too many requests just now, so this one wasn’t checked. Claude works as usual."; return ;;
-    *) say_once "$dir" offline "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. Claude works as usual."; return ;;
+    401) say_once "$dir" ended "Vyavastha: this computer’s connection has ended, so this request wasn’t checked. ${VERB} ${CMD_SIGN_IN} to connect again."; return ;;
+    429) say_once "$dir" busy "Vyavastha: too many requests just now, so this one wasn’t checked. ${AGENT} works as usual."; return ;;
+    *) say_once "$dir" offline "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual."; return ;;
   esac
   notice=$(answer notice)
   context=$(answer context)
@@ -476,8 +499,8 @@ hook_report() {
   state=$(work_state "$dir")
   # A session that has nothing open and nothing changed has nothing to tell.
   [ "$state" != "changing" ] && [ ! -f "$dir/open" ] && return
-  printf '{"remote":%s,"branch":%s,"session":%s,"state":"%s","files":%s}' "$(json_quote "$REMOTE")" \
-    "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$dir")")" "$state" "$files" > "$TMP/report"
+  printf '{"remote":%s,"branch":%s,"session":%s,"state":"%s","files":%s,"tool":"%s"}' "$(json_quote "$REMOTE")" \
+    "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$dir")")" "$state" "$files" "$CLIENT" > "$TMP/report"
   api POST /work "$TMP/report" "$REPORT_SECONDS"
   now > "$dir/reported"
   [ "$STATUS" = "200" ] || return
@@ -503,18 +526,18 @@ command_sign_in() {
   if [ -n "$TOKEN" ]; then
     api GET /me "" "$QUICK_SECONDS"
     if [ "$STATUS" = "200" ]; then
-      echo "Already signed in to Vyavastha ($SERVER) as $(json_text "$(answer email)"). Run /vyavastha:sign-out first to switch accounts."
+      echo "Already signed in to Vyavastha ($SERVER) as $(json_text "$(answer email)"). ${VERB} ${CMD_SIGN_OUT} first to switch accounts."
       return
     fi
   fi
   machine=$(hostname 2>/dev/null | cut -d. -f1)
   [ -n "$machine" ] || machine=$(uname -n 2>/dev/null)
-  printf '{"machine":%s}' "$(json_quote "$machine")" > "$TMP/pair"
+  printf '{"machine":%s,"tool":"%s"}' "$(json_quote "$machine")" "$CLIENT" > "$TMP/pair"
   api_unsigned POST /pair "$TMP/pair" "$QUICK_SECONDS"
   if [ "$STATUS" != "201" ]; then
     message=$(json_get "$TMP/answer" detail > "$TMP/detail"; json_text "$(json_get "$TMP/detail" message)")
     echo "Couldn’t start connecting to Vyavastha at $SERVER${message:+: $message}"
-    [ "$STATUS" = "000" ] && echo "Check the address and your connection. To use another server, set VYAVASTHA_SERVER before starting Claude Code."
+    [ "$STATUS" = "000" ] && echo "Check the address and your connection. To use another server, set VYAVASTHA_SERVER before starting ${TOOL}."
     return
   fi
   device=$(json_text "$(answer device_code)")
@@ -524,8 +547,8 @@ command_sign_in() {
   printf 'server=%s\ndevice=%s\nstarted=%s\n' "$SERVER" "$device" "$(now)" > "$PENDING"
   chmod 600 "$PENDING" 2>/dev/null
   open_page "$page"
-  echo "To connect Claude Code on $machine to Vyavastha, open $page and enter the code $code."
-  echo "The code works for 10 minutes. Once you approve, Claude Code finishes connecting by itself on your next request, or run /vyavastha:status."
+  echo "To connect ${TOOL} on $machine to Vyavastha, open $page and enter the code $code."
+  echo "The code works for 10 minutes. Once you approve, ${TOOL} finishes connecting by itself on your next request, or ${VERB_LOWER} ${CMD_STATUS}."
 }
 
 command_sign_out() {
@@ -546,9 +569,9 @@ command_status() {
   [ -n "${CONNECTED:-}" ] && echo "${CONNECTED#Vyavastha: }"
   if [ -z "$TOKEN" ]; then
     if [ -f "$PENDING" ]; then
-      echo "Waiting for you to approve the connection in your browser. Run /vyavastha:status again once you have."
+      echo "Waiting for you to approve the connection in your browser. ${VERB} ${CMD_STATUS} again once you have."
     else
-      echo "Not signed in. Run /vyavastha:sign-in to connect."
+      echo "Not signed in. ${VERB} ${CMD_SIGN_IN} to connect."
     fi
     return
   fi
@@ -558,7 +581,7 @@ command_status() {
       json_get "$TMP/answer" workspace > "$TMP/workspace"
       echo "Signed in as $(json_text "$(answer email)") in $(json_text "$(json_get "$TMP/workspace" name)"), on $(json_text "$(answer machine)")."
       repositories=$(answer repositories)
-      if repository "${CLAUDE_PROJECT_DIR:-$PWD}"; then
+      if repository "${HERE:-${CLAUDE_PROJECT_DIR:-$PWD}}"; then
         name=$(printf '%s' "$REMOTE" | sed -E -e 's#^.*github\.com[:/]##' -e 's#\.git/?$##' -e 's#/$##')
         case "$repositories" in
           *"\"$name\""*) echo "This repository, $name, is connected: requests here are checked and your edits are shared." ;;
@@ -566,7 +589,7 @@ command_status() {
         esac
       fi
       ;;
-    401) echo "This computer’s connection has ended. Run /vyavastha:sign-in to connect again." ;;
+    401) echo "This computer’s connection has ended. ${VERB} ${CMD_SIGN_IN} to connect again." ;;
     *) echo "The server can’t be reached right now. Requests aren’t checked until it can be." ;;
   esac
 }

@@ -1,0 +1,22 @@
+{
+  "name": "vyavastha",
+  "version": "0.2.0",
+  "description": "Before Codex changes code, checks the request against what your team has said and decided; after it changes files, tells teammates which ones, so work that isn’t on GitHub yet is seen.",
+  "author": {
+    "name": "Vyavastha",
+    "url": "https://vyavasta.com"
+  },
+  "homepage": "https://vyavasta.com",
+  "keywords": ["team", "decisions", "code review", "work in progress"],
+  "hooks": "./hooks/codex.json",
+  "skills": "./codex/skills/",
+  "interface": {
+    "displayName": "Vyavastha",
+    "shortDescription": "Checks each request against what your team has decided.",
+    "longDescription": "Before Codex changes code, your request is checked against what your team has said and decided. When something stands in the way, the request is held and you are told who said what. After files change, teammates see which ones.",
+    "developerName": "Vyavastha",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "websiteURL": "https://vyavasta.com"
+  }
+}

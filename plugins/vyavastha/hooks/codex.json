@@ -1,0 +1,53 @@
+{
+  "description": "Vyavastha: checks each request against your team’s record before Codex changes code, and tells teammates which files are changing.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "VYAVASTHA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavastha.sh\" hook session-start",
+            "timeout": 15,
+            "statusMessage": "Connecting to Vyavastha"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "VYAVASTHA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavastha.sh\" hook prompt",
+            "timeout": 90,
+            "statusMessage": "Checking against your team’s record"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "VYAVASTHA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavastha.sh\" hook edited",
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "VYAVASTHA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavastha.sh\" hook stopped",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

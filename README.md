@@ -1,6 +1,6 @@
-# Vyavastha for Claude Code
+# Vyavastha for Claude Code and Codex
 
-A Claude Code plugin, laid out as its own private plugin marketplace. With it, Claude Code on your own computer works with your team’s Vyavastha workspace:
+One plugin for two coding tools, laid out as its own private plugin marketplace. With it, Claude Code or Codex on your own computer works with your team’s Vyavastha workspace. What follows says Claude; under Codex it is the same, with Codex in its place:
 
 - **Before Claude changes code**, your request is checked against what your team has said and decided, reading only what you can read in Vyavastha. When something stands in the way, Claude Code holds the request and tells you who said what. To go ahead anyway, send `Plan it anyway`.
 - **After Claude changes files**, and when it stops, git’s own list of changed files is sent to Vyavastha, so teammates who read the same repository see your work in progress before it is on GitHub. Edits you make by hand are included, because the list comes from git.
@@ -38,9 +38,37 @@ Commands: `/vyavastha:sign-in`, `/vyavastha:sign-out`, `/vyavastha:status`.
 
 Requests are checked, and edits shared, only in a repository whose GitHub remote is one you connected in Vyavastha’s Sources.
 
+## Install in Codex (for a tester)
+
+You need Codex, git, and access to this repository. The same script runs under both tools; Codex gets its own hooks file (`plugins/vyavastha/hooks/codex.json`) and description (`plugins/vyavastha/.codex-plugin/plugin.json`).
+
+1. From a terminal, add the marketplace:
+
+   ```
+   codex plugin marketplace add duggiradri/Vyavastha-Plugin
+   ```
+
+2. Install the plugin named Vyavastha from that marketplace in Codex’s plugin list, and restart Codex.
+
+3. Approve the plugin’s hooks once: Codex runs no hook until you have reviewed and trusted it. In the terminal, open `/hooks`; in the desktop app, choose **Review hooks**. Codex asks again after each update of the plugin.
+
+4. Sign in by sending this as a message of its own:
+
+   ```
+   vyavastha sign in
+   ```
+
+   It shows a code and opens Vyavastha’s Connect page, as in Claude Code. The plugin answers the message itself and Codex’s model never sees it.
+
+Commands, each sent as a message of its own: `vyavastha sign in`, `vyavastha sign out`, `vyavastha status`. They work in Claude Code too.
+
+Under Codex the report of changed files also follows shell commands, because Codex often edits files that way. Codex tasks that run in the cloud don’t run a plugin’s hooks, so nothing is checked there.
+
+Not yet tried in a real Codex session: the steps above follow Codex’s documentation, and the script is tested with the input Codex documents.
+
 ## What it sends, and what it keeps
 
-- **To the check:** the words of your request, the repository’s GitHub remote (any user name or token in the remote’s address is removed first), the branch, and Claude Code’s session id. Vyavastha keeps nothing of the words.
+- **To the check:** the words of your request, the repository’s GitHub remote (any user name or token in the remote’s address is removed first), the branch, the tool’s session id, and which tool it is (Claude Code or Codex). Vyavastha keeps nothing of the words.
 - **After edits:** the remote, branch, session id, and for each changed file its path, git’s status (added, changed, deleted, renamed) and line counts. **Never what a file holds.**
 - **Never:** the conversation transcript, file contents, or environment variables.
 - **Back from the server:** facts with their sources (who said what, when and where, and what the check made of them), shown to Claude as context. The server sends no instructions to Claude, and the plugin makes no model calls of its own on your Claude subscription.

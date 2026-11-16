@@ -1,7 +1,7 @@
 {
   "name": "vyavastha",
   "displayName": "Vyavastha",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Before Claude changes code, checks the request against what your team has said and decided; after it changes files, tells teammates which ones, so work that isn’t on GitHub yet is seen.",
   "author": {
     "name": "Vyavastha",
