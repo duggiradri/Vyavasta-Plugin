@@ -1,0 +1,14 @@
+{
+  "name": "vyavastha",
+  "description": "Vyavastha for Claude Code: checks your requests against what your team has said, and shows teammates what you’re changing.",
+  "owner": {
+    "name": "Vyavastha"
+  },
+  "plugins": [
+    {
+      "name": "vyavastha",
+      "source": "./plugins/vyavastha",
+      "description": "Before Claude changes code, checks the request against your team’s record; after it changes files, tells teammates which ones."
+    }
+  ]
+}
