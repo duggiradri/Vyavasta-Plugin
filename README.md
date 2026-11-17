@@ -3,6 +3,7 @@
 One plugin for two coding tools, laid out as its own private plugin marketplace. With it, Claude Code or Codex on your own computer works with your team’s Vyavastha workspace. What follows says Claude; under Codex it is the same, with Codex in its place:
 
 - **Before Claude changes code**, your request is checked against what your team has said and decided, reading only what you can read in Vyavastha. When something stands in the way, Claude Code holds the request and tells you who said what. To go ahead anyway, send `Plan it anyway`.
+- **When you ask about your team**, the question goes to your own assistant in Vyavastha, the one that answers in its web app’s chat, and Claude gives you its answer: what a teammate is working on, what was decided, who said what. Ask as you would there (“See what Priya is doing”, “What did we decide about the free trial?”), or speak to it by name (“Vyavastha, what is new?”). The questions of one session are one chat, which you also find in the web app. Claude can ask Vyavastha by itself too, when its work needs something the team said.
 - **After Claude changes files**, and when it stops, git’s own list of changed files is sent to Vyavastha, so teammates who read the same repository see your work in progress before it is on GitHub. Edits you make by hand are included, because the list comes from git.
 - **The web app stays the place** for setup, the record, your team and review. You approve this computer there, and you can disconnect it there (Settings, Account, Connected tools).
 
@@ -36,7 +37,9 @@ You need Claude Code, git, and access to this repository.
 
 Commands: `/vyavastha:sign-in`, `/vyavastha:sign-out`, `/vyavastha:status`.
 
-Requests are checked, and edits shared, only in a repository whose GitHub remote is one you connected in Vyavastha’s Sources.
+Requests are checked, and edits shared, only in a repository whose GitHub remote is one you connected in Vyavastha’s Sources. Questions about your team are answered from any folder.
+
+Which messages are asked in Vyavastha without Claude being asked: one that speaks to Vyavastha by name, one about the team as such (“my team”, “teammates”, “anyone else”), one about what was said or decided or who is doing something, and one that names a teammate. A message that asks for a code change is checked and made on your computer, never asked; a message that only names a teammate beside a file or a function (“Explain what Priya wrote in calc.py”) is Claude’s. For anything these rules miss, Claude is told at the start of each session how to ask Vyavastha itself (`vyavastha.sh ask "<question>"`).
 
 ## Install in Codex (for a tester)
 
@@ -64,14 +67,15 @@ Commands, each sent as a message of its own: `vyavastha sign in`, `vyavastha sig
 
 Under Codex the report of changed files also follows shell commands, because Codex often edits files that way. Codex tasks that run in the cloud don’t run a plugin’s hooks, so nothing is checked there.
 
-Not yet tried in a real Codex session: the steps above follow Codex’s documentation, and the script is tested with the input Codex documents.
+Tried in a real Codex session on 16 November 2026: installing, trusting the hooks, signing in and the hooks running. Codex being given an answer from Vyavastha, and Codex asking Vyavastha by itself (its shell may need your approval to reach the network), follow Codex’s documentation and are tested with the input Codex documents.
 
 ## What it sends, and what it keeps
 
-- **To the check:** the words of your request, the repository’s GitHub remote (any user name or token in the remote’s address is removed first), the branch, the tool’s session id, and which tool it is (Claude Code or Codex). Vyavastha keeps nothing of the words.
+- **To the check:** the words of your message, the repository’s GitHub remote (any user name or token in the remote’s address is removed first; none outside a repository), the branch, the tool’s session id, and which tool it is (Claude Code or Codex). Vyavastha keeps nothing of the words of a request it checks.
+- **A question about your team:** its words are kept, with the answer, as a chat of your own in Vyavastha, exactly as if you had asked in the web app. You can read on, rename or delete it there. Nobody else sees it.
 - **After edits:** the remote, branch, session id, and for each changed file its path, git’s status (added, changed, deleted, renamed) and line counts. **Never what a file holds.**
 - **Never:** the conversation transcript, file contents, or environment variables.
-- **Back from the server:** facts with their sources (who said what, when and where, and what the check made of them), shown to Claude as context. The server sends no instructions to Claude, and the plugin makes no model calls of its own on your Claude subscription.
+- **Back from the server:** facts with their sources (who said what, when and where, and what the check made of them), and the answer to a question, shown to Claude as context. With an answer comes one instruction to Claude: to give it to you as it stands. The plugin makes no model calls of its own on your Claude subscription.
 - **On your computer:** the token, in `~/.config/vyavastha/credentials` (or `$XDG_CONFIG_HOME/vyavastha`), readable by you only (`chmod 600`, in a `700` folder). On Windows the file sits in your user profile. A token is never sent to any server but the one that issued it. Short-lived notes for each session live in `~/.config/vyavastha/sessions`, and are removed after a week.
 
 If the server can’t be reached, or you aren’t signed in, Claude works as usual. You get one short note, and nothing is checked or shared.

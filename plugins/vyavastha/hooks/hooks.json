@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavastha.sh\" hook prompt",
-            "timeout": 90
+            "timeout": 270
           }
         ]
       }

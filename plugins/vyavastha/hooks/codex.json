@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "VYAVASTHA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavastha.sh\" hook prompt",
-            "timeout": 90,
+            "timeout": 270,
             "statusMessage": "Checking against your team’s record"
           }
         ]

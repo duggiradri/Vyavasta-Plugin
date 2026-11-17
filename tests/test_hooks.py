@@ -37,6 +37,12 @@ class Fake:
         self.requests: list[dict] = []
         self.check = {"verdict": "clear", "hold": False, "notice": "Checked: nothing stands against this change.",
                       "context": "Vyavastha checked this request: nothing stands against it.", "statements": []}
+        self.asked = {"status": "answered", "answer": "Priya is changing calc.py — “the export stays”.",
+                      "context": "Vyavastha’s assistant answered this message from the team’s record:\n\nPriya is "
+                                 "changing calc.py — “the export stays”.\n\nGive the developer this answer in full.",
+                      "notice": "Answered from your team’s record by Vyavastha.", "conversation_id": "cnv_1",
+                      "url": "http://127.0.0.1/c/cnv_1"}
+        self.slow = 0
         self.approved = False
         self.status: dict[str, int] = {}
         fake = self
@@ -79,6 +85,12 @@ class Fake:
                                               "repositories": ["acme/api"]})
                 if path == "/check":
                     return self._answer(200, fake.check)
+                if path == "/ask":
+                    # (An answer that is slow is still being made on the first calls for it.)
+                    if fake.slow > 0 and len(fake.calls("/ask")) <= fake.slow:
+                        return self._answer(200, {"status": "pending", "answer": "", "context": "", "notice":
+                                                  "Vyavastha is still working on the answer.", "waiting": "msg_9"})
+                    return self._answer(200, fake.asked)
                 if path == "/work":
                     state = fake.requests[-1]["body"]["state"]
                     status = {"changing": "local"}.get(state, state)
@@ -291,13 +303,93 @@ def test_a_connection_ended_in_settings_signs_this_computer_out(run, fake, repo)
     assert "connection has ended" in said["systemMessage"] and not (run.home / "credentials").exists()
 
 
-def test_a_slash_command_or_a_folder_outside_git_is_not_sent(run, fake, repo, tmp_path):
+def test_a_slash_command_is_not_sent_and_a_folder_outside_git_names_no_repository(run, fake, repo, tmp_path):
     signed_in(run, fake)
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="/vyavastha:status"))
+    assert fake.calls("/check") == []
+    # Outside a repository a question about the team can still be asked, so the words are sent, with no remote;
+    # the server says nothing of a folder it has nothing to check in, and nothing is printed.
+    fake.check = {"verdict": "not_connected", "hold": False, "notice": "", "context": "", "statements": []}
     outside = tmp_path / "notes"
     outside.mkdir()
-    run("hook", "prompt", stdin=event("UserPromptSubmit", outside, prompt="Change the notes"), cwd=outside)
-    assert fake.calls("/check") == []
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", outside, prompt="Change the notes"), cwd=outside)
+    (sent,) = fake.calls("/check")
+    assert sent["body"]["remote"] == "" and sent["body"]["branch"] == "" and done.stdout.strip() == ""
+
+
+# -- questions ---------------------------------------------------------------------------------------------------
+
+QUESTION = {"verdict": "question", "hold": False, "ask": True, "notice": "", "context": "", "statements": []}
+
+
+def test_a_question_about_the_team_is_asked_in_vyavastha_and_the_answer_is_given_to_the_model(run, fake, repo,
+                                                                                            tmp_path):
+    signed_in(run, fake)
+    fake.check = QUESTION
+    asking = 'See what "Priya" is doing'
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt=asking)))
+    (sent,) = fake.calls("/ask")
+    assert sent["body"] == {"question": asking, "remote": "https://github.com/acme/api.git", "branch": "main",
+                            "session": "session-1", "tool": "claude-code"}
+    # The model is given the answer as the server worded it, non-ASCII and all; the developer is told it was asked.
+    assert said["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit",
+                                          "additionalContext": fake.asked["context"]}
+    assert said["systemMessage"] == fake.asked["notice"] and "decision" not in said
+    # From a folder that is no repository it is asked all the same.
+    outside = tmp_path / "notes"
+    outside.mkdir()
+    again = output(run("hook", "prompt", stdin=event("UserPromptSubmit", outside, prompt=asking), cwd=outside))
+    assert again["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
+    assert fake.calls("/ask")[-1]["body"]["remote"] == ""
+
+
+def test_a_slow_answer_is_waited_for_over_several_short_calls_and_then_given_up_on(run, fake, repo):
+    signed_in(run, fake)
+    fake.check = QUESTION
+    fake.slow = 2
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="What is Priya doing?")))
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
+    first, second, third = fake.calls("/ask")
+    assert first["body"]["question"] == "What is Priya doing?"
+    assert second["body"] == third["body"] == {"waiting": "msg_9", "tool": "claude-code"}
+    # One that never comes: the model has the message as it is, and the developer is told where the answer will be.
+    fake.requests.clear()
+    fake.slow = 99
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="What is Priya doing?")))
+    assert said == {"systemMessage": "Vyavastha is still working on the answer."} and len(fake.calls("/ask")) == 6
+
+
+def test_a_question_with_no_answer_goes_to_the_model_as_it_is_with_a_note(run, fake, repo):
+    signed_in(run, fake)
+    fake.check = QUESTION
+    fake.asked = {"status": "failed", "answer": "", "context": "", "conversation_id": None, "url": None,
+                  "notice": "The assistant model couldn’t answer. Your message is saved; try again."}
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="What is Priya doing?")))
+    assert said == {"systemMessage": fake.asked["notice"]}
+    fake.status["/ask"] = 500
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="What is Priya doing?")))
+    assert said == {"systemMessage": "Vyavastha: your question couldn’t be asked just now, so Claude answers by itself."}
+
+
+def test_the_model_can_ask_vyavastha_itself_in_the_session_the_developer_last_wrote_in(run, fake, repo):
+    assert "Not signed in" in run("ask", "What is Priya doing?", cwd=repo).stdout and fake.calls("/ask") == []
+    signed_in(run, fake)
+    run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="session-7", prompt="Fix the rounding"))
+    done = run("ask", "What is Priya doing?", cwd=repo)
+    assert done.stdout.startswith(fake.asked["answer"]) and "http://127.0.0.1/c/cnv_1" in done.stdout
+    assert TOKEN not in done.stdout
+    assert fake.calls("/ask")[-1]["body"] == {"question": "What is Priya doing?", "branch": "main",
+                                              "remote": "https://github.com/acme/api.git", "session": "session-7",
+                                              "tool": "claude-code"}
+    fake.asked = {"status": "pending", "answer": "", "context": "", "notice": "Vyavastha is still working on it."}
+    assert run("ask", "And Sam?", cwd=repo).stdout.strip() == "Vyavastha gave no answer: Vyavastha is still working on it."
+    assert "Usage" in run("ask", cwd=repo).stdout
+    # A session's start tells the model what Vyavastha is for and the command that asks it, by this script's path.
+    told = output(run("hook", "session-start", stdin=event("SessionStart", repo)))["hookSpecificOutput"]
+    assert told["hookEventName"] == "SessionStart"
+    assert f'sh "{SCRIPT}" ask "<the question>"' in told["additionalContext"]
+    codex = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))
+    assert f'VYAVASTHA_TOOL=codex sh "{SCRIPT}" ask' in codex["hookSpecificOutput"]["additionalContext"]
 
 
 def test_a_repository_not_connected_is_said_once_a_session(run, fake, repo):
@@ -388,7 +480,7 @@ def test_under_codex_the_script_names_codex_and_says_which_tool_it_is(run, fake,
     assert "Send “vyavastha sign in” to connect" in said and "Claude" not in said and "/vyavastha:" not in said
     signed_in(run, fake)
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))["systemMessage"]
-    assert said.endswith("before Codex changes code.") and "Claude" not in said
+    assert "before Codex changes code" in said and "Claude" not in said
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days"), tool="codex")
     (sent,) = fake.calls("/check")
     assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"].startswith("vyavastha-codex/")

@@ -207,6 +207,25 @@ def main() -> int:
         said = hook("prompt", "UserPromptSubmit", repo, prompt="What does this repository do?")
         expect(said == {}, "a question goes to Claude untouched")
 
+        step("UserPromptSubmit: a question about the team, asked in Vyavastha as in its web app’s chat")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="What has my team said about customer_plan?")
+        context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        expect(context.startswith("Vyavastha’s assistant answered this message") and "customer_plan" in context,
+               "Claude is given the assistant’s answer, to pass on")
+        expect("Answered from your team’s record" in said.get("systemMessage", ""), "Sam is told it was asked there")
+        chats = sam.ok("GET", "/conversations")
+        expect(len(chats) == 1, "the question and its answer are a chat of Sam’s in the web app")
+        outside = work / "notes"
+        outside.mkdir()
+        said = hook("prompt", "UserPromptSubmit", outside, prompt="Vyavastha, what is my team working on?")
+        expect(bool(said.get("hookSpecificOutput", {}).get("additionalContext")),
+               "from a folder that is no repository it is asked all the same")
+        asked = plugin("ask", "Who said what about customer_plan?", cwd=repo)
+        print("  ask printed: " + asked.strip().replace("\n", "\n  ")[:600])
+        expect("From Vyavastha, the team’s record" in asked, "the tool’s model can ask Vyavastha itself")
+        expect(len(sam.ok("GET", "/conversations")) == 1, "all in the one chat of this session")
+        expect(ganesh.ok("GET", "/conversations") == [], "and nobody else has it")
+
         step("Claude edits a file (PostToolUse), then stops (Stop)")
         (repo / "api" / "serializers.py").write_text("FIELDS = ['id', 'subscription_tier']\n")
         (repo / "api" / "notes.md").write_text("customer_plan is gone from the response.\n")

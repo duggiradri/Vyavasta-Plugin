@@ -1,5 +1,6 @@
 #!/bin/sh
-# Vyavastha for Claude Code and Codex: the hooks the coding tool runs, and the sign-in, sign-out and status commands.
+# Vyavastha for Claude Code and Codex: the hooks the coding tool runs, and the sign-in, sign-out, status and ask
+# commands.
 #
 # Written for POSIX sh with git, curl and awk only. Claude Code runs a hook's command through sh on macOS and
 # Linux and through Git Bash on Windows; this plugin needs git, and on Windows git comes as Git for Windows,
@@ -7,14 +8,16 @@
 #
 # What it sends: the request's words to the check, the repository's GitHub remote (without any credentials in
 # it), the branch, Claude Code's session id, and for each changed file its path, git's status and line counts.
-# Never the conversation transcript, what a file holds, or environment variables. Every failure is quiet and lets
-# Claude go on: our server being down never stops the developer's work.
+# A message that asks about the team is sent on as a question to the developer's own assistant in Vyavastha, which
+# keeps it in a chat of theirs, as its web app does. Never the conversation transcript, what a file holds, or
+# environment variables. Every failure is quiet and lets Claude go on: our server being down never stops the
+# developer's work.
 
 umask 077
 LC_ALL=C
 export LC_ALL
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTHA_TOOL=codex). The tool's own name,
@@ -27,12 +30,19 @@ case "${VYAVASTHA_TOOL:-}" in
     CLIENT="claude-code"; TOOL="Claude Code"; AGENT="Claude"; VERB="Run"; VERB_LOWER="run"
     CMD_SIGN_IN="/vyavastha:sign-in"; CMD_SIGN_OUT="/vyavastha:sign-out"; CMD_STATUS="/vyavastha:status" ;;
 esac
+# This script, by its full path: what the tool's model is told to run to ask Vyavastha a question.
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+case "$CLIENT" in codex) ASK_WITH="VYAVASTHA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
 HOME_DIR="${VYAVASTHA_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/vyavastha}"
 CREDENTIALS="$HOME_DIR/credentials"
 PENDING="$HOME_DIR/pairing"
 SESSIONS="$HOME_DIR/sessions"
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
+# How long one call for the answer to a question may take, and how many more calls wait on for an answer that is
+# not ready: the assistant may read the record and look things up, and no call stays open for long.
+ASK_SECONDS=55
+ASK_AGAIN=5
 REPORT_SECONDS=8
 QUICK_SECONDS=8
 # A report after an edit waits this long after the last one; once the server can't be reached, nothing is tried
@@ -104,9 +114,21 @@ json_get() {
     }' "$1" 2>/dev/null
 }
 
-# A JSON string's text (the quotes taken off, simple escapes undone): for ids, paths and words compared here.
+# A JSON string's text (the quotes taken off, its escapes undone): for ids, paths, words compared here, and an
+# answer printed as it was written.
 json_text() {
   printf '%s' "$1" | awk '
+    function hex(h,   v, k, c) {
+      v = 0; h = tolower(h)
+      for (k = 1; k <= length(h); k++) { c = index("0123456789abcdef", substr(h, k, 1)); if (c == 0) return 63; v = v * 16 + c - 1 }
+      return v
+    }
+    function utf8(u) {
+      if (u < 128) return sprintf("%c", u)
+      if (u < 2048) return sprintf("%c%c", 192 + int(u / 64), 128 + u % 64)
+      if (u < 65536) return sprintf("%c%c%c", 224 + int(u / 4096), 128 + int(u / 64) % 64, 128 + u % 64)
+      return sprintf("%c%c%c%c", 240 + int(u / 262144), 128 + int(u / 4096) % 64, 128 + int(u / 64) % 64, 128 + u % 64)
+    }
     BEGIN { RS = "\001" }
     NR == 1 {
       s = $0
@@ -117,7 +139,15 @@ json_text() {
         if (c == "\\") {
           d = substr(s, i + 1, 1)
           if (d == "n") out = out "\n"; else if (d == "t") out = out "\t"; else if (d == "r") out = out "\r"
-          else if (d == "u") { out = out "?"; i += 4 } else out = out d
+          else if (d == "u") {
+            # \uXXXX, and a pair of them for a character beyond the first 65536, as the bytes of UTF-8.
+            u = hex(substr(s, i + 2, 4)); i += 4
+            if (u >= 55296 && u <= 56319 && substr(s, i + 2, 2) == "\\u") {
+              low = hex(substr(s, i + 4, 4))
+              if (low >= 56320 && low <= 57343) { u = 65536 + (u - 55296) * 1024 + (low - 56320); i += 6 }
+            }
+            out = out utf8(u)
+          } else out = out d
           i += 2
         } else { out = out c; i++ }
       }
@@ -231,6 +261,20 @@ api() {
 }
 
 answer() { json_get "$TMP/answer" "$1"; }
+
+# ask_vyavastha BODYFILE: puts a question to the developer's own assistant and waits for its answer, over as many
+# calls as it takes (each names the answer the one before was waiting for). Leaves the last answer in $TMP/answer.
+ask_vyavastha() {
+  api POST /ask "$1" "$ASK_SECONDS"
+  tries=0
+  while [ "$STATUS" = "200" ] && [ "$(json_text "$(answer status)")" = "pending" ] && [ "$tries" -lt "$ASK_AGAIN" ]; do
+    waiting=$(answer waiting)
+    case "$waiting" in \"*\") ;; *) break ;; esac
+    printf '{"waiting":%s,"tool":"%s"}' "$waiting" "$CLIENT" > "$TMP/waiting"
+    api POST /ask "$TMP/waiting" "$ASK_SECONDS"
+    tries=$((tries + 1))
+  done
+}
 
 # A call made with no token: starting a pairing, and taking the token it gives.
 api_unsigned() {
@@ -392,7 +436,11 @@ hook_session_start() {
   case "$STATUS" in
     200)
       json_get "$TMP/answer" workspace > "$TMP/workspace"
-      say "${CONNECTED:-Vyavastha: signed in as $(json_text "$(answer email)") in $(json_text "$(json_get "$TMP/workspace" name)").} Requests are checked against your team’s record before ${AGENT} changes code."
+      # The developer is told they are connected; the tool's model is told what Vyavastha is here for, and how
+      # to ask it what the plugin did not already ask for them.
+      printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
+        "$(json_quote "${CONNECTED:-Vyavastha: signed in as $(json_text "$(answer email)") in $(json_text "$(json_get "$TMP/workspace" name)").} Requests are checked against your team’s record before ${AGENT} changes code, and questions about your team are answered from it.")" \
+        "$(json_quote "Vyavastha is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavastha answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavastha before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" . Changes to the code are yours to make on this computer; each request for one is checked against the record before it reaches you.")"
       ;;
     401) say "Vyavastha: this computer’s connection has ended. ${VERB} ${CMD_SIGN_IN} to connect again." ;;
     *) say "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual." ;;
@@ -428,6 +476,8 @@ hook_prompt() {
     return
   fi
   rm -f "$dir/held"
+  # The session a question asked by the tool's model belongs to (``ask``): the one a message was last sent in.
+  basename "$dir" > "$HOME_DIR/session" 2>/dev/null
   finish_pairing
   if [ -z "$TOKEN" ]; then
     say_once "$dir" signed-out "Vyavastha: not signed in, so this request wasn’t checked against your team’s record. ${VERB} ${CMD_SIGN_IN} to connect."
@@ -435,7 +485,8 @@ hook_prompt() {
   fi
   folder=$(json_text "$(json_get "$input" cwd)")
   [ -n "$folder" ] || folder="${CLAUDE_PROJECT_DIR:-$PWD}"
-  repository "$folder" || return
+  # A folder that is no repository has nothing to check, and a question about the team can still be asked from it.
+  if repository "$folder"; then :; else ROOT=""; REMOTE=""; BRANCH=""; fi
   if offline; then
     say_once "$dir" offline "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual."
     return
@@ -449,6 +500,17 @@ hook_prompt() {
     429) say_once "$dir" busy "Vyavastha: too many requests just now, so this one wasn’t checked. ${AGENT} works as usual."; return ;;
     *) say_once "$dir" offline "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual."; return ;;
   esac
+  if [ "$(answer ask)" = "true" ]; then
+    # A question for the developer's own assistant in Vyavastha: asked there, in this session's chat, and the
+    # answer is given to the tool's model to pass on. When no answer comes, the model has the message as it is.
+    printf '{"question":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s"}' "$prompt" "$(json_quote "$REMOTE")" \
+      "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$dir")")" "$CLIENT" > "$TMP/ask"
+    ask_vyavastha "$TMP/ask"
+    if [ "$STATUS" != "200" ]; then
+      say "Vyavastha: your question couldn’t be asked just now, so ${AGENT} answers by itself."
+      return
+    fi
+  fi
   notice=$(answer notice)
   context=$(answer context)
   if [ -n "${CONNECTED:-}" ]; then
@@ -594,6 +656,38 @@ command_status() {
   esac
 }
 
+# A question for the developer's own assistant in Vyavastha, asked by the tool's model or from a terminal: the
+# answer as text, or why there is none.
+command_ask() {
+  if [ -z "$1" ]; then
+    echo "Usage: vyavastha.sh ask \"<a question about your team, in plain words>\""
+    return
+  fi
+  finish_pairing
+  if [ -z "$TOKEN" ]; then
+    echo "Not signed in to Vyavastha on this computer, so nothing can be asked. The developer signs in with ${CMD_SIGN_IN}."
+    return
+  fi
+  if repository "${HERE:-${CLAUDE_PROJECT_DIR:-$PWD}}"; then :; else REMOTE=""; BRANCH=""; fi
+  session="${VYAVASTHA_SESSION:-$(cat "$HOME_DIR/session" 2>/dev/null)}"
+  printf '{"question":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s"}' "$(json_quote "$1")" \
+    "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$session")" "$CLIENT" > "$TMP/ask"
+  ask_vyavastha "$TMP/ask"
+  case "$STATUS" in
+    200)
+      said=$(json_text "$(answer answer)")
+      if [ -n "$said" ]; then
+        printf '%s\n\nFrom Vyavastha, the team’s record. The same chat there: %s\n' "$said" "$(json_text "$(answer url)")"
+      else
+        printf 'Vyavastha gave no answer: %s\n' "$(json_text "$(answer notice)")"
+      fi
+      ;;
+    401) echo "This computer’s connection to Vyavastha has ended, so nothing was asked. The developer signs in again with ${CMD_SIGN_IN}." ;;
+    429) echo "Too many requests to Vyavastha just now. Ask again in a minute." ;;
+    *) echo "Vyavastha can’t be reached right now, so nothing was asked." ;;
+  esac
+}
+
 command_use_server() {
   case "$1" in
     "") rm -f "$HOME_DIR/server"; echo "Using $DEFAULT_SERVER." ;;
@@ -629,8 +723,9 @@ main() {
     sign-in) command_sign_in ;;
     sign-out) command_sign_out ;;
     status) command_status ;;
+    ask) shift; command_ask "$*" ;;
     use-server) command_use_server "${2:-}" ;;
-    *) echo "Usage: vyavastha.sh sign-in | sign-out | status | use-server [address] | hook <event>" ;;
+    *) echo "Usage: vyavastha.sh sign-in | sign-out | status | ask \"<question>\" | use-server [address] | hook <event>" ;;
   esac
 }
 
