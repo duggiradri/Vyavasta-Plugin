@@ -1,8 +1,8 @@
 {
   "name": "vyavastha",
   "displayName": "Vyavastha",
-  "version": "0.4.0",
-  "description": "Checks each request against what your team has said and decided before Claude changes code, answers your questions about your team from its record, and tells teammates which files are changing.",
+  "version": "0.4.1",
+  "description": "Checks your requests against what your team has said and decided before Claude changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents.",
   "author": {
     "name": "Vyavastha",
     "url": "https://vyavasta.com"

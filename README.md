@@ -1,8 +1,10 @@
+<p align="center"><img src="plugins/vyavastha/assets/logo.png" alt="" width="96" height="96"></p>
+
 # Vyavastha for Claude Code and Codex
 
 One plugin for two coding tools, laid out as its own private plugin marketplace. With it, Claude Code or Codex on your own computer works with your team’s Vyavastha workspace. What follows says Claude; under Codex it is the same, with Codex in its place.
 
-The plugin is **off in every project** until you send `vyavastha on` there. Off, it does nothing and sends nothing; only its own commands are answered. On:
+The plugin is **off in every project** until you send `vyavastha on` there. Off, it sends nothing; only its own commands are answered, and a question about using it is explained to Claude. On:
 
 - **Before Claude changes code**, your request is checked against what your team has said and decided, reading only what you can read in Vyavastha. When something stands in the way, the request is held and you are told who said what. To go ahead anyway, send `Plan it anyway`.
 - **When you ask about your team**, the question goes to your own assistant in Vyavastha, the one that answers in its web app’s chat, and Claude gives you its answer. Ask as you would there (“See what Priya is doing”), or speak to it by name (“Vyavastha, what is new?”). The questions of one session are one chat, which you also find in the web app.
@@ -13,6 +15,14 @@ The plugin is **off in every project** until you send `vyavastha on` there. Off,
 - **Teammates’ agents.** Each person has an agent that teammates can ask about their work. You can ask a teammate’s agent a question, which it answers only from what you can both already see, and the teammate sees what you asked. Your own agent answers your teammates the same way, and you see everything they asked. At the start of a session you are told what teammates asked of you while you were away.
 
 The web app stays the place for setup, the record, your team and review. You approve this computer there, and you can disconnect it there (Settings, Account, Connected tools).
+
+## The first time you use it
+
+- **Sign-in opens by itself.** In the first session after you install the plugin, if this computer isn’t signed in yet, Vyavastha’s Connect page opens in your browser and the session’s first line gives you its code and address. Sign in there if asked, type the code, check the computer’s name, and press **Connect**. Once you approve, your next message finishes connecting, in any project, and says so in one line. The project stays off, and nothing else is sent.
+- **Then send `vyavastha on`** in each project you want it in. If you start a session in a project that is on while signed out, sign-in starts by itself there too, once.
+- **A sign-in that waits is never started twice.** Until you approve it, every line about it repeats the same code and address and no second page opens. A code lasts 10 minutes, and asking to sign in again says how many are left. Once it has run out, the next sign-in starts afresh with a new code.
+- **To find out how to use it,** send `vyavastha` or `vyavastha help`, or ask in your own words, such as `vyavastha how do I sign in` or `vyavastha what can you do`. Help opens with the three steps to start and whether each is done. A question to your team that starts with Vyavastha’s name, such as “Vyavastha, what is Priya working on?”, still goes to your team’s record.
+- **You can also just ask Claude.** When a short message asks about the plugin itself, such as “How do I sign in to Vyavastha?” or “What does the Vyavastha plugin send?”, the plugin gives Claude the exact phrases to tell you, without sending anything anywhere. A question put to your team, or one that only mentions Vyavastha, gets no such guidance. Claude can’t send these phrases for you: you send them as messages of your own.
 
 ## Install in Claude Code (for a tester)
 
@@ -27,13 +37,15 @@ You need Claude Code, git, and access to this repository.
 
    For a copy on your disk, give its folder instead: `/plugin marketplace add /path/to/vyavastha-plugin`. From a terminal, the same two steps are `claude plugin marketplace add duggiradri/Vyavastha-Plugin` and `claude plugin install vyavastha@vyavastha`.
 
-2. Start a new session (or run `/reload-plugins`) in your project, and send:
+2. Start a new session (or run `/reload-plugins`). The first session opens Vyavastha’s Connect page in your browser and shows a code: enter it there and press **Connect**.
+
+3. In your project, send:
 
    ```
    vyavastha on
    ```
 
-   If you aren’t signed in yet, Vyavastha’s Connect page opens in your browser and the answer shows a code. Sign in there if asked, type the code, check the computer’s name, and press **Connect**. Your next message finishes connecting.
+   If you aren’t signed in yet, the answer gives the sign-in code again (or starts a new sign-in), and your next message finishes connecting.
 
 ## Install in Codex (for a tester)
 
@@ -42,20 +54,27 @@ You need Codex, git, and access to this repository. The same script runs under b
 1. From a terminal, add the marketplace: `codex plugin marketplace add duggiradri/Vyavastha-Plugin`.
 2. Install the plugin named Vyavastha from that marketplace in Codex’s plugin list, and restart Codex.
 3. Approve the plugin’s hooks once: Codex runs no hook until you have reviewed and trusted it. In the terminal, open `/hooks`; in the desktop app, choose **Review hooks**. Codex asks again after each update of the plugin.
-4. In your project, send `vyavastha on` as a message of its own, and sign in as above.
+4. Start a new session. The first one opens Vyavastha’s Connect page in your browser and shows a code: enter it there and press **Connect**.
+5. In your project, send `vyavastha on` as a message of its own.
 
 Codex has no plugin slash commands, so every command is a message. Under Codex the report of changed files also follows shell commands, because Codex often edits files that way. Codex tasks that run in the cloud don’t run a plugin’s hooks, so nothing is checked there. Codex runs the commands its own model starts in a closed-off space that can’t write the plugin’s settings folder or reach the internet. When that keeps a command from Vyavastha, the plugin says so; send the same thing as a message instead (a question as a message that starts with “Vyavastha,”), because messages aren’t closed off.
 
 ## Commands
 
-Each is sent as a message of its own, in either tool; case and a trailing full stop don’t matter. The plugin answers it and the model never sees it. In Claude Code most are also slash commands (`/vyavastha:on`, `/vyavastha:status`, …); `ask`, `assign`, `reply`, `start`, `done` and `decline` are typed only, because a slash command never passes your words to a shell.
+Each is sent as a message of its own, in either tool; case and a trailing full stop don’t matter. The plugin answers it and the model never sees it. In Claude Code the plugin’s `guide` skill holds the same guidance, so Claude can explain the plugin when you ask it. In Claude Code most are also slash commands (`/vyavastha:on`, `/vyavastha:status`, …); `ask`, `assign`, `reply`, `start`, `done` and `decline` are typed only, because a slash command never passes your words to a shell.
+
+`vyavastha help` (or `vyavastha` alone, `vyavastha ?`, or a question such as `vyavastha how do I sign in`) shows what Vyavastha does, the three steps to start with whether each is done, and every command.
 
 Start here
-- `vyavastha on` / `vyavastha off`: use Vyavastha in this project, or stop. Off keeps your code-sharing and summaries choices.
+1. Sign in: send `vyavastha sign in`. The sign-in page opens in your browser with a code to enter; once you approve, your next message finishes connecting.
+2. Turn it on in this project: send `vyavastha on`. Off is the default in every project.
+3. Then just work. Every message gets one line from Vyavastha saying what was sent, and what came of it.
+
+Your setup
 - `vyavastha status`: whether you’re signed in, and whether this project, code sharing and summaries are on.
 - `vyavastha check`: tests that git, curl and awk are there, that the settings folder can be written, the server address, that the server answers, sign-in, that this folder is a repository on GitHub that Vyavastha reads for you, that the project, code sharing and summaries are on, and the plugin’s version. Each line says “ok” or the problem and how to fix it.
-- `vyavastha sign in` / `vyavastha sign out`: connect or disconnect this computer.
-- `vyavastha help`: the commands.
+- `vyavastha off`: stop using Vyavastha in this project. Off keeps your code-sharing and summaries choices.
+- `vyavastha sign out`: disconnect this computer.
 
 See what is shared
 - `vyavastha settings`: each setting with its value and how to change it.
@@ -76,7 +95,7 @@ Every message to or from another person’s agent opens with a header line, such
 
 ## What it sends, and what it keeps
 
-From a project that is off: nothing, ever.
+From a project that is off: nothing, except that the first session on a computer that isn’t signed in starts sign-in, which sends the computer’s name and which tool it is. While that sign-in waits for your approval, each message asks Vyavastha’s server once whether you have approved it, sending only the sign-in’s own reference and never the message; this stops once you are connected or the code has run out.
 
 From a project that is on:
 
@@ -99,7 +118,7 @@ From a project that is on:
 - **Back from the server:** facts with their sources (who said what, when and where, and what the check made of them), and the answer to a question, shown to Claude as context. The plugin makes no model calls of its own on your Claude subscription.
 - **On your computer:** the token, in `~/.config/vyavastha/credentials` (or `$XDG_CONFIG_HOME/vyavastha`, or `$VYAVASTHA_HOME`), readable by you only (`chmod 600`, in a `700` folder); both tools share it. A token is never sent to any server but the one that issued it. Which projects are on, and whether code sharing and summaries are on for each and whether you were told what summaries do, are kept in `projects/` in the same folder, and short-lived notes for each session in `sessions/`, removed after a week.
 
-If you aren’t signed in, the server can’t be reached, or it isn’t working, Claude works as usual and the message’s line says what happened in one plain sentence. A slow check gives up after about a minute and Claude goes on; sending a reply at the end of a turn gives up after 4 seconds, and isn’t tried when the server was just found out of reach; a slow answer to a question is left in your chat in Vyavastha. The plugin never writes git’s own index or takes its lock, so your git commands and Claude’s never collide with it, and in a project that is off it doesn’t even read your messages.
+If you aren’t signed in, the server can’t be reached, or it isn’t working, Claude works as usual and the message’s line says what happened in one plain sentence. A slow check gives up after about a minute and Claude goes on; sending a reply at the end of a turn gives up after 4 seconds, and isn’t tried when the server was just found out of reach; a slow answer to a question is left in your chat in Vyavastha. The plugin never writes git’s own index or takes its lock, so your git commands and Claude’s never collide with it, and in a project that is off it looks only at the message itself, never the folder it was sent from: whether it starts with “vyavastha” and, for a message of 2,000 characters or fewer, whether it names Vyavastha. Any other message isn’t read at all.
 
 ## Why a shell script
 
@@ -143,10 +162,14 @@ To run Vyavastha in demo mode on this Mac and point the plugin at it:
 
    Then send `vyavastha on` and approve the code in the browser. Ask for something like “Remove customer_plan from the API response”. The demo has no model, so it holds nothing, but Claude is shown what the team’s record says about the request.
 
+## The logo
+
+The mark is a seal of red wax pressed with the Devanagari letter व, the same drawing as in Vyavastha’s web app: `plugins/vyavastha/assets/logo.svg`, with `logo.png` (512 by 512) and `composer-icon.png` (64 by 64, the letter drawn for small sizes, without the ring) made from it. Codex shows them in its plugin list and composer, with the brand colour #9A2219, as `.codex-plugin/plugin.json` names them. Claude Code shows no logo for a plugin from a private marketplace, so its `plugin.json` names none.
+
 ## Tests
 
 ```
-python3 -m pytest tests -q                                          # the hook script against a fake server
+python3 -m pytest tests -q -n 8                                     # the hook script against a fake server
 python3 tests/end_to_end.py --project /path/to/MAS_Stealth --port 8804   # the whole loop against a demo server
 claude plugin validate . && claude plugin validate plugins/vyavastha
 ```

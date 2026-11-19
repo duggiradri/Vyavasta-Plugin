@@ -1,7 +1,7 @@
 {
   "name": "vyavastha",
-  "version": "0.4.0",
-  "description": "Checks each request against what your team has said and decided before Codex changes code, answers your questions about your team from its record, and tells teammates which files are changing.",
+  "version": "0.4.1",
+  "description": "Checks your requests against what your team has said and decided before Codex changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents.",
   "author": {
     "name": "Vyavastha",
     "url": "https://vyavasta.com"
@@ -17,13 +17,16 @@
   "skills": "./codex/skills/",
   "interface": {
     "displayName": "Vyavastha",
-    "shortDescription": "Checks each request against what your team has decided.",
-    "longDescription": "Before Codex changes code, your request is checked against what your team has said and decided. When something stands in the way, the request is held and you are told who said what. After files change, teammates see which ones.",
+    "shortDescription": "Your team’s record, in Codex: checks, summaries and answers.",
+    "longDescription": "Once you turn it on in a project, Vyavastha checks each request against what your team has said and decided before Codex changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents. Send “vyavastha help” to see how to start.",
     "developerName": "Vyavastha",
     "category": "Productivity",
     "capabilities": [
       "Read"
     ],
-    "websiteURL": "https://vyavasta.com"
+    "websiteURL": "https://vyavasta.com",
+    "logo": "./assets/logo.png",
+    "composerIcon": "./assets/composer-icon.png",
+    "brandColor": "#9A2219"
   }
 }

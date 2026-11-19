@@ -5,8 +5,11 @@
 # Linux and through Git Bash on Windows; this plugin needs git, and on Windows git comes as Git for Windows,
 # which brings Git Bash, curl and awk with it. No Python, Node or jq is assumed.
 #
-# The plugin is off in every project until the developer sends “vyavastha on” there; off, a hook does nothing and
-# prints nothing, and only the plugin's own commands are answered.
+# The plugin is off in every project until the developer sends “vyavastha on” there; off, a hook sends nothing: only
+# the plugin's own commands are answered, a message that asks how to use Vyavastha gives the tool's model the phrases
+# to tell the developer, and the first session on a computer that isn't signed in starts signing in. While that
+# sign-in waits for approval, each message asks the server once whether it was approved, sending only the sign-in's
+# own reference, never the message.
 #
 # What it sends from a project that is on: the words of each message to the check, the repository's GitHub remote
 # (without any credentials in it), the branch, the tool's session id, and for each changed file its path, git's
@@ -30,19 +33,21 @@ export GIT_OPTIONAL_LOCKS
 # plain sentence instead.
 [ -n "${VYAVASTHA_DEBUG:-}" ] || exec 2>/dev/null
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTHA_TOOL=codex). The tool's own name,
 # what its model is called, and how its developer gives this plugin a command.
 case "${VYAVASTHA_TOOL:-}" in
   codex)
-    CLIENT="codex"; TOOL="Codex"; AGENT="Codex"; VERB="Send"; VERB_LOWER="send"
-    CMD_SIGN_IN="“vyavastha sign in”"; CMD_SIGN_OUT="“vyavastha sign out”"; CMD_STATUS="“vyavastha status”" ;;
+    CLIENT="codex"; TOOL="Codex"; AGENT="Codex"; VERB="Send"; CMD_SIGN_OUT="“vyavastha sign out”" ;;
   *)
-    CLIENT="claude-code"; TOOL="Claude Code"; AGENT="Claude"; VERB="Run"; VERB_LOWER="run"
-    CMD_SIGN_IN="/vyavastha:sign-in"; CMD_SIGN_OUT="/vyavastha:sign-out"; CMD_STATUS="/vyavastha:status" ;;
+    CLIENT="claude-code"; TOOL="Claude Code"; AGENT="Claude"; VERB="Run"; CMD_SIGN_OUT="/vyavastha:sign-out" ;;
 esac
+# The way in, said the same way in every sentence about being signed out, in both tools: a message of its own, which
+# the plugin answers itself (in Claude Code the slash command does the same).
+WAY_IN="Send “vyavastha sign in” to connect."
+WAY_IN_AGAIN="Send “vyavastha sign in” to connect again."
 # This script, by its full path: what the tool's model is told to run to ask Vyavastha a question.
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 case "$CLIENT" in codex) ASK_WITH="VYAVASTHA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
@@ -60,6 +65,10 @@ ASK_AGAIN=5
 WAIT_FOR=240
 REPORT_SECONDS=8
 QUICK_SECONDS=8
+# A session's start may take 15 seconds in all, so each call it makes is shorter than that.
+START_SECONDS=4
+# How long a sign-in's code lasts, unless the server says it lasts less.
+PAIR_LASTS=600
 # Sending the turn's reply at its end never holds the tool up for longer than this.
 TURN_SECONDS=4
 # A report after an edit waits this long after the last one; once the server can't be reached, nothing is tried
@@ -521,13 +530,32 @@ api_unsigned() {
   TOKEN=$held_token
 }
 
-# A pairing started by sign-in and approved in the browser since: the token is taken now. Quiet either way.
+# A sign-in still waiting for approval: its code and page are kept with it (in PENDING), and while it waits it is
+# never started again and its page never opened again; every sentence about it repeats the code and the address. It
+# waits as long as the server said its code lasts (10 minutes unless it said otherwise). Sets PAIR_CODE and PAIR_PAGE
+# when one waits; a code that ran out is never shown.
+pending_waiting() {
+  PAIR_CODE=""; PAIR_PAGE=""
+  [ -f "$PENDING" ] || return 1
+  [ "$(sed -n 's/^server=//p' "$PENDING")" = "$SERVER" ] || return 1
+  pair_until=$(sed -n 's/^until=//p' "$PENDING")
+  case "$pair_until" in
+    ''|*[!0-9]*) pair_until=$(( $(sed -n 's/^started=//p' "$PENDING" | tr -cd '0-9') + 0 + PAIR_LASTS )) ;;
+  esac
+  [ "$(now)" -lt "$pair_until" ] || return 1
+  PAIR_CODE=$(sed -n 's/^code=//p' "$PENDING")
+  PAIR_PAGE=$(sed -n 's/^page=//p' "$PENDING")
+  [ -n "$PAIR_CODE" ] && [ -n "$PAIR_PAGE" ]
+}
+
+# A pairing started by sign-in and approved in the browser since: the token is taken now. Quiet either way. A pairing
+# is claimed for a minute after its code ran out, as one approved at its last moment may still be.
 finish_pairing() {
   [ -f "$PENDING" ] || return 0
   pending_server=$(sed -n 's/^server=//p' "$PENDING")
   device=$(sed -n 's/^device=//p' "$PENDING")
   started=$(sed -n 's/^started=//p' "$PENDING")
-  if [ "$pending_server" != "$SERVER" ] || [ -z "$device" ] || [ $(( $(now) - ${started:-0} )) -gt 660 ]; then
+  if [ "$pending_server" != "$SERVER" ] || [ -z "$device" ] || [ $(( $(now) - ${started:-0} )) -gt $((PAIR_LASTS + 60)) ]; then
     rm -f "$PENDING"
     return 0
   fi
@@ -546,20 +574,12 @@ finish_pairing() {
   return 0
 }
 
-# Starts connecting this computer: a pairing the developer approves in the browser, whose page is opened. A
-# pairing started a moment ago is used again rather than replaced. Sets PAIR_CODE and PAIR_PAGE, or PAIR_FAILED
-# with the reason.
+# Starts connecting this computer: a pairing the developer approves in the browser, whose page is opened. A sign-in
+# still waiting is used as it is, and its page is not opened again (PAIR_AGAIN is then set). Sets PAIR_CODE and
+# PAIR_PAGE, or fails with PAIR_FAILED set to the reason.
 start_pairing() {
-  PAIR_CODE=""; PAIR_PAGE=""; PAIR_FAILED=""
-  if [ -f "$PENDING" ] && [ "$(sed -n 's/^server=//p' "$PENDING")" = "$SERVER" ]; then
-    started=$(sed -n 's/^started=//p' "$PENDING")
-    PAIR_CODE=$(sed -n 's/^code=//p' "$PENDING")
-    PAIR_PAGE=$(sed -n 's/^page=//p' "$PENDING")
-    if [ -n "$PAIR_CODE" ] && [ -n "$PAIR_PAGE" ] && [ $(( $(now) - ${started:-0} )) -lt 540 ]; then
-      open_page "$PAIR_PAGE"
-      return 0
-    fi
-  fi
+  PAIR_FAILED=""; PAIR_AGAIN=""
+  if pending_waiting; then PAIR_AGAIN=1; return 0; fi
   machine=$(hostname | cut -d. -f1)
   [ -n "$machine" ] || machine=$(uname -n)
   printf '{"machine":%s,"tool":"%s"}' "$(json_quote "$machine")" "$CLIENT" > "$TMP/pair"
@@ -572,12 +592,67 @@ start_pairing() {
   device=$(json_text "$(answer device_code)")
   PAIR_CODE=$(json_text "$(answer user_code)")
   PAIR_PAGE=$(json_text "$(answer verification_url)")
+  lasts=$(answer expires_in)
+  case "$lasts" in ''|*[!0-9]*) lasts=$PAIR_LASTS ;; esac
+  [ "$lasts" -le "$PAIR_LASTS" ] || lasts=$PAIR_LASTS
+  if [ -z "$device" ] || [ -z "$PAIR_CODE" ] || [ -z "$PAIR_PAGE" ]; then
+    PAIR_FAILED="Vyavastha’s server gave no code"
+    return 1
+  fi
+  started=$(now)
+  pair_until=$((started + lasts))
   mkdir -p "$HOME_DIR" && chmod 700 "$HOME_DIR"
-  printf 'server=%s\ndevice=%s\nstarted=%s\ncode=%s\npage=%s\n' "$SERVER" "$device" "$(now)" "$PAIR_CODE" \
-    "$PAIR_PAGE" > "$PENDING"
+  printf 'server=%s\ndevice=%s\nstarted=%s\nuntil=%s\ncode=%s\npage=%s\n' "$SERVER" "$device" "$started" \
+    "$((started + lasts))" "$PAIR_CODE" "$PAIR_PAGE" > "$PENDING"
   chmod 600 "$PENDING"
   open_page "$PAIR_PAGE"
   return 0
+}
+
+# Why sign-in couldn't start, as a sentence: the server's own words when it refused, else that it can't be reached.
+pair_failed_said() {
+  said="${PAIR_FAILED:-Vyavastha’s server can’t be reached}"
+  printf '%s.' "${said%.}"
+}
+
+# What finishes connecting once the developer approves: their next message, in any project (in a project that is
+# off, it only asks the server whether the sign-in was approved). A project that is off then still needs turning on.
+finish_said() {
+  if project_on; then printf '%s' "Once you approve, your next message finishes connecting."
+  else printf '%s' "Once you approve, your next message finishes connecting. Then send “vyavastha on” in each project you want it in."; fi
+}
+
+# How long the code of the sign-in just started or still waiting goes on working, as a sentence: from what the server
+# said when it started, as PENDING keeps it (pair_until), in whole minutes rounded up.
+code_lasts_said() {
+  left=$(( ${pair_until:-0} - $(now) ))
+  [ "$left" -gt 0 ] || return 0
+  minutes=$(( (left + 59) / 60 ))
+  if [ -n "${PAIR_AGAIN:-}" ]; then
+    if [ "$minutes" = "1" ]; then printf '%s' "The code works for 1 more minute."
+    else printf '%s' "The code works for $minutes more minutes."; fi
+  else printf '%s' "The code works for $(plural "$minutes" minute minutes)."; fi
+}
+
+# A sign-in that waits, in a project that is off, finished by the developer's next message: one quick call asks the
+# server whether it was approved, made only while its code still works and the server wasn't just found out of reach.
+# Nothing of the message is read or sent. Sets FINISHED_LINE to the one line saying so once it was approved, else
+# leaves it empty; quiet either way.
+finish_waiting_sign_in() {
+  FINISHED_LINE=""
+  pending_waiting || return 0
+  offline && return 0
+  QUICK_SECONDS=2
+  finish_pairing
+  [ -n "$CONNECTED" ] || return 0
+  FINISHED_LINE="Vyavastha: $(printf '%s' "$CONNECTED" | sed 's/^Connected/connected/') It is off in this project: sending “vyavastha on” here switches it on, and “vyavastha help” shows everything."
+}
+
+# Where to enter the code of the sign-in that was just started or still waits, as the middle of a sentence: “enter the
+# code … on the page that just opened in your browser (…)”, or for one already waiting, its page's address.
+code_said() {
+  if [ -n "${PAIR_AGAIN:-}" ]; then printf 'enter the code %s on the sign-in page (%s)' "$PAIR_CODE" "$PAIR_PAGE"
+  else printf 'enter the code %s on the page that just opened in your browser (%s)' "$PAIR_CODE" "$PAIR_PAGE"; fi
 }
 
 # Opens a page in the developer's browser, or with the command VYAVASTHA_BROWSER names when it is set. Only a web
@@ -951,12 +1026,6 @@ line() {
 # The same line when nothing at all was sent: why, in a few words, and what came of it.
 nothing_line() { printf 'Vyavastha · nothing sent (%s) · %s' "$1" "$2"; }
 
-# How the developer gives a command: a slash command in Claude Code, a message in Codex. $1 is the slash command's
-# name and $2 the typed phrase.
-how() {
-  case "$CLIENT" in codex) printf 'Send “vyavastha %s”' "$2" ;; *) printf 'Run /vyavastha:%s' "$1" ;; esac
-}
-
 # A conflict found in the real change, kept for the session from an answer that carries one: told by the check
 # after an edit, or when the tool stops, until the developer chooses to continue or stop. Fails when the answer
 # carries none, or one already kept or decided.
@@ -1000,15 +1069,15 @@ input_folder() {
 }
 
 hook_session_start() {
+  PAIR_FAILED=""
+  # The tool gives this hook 15 seconds in all: each call is short, and none is made while the server was just found
+  # out of reach.
+  QUICK_SECONDS=$START_SECONDS
   dir=$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")
   folder=$(input_folder)
   project_of "$folder"
   if ! project_on; then
-    # Off here: one line once on this computer, and nothing else ever.
-    if [ ! -f "$HOME_DIR/welcomed" ]; then
-      mkdir -p "$HOME_DIR" && true > "$HOME_DIR/welcomed"
-      say "Vyavastha is installed and off in this project. Send “vyavastha on” to use it here."
-    fi
+    welcome "$dir"
     return
   fi
   mkdir -p "$HOME_DIR" && true > "$HOME_DIR/welcomed"
@@ -1022,12 +1091,18 @@ hook_session_start() {
   else ROOT=""; REMOTE=""; fi
   # Sessions over a week old are forgotten.
   find "$SESSIONS" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
-  finish_pairing
+  offline || finish_pairing
   if [ -z "$TOKEN" ]; then
-    if [ -f "$PENDING" ]; then
-      say "Vyavastha: waiting for you to approve the connection in your browser. ${VERB} ${CMD_STATUS} once you have.$SUMMARIES_NOTE"
+    # Signed out in a project that is on: sign-in starts by itself, once, here (the session's first message then
+    # doesn't start it again); one still waiting is told again, with its code.
+    if pending_waiting; then
+      PAIR_AGAIN=1
+      say "Vyavastha: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
+    elif ! offline && start_pairing; then
+      true > "$dir/said-sign-in"
+      say "Vyavastha: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
     else
-      say "Vyavastha: not signed in, so nothing is checked yet. Your first message here opens the sign-in page, or ${VERB_LOWER} ${CMD_SIGN_IN} now.$SUMMARIES_NOTE"
+      say "Vyavastha: not signed in, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
     fi
     return
   fi
@@ -1061,9 +1136,40 @@ $(render_inbox "$items")"
         "$(json_quote "$greeting")" \
         "$(json_quote "Vyavastha is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavastha answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavastha before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" .$sandboxed Changes to the code are yours to make on this computer; each request for one is checked against the record before it reaches you. Messages that start with “vyavastha” are the developer’s commands to the plugin, which answers them itself.")"
       ;;
-    401) say "Vyavastha: this computer’s connection has ended. ${VERB} ${CMD_SIGN_IN} to connect again.$SUMMARIES_NOTE" ;;
+    401) say "Vyavastha: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
     *) say "Vyavastha: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
   esac
+}
+
+# A session in a project that is off. The first one on this computer welcomes the developer in one message, and
+# when nobody is signed in it starts signing in there and then (the Connect page opens and the message gives its
+# code); the project stays off and nothing else is sent. Later sessions say nothing, unless a sign-in is waiting: it
+# is finished when it was approved, and told again with its code when it still waits. $1 is the session folder.
+welcome() {
+  if [ ! -f "$HOME_DIR/welcomed" ]; then
+    mkdir -p "$HOME_DIR" && true > "$HOME_DIR/welcomed" || return 0
+    offline || finish_pairing
+    if [ -n "$TOKEN" ]; then
+      say "Vyavastha is installed and off in this project. Send “vyavastha on” to use it here, and “vyavastha help” to see everything it does."
+    elif pending_waiting; then
+      PAIR_AGAIN=1
+      say "Vyavastha is installed. To connect this computer, $(code_said). $(finish_said) “vyavastha help” shows everything."
+    elif ! offline && start_pairing; then
+      true > "$1/said-sign-in"
+      say "Vyavastha is installed. To connect this computer, $(code_said). $(finish_said) “vyavastha help” shows everything."
+    else
+      say "Vyavastha is installed, but sign-in couldn’t start: $(pair_failed_said) $WAY_IN Then send “vyavastha on” in each project you want it in. “vyavastha help” shows everything."
+    fi
+    return 0
+  fi
+  [ -f "$PENDING" ] && [ -z "$TOKEN" ] || return 0
+  offline || finish_pairing
+  if [ -n "$TOKEN" ]; then
+    say "Vyavastha: $(printf '%s' "$CONNECTED" | sed 's/^Connected/connected/') It is off in this project: send “vyavastha on” to use it here, and “vyavastha help” to see everything it does."
+  elif pending_waiting; then
+    PAIR_AGAIN=1
+    say "Vyavastha: a sign-in is waiting. To connect this computer, $(code_said). $(finish_said)"
+  fi
 }
 
 # What summaries do, said once in a project that has them on and was never told (turned on before this setting
@@ -1147,11 +1253,34 @@ render_inbox() {
 # The words of a message read as one of the plugin's commands. Sets TYPED (the command) and TYPED_ARG (a name or
 # number), and writes free text to $TMP/typed-text. A command is a message that is exactly the phrase, case and
 # trailing punctuation ignored; ask, assign and reply carry words after a name or number.
+#
+# A message that is “vyavastha” and words that ask how to use the plugin itself is help: the words, after “vyavastha”
+# with or without a comma, must be the whole of one of the shapes below (“help”, “how do I sign in”, “what can you
+# do”, “what does it send”, “how does it work”), so a question about the team that starts with Vyavastha's name
+# (“Vyavastha, what is Priya working on?”) and a longer request that only mentions it never are: those go on as they
+# always have.
 parse_typed() {
   TYPED=""; TYPED_ARG=""
   true > "$TMP/typed-text"
   printf '%s' "$1" | awk -v out="$TMP/typed-text" '
     function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
+    # Whether the words after “vyavastha” ask for help with the plugin itself, as a whole.
+    function helpish(a,   obj, verbs) {
+      gsub(/’/, "", a); gsub(sprintf("%c", 39), "", a); gsub(/[,;:]+/, " ", a); gsub(/ +/, " ", a); sub(/^ /, "", a); sub(/ $/, "", a)
+      sub(/^(hey|hi|hello|ok|okay|so) /, "", a); sub(/^please /, "", a); sub(/ please$/, "", a)
+      if (a == "" || a ~ /^[?]+$/) return 1
+      obj = "( (it|this|you|vyavastha|the plugin|this plugin|here|in this project|now|again|with (it|this|you|vyavastha)|to (it|this|vyavastha)|for (this project|me)))*"
+      verbs = "(use|start using|get started|start|begin|set up|setup|install|sign in|signin|log in|login|connect|sign out|turn on|turn off|turn (it|you|vyavastha) (on|off)|switch on|switch off|switch (it|you|vyavastha) (on|off)|enable|disable|stop|see the commands|see what it sends)"
+      if (a ~ ("^(help|help me|commands|the commands|usage|guide|instructions|getting started|get started|what now|options)" obj "$")) return 1
+      if (a ~ ("^help( me)? (with )?(signing in|sign in|setting up|set up|getting started|get started|using|connecting|connect)" obj "$")) return 1
+      if (a ~ ("^(how|where) (do|can|should|would) (i|we) " verbs obj "$")) return 1
+      if (a ~ ("^how to " verbs obj "$")) return 1
+      if (a ~ ("^how (does|do) (it|this|vyavastha|the plugin|you) work" obj "$")) return 1
+      if (a ~ ("^what (can|do|does|will|would) (you|it|this|vyavastha|the plugin|i) (do|send|share|keep|see)" obj "$")) return 1
+      if (a ~ /^what (is|are) (this|it|vyavastha|the plugin|this plugin|the commands|your commands|my options)$/) return 1
+      if (a ~ /^what commands (are there|do you have|can i use)$/) return 1
+      return 0
+    }
     BEGIN { RS = "\001" }
     NR == 1 {
       s = trim($0); low = tolower(s)
@@ -1172,7 +1301,10 @@ parse_typed() {
         exit
       }
       gsub(/[ \t\r\n-]+/, " ", low); sub(/[ .!?]+$/, "", low)
-      if (low !~ /^vyavastha( |$)/) exit
+      if (low !~ /^vyavastha( |$)/) {
+        if (low ~ /^vyavastha[,:]( |$)/ && helpish(substr(low, 11))) printf "help\t\n"
+        exit
+      }
       rest = substr(low, 11)
       if (rest == "") rest = "help"
       if (rest ~ /^(start|done|decline) #?[0-9]+$/) { split(rest, p, " "); sub(/^#/, "", p[2]); printf "%s\t%s\n", p[1], p[2]; exit }
@@ -1185,35 +1317,64 @@ parse_typed() {
       known["inbox"] = "inbox"; known["ask"] = "ask"; known["assign"] = "assign"; known["reply"] = "reply"
       known["start"] = "start"; known["done"] = "done"; known["decline"] = "decline"
       if (rest in known) printf "%s\t\n", known[rest]
+      else if (helpish(rest)) printf "help\t\n"
     }' > "$TMP/typed"
   TYPED=$(cut -f1 < "$TMP/typed")
   TYPED_ARG=$(cut -f2 < "$TMP/typed")
 }
 
+# A question about using the plugin is short: a message longer than this, as the hook's input writes it, is never
+# taken for one.
+GUIDE_LONGEST=2000
+
 # Whether the message the tool sent might be one of the plugin's commands: its first words, read straight from the
-# hook's input without decoding the rest, start with “vyavastha”. Costs a moment however long the message is.
+# hook's input without decoding the rest, start with “vyavastha” (0); or the message itself is short and names
+# Vyavastha, and may ask how to use it (2); or neither (1). Only the prompt's own value is looked at, never the rest of
+# the input (such as the folder it was sent from), and of it at most GUIDE_LONGEST characters, so this costs a moment
+# however long the message is.
 maybe_typed() {
-  awk 'BEGIN { RS = "\001"; found = 0 }
+  awk -v longest="$GUIDE_LONGEST" 'BEGIN { RS = "\001"; found = 1 }
     NR == 1 {
       s = $0
       while ((k = index(s, "\"prompt\"")) > 0) {
         s = substr(s, k + 8)
         if (match(s, /^[ \t\r\n]*:[ \t\r\n]*"/)) {
-          head = substr(s, RLENGTH + 1, 80)
+          value = substr(s, RLENGTH + 1, longest + 1)
+          head = substr(value, 1, 80)
           while (sub(/^([ \t]|\\[ntr])/, "", head)) {}
-          found = (tolower(substr(head, 1, 9)) == "vyavastha")
+          if (tolower(substr(head, 1, 9)) == "vyavastha") { found = 0; exit }
+          # Where the value ends: the first quote no backslash escapes, within the bound; past it, it is too long.
+          n = length(value); i = 1
+          while (i <= n) {
+            c = substr(value, i, 1)
+            if (c == "\\") i += 2
+            else if (c == "\"") break
+            else i++
+          }
+          if (i <= n && index(tolower(substr(value, 1, i - 1)), "vyavastha") > 0) found = 2
           exit
         }
       }
     }
-    END { exit found ? 0 : 1 }' "$TMP/input"
+    END { exit found }' "$TMP/input"
 }
 
 hook_prompt() {
   HERE=$(input_folder)
   project_of "$HERE"
-  # Off here, and not one of the plugin's commands: nothing is done, and the message is not even read.
-  if ! project_on && ! maybe_typed; then return; fi
+  GUIDE=""
+  if ! project_on; then
+    # Off here, and not one of the plugin's commands: nothing is done, and the message is not even read, unless it
+    # names Vyavastha and asks how to use it: then the tool's model is told how, and nothing is sent. A sign-in that
+    # waits is finished by this message once it was approved (a file test when none waits).
+    maybe_typed
+    typed=$?
+    [ "$typed" = "0" ] || {
+      [ "$typed" = "2" ] && guide_wanted "$(json_text "$(json_get "$TMP/input" prompt)")" && GUIDE=$(guide_context)
+      off_answer
+      return
+    }
+  fi
   prompt=$(json_get "$TMP/input" prompt)
   [ -n "$prompt" ] || return
   dir=$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")
@@ -1253,8 +1414,13 @@ hook_prompt() {
     fi
     return
   fi
-  # Off in this project: nothing at all.
-  project_on || return
+  # A message that asks how to use Vyavastha: the tool's model is told how, with whatever else it is given.
+  guide_wanted "$text" && GUIDE=$(guide_context)
+  # Off in this project: only that.
+  if ! project_on; then
+    off_answer
+    return
+  fi
   words=$(plain_words "$text")
   if [ "$words" = "$(plain_words "$PHRASE")" ] && [ -s "$dir/held" ]; then
     # The developer chose to go on with the request that was held: the model is shown it, with what stood in the way.
@@ -1305,6 +1471,22 @@ The developer was told that something their team has said stands against the cha
   handle_message "$prompt" "$dir"
 }
 
+# What a message in a project that is off gets: the line saying a waiting sign-in was finished, once it was approved
+# (a file test when none waits), and the guidance in GUIDE when the message asks how to use the plugin. The message
+# itself goes through as it is.
+off_answer() {
+  FINISHED_LINE=""
+  [ -f "$PENDING" ] && [ -z "$TOKEN" ] && finish_waiting_sign_in
+  if [ -n "$GUIDE" ] && [ -n "$FINISHED_LINE" ]; then
+    printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
+      "$(json_quote "$FINISHED_LINE")" "$(json_quote "$GUIDE")"
+  elif [ -n "$GUIDE" ]; then
+    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' "$(json_quote "$GUIDE")"
+  elif [ -n "$FINISHED_LINE" ]; then
+    say "$FINISHED_LINE"
+  fi
+}
+
 # A message in a project that is on: checked, or asked as a question, with its one line. $1 is the message as a JSON
 # string, $2 the session folder.
 handle_message() {
@@ -1318,18 +1500,19 @@ handle_message() {
   summaries_note
   finish_pairing
   if [ -z "$TOKEN" ]; then
-    # Signed out: sign-in starts by itself on the first message of a session, and never again in it.
-    if [ ! -f "$dir/said-sign-in" ]; then
+    # Signed out: sign-in starts by itself on the first message of a session (unless the session's start began it),
+    # and never again in it; one still waiting is told again with its code, and its page isn't opened again.
+    if pending_waiting; then
+      outcome="Enter the code $PAIR_CODE on the sign-in page ($PAIR_PAGE) to connect. Once you approve, your next message finishes connecting. ${AGENT} works as usual until then."
+    elif [ ! -f "$dir/said-sign-in" ]; then
       true > "$dir/said-sign-in"
       if start_pairing; then
         outcome="The sign-in page is open in your browser: enter the code $PAIR_CODE there (or open $PAIR_PAGE). Once you approve, your next message finishes connecting."
       else
-        outcome="Sign-in couldn’t start because Vyavastha’s server can’t be reached. ${AGENT} works as usual."
+        outcome="Sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual."
       fi
-    elif [ -f "$PENDING" ] && [ -n "$(sed -n 's/^code=//p' "$PENDING")" ]; then
-      outcome="Enter the code $(sed -n 's/^code=//p' "$PENDING") at $(sed -n 's/^page=//p' "$PENDING") to connect. ${AGENT} works as usual until then."
     else
-      outcome="${VERB} ${CMD_SIGN_IN} to connect. ${AGENT} works as usual."
+      outcome="$WAY_IN ${AGENT} works as usual."
     fi
     OUT_LINE=$(nothing_line "you aren’t signed in" "$prefix$outcome")
     OUT_CONTEXT="${START_CONTEXT:-}"
@@ -1377,7 +1560,7 @@ handle_message() {
   case "$STATUS" in
     200) ;;
     401)
-      OUT_LINE=$(nothing_line "this computer’s connection to Vyavastha has ended" "$prefix${VERB} ${CMD_SIGN_IN} to connect again. ${AGENT} works as usual.")
+      OUT_LINE=$(nothing_line "this computer’s connection to Vyavastha has ended" "$prefix$WAY_IN_AGAIN ${AGENT} works as usual.")
       OUT_CONTEXT="${START_CONTEXT:-}"; emit; return ;;
     429)
       OUT_LINE=$(line "your message" "" "${prefix}Vyavastha had too many requests just now, so it wasn’t checked. ${AGENT} works as usual.")
@@ -1438,6 +1621,8 @@ handle_message() {
   if [ "$(answer ask)" = "true" ]; then
     # A question for the developer's own assistant in Vyavastha: asked there, in this session's chat, and the
     # answer is given to the tool's model to pass on. When no answer comes, the model has the message as it is.
+    # A message put to the team is never also taken for a question about using the plugin.
+    GUIDE=""
     printf '{"question":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s}' "$prompt" \
       "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep" > "$TMP/ask"
     ask_vyavastha "$TMP/ask"
@@ -1521,6 +1706,9 @@ keep_this() {
 # line carries what summaries do when it is the first to tell it.
 emit() {
   [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${SUMMARIES_NOTE:-}"
+  [ -n "${GUIDE:-}" ] && OUT_CONTEXT="${OUT_CONTEXT:+$OUT_CONTEXT
+
+}$GUIDE"
   if [ -n "$OUT_REASON" ]; then
     if [ -n "$OUT_LINE" ]; then
       printf '{"systemMessage":%s,"decision":"block","reason":%s}\n' "$(json_quote "$OUT_LINE")" "$(json_quote "$OUT_REASON")"
@@ -1693,14 +1881,19 @@ command_session() {
 need_token() {
   finish_pairing
   if [ -z "$TOKEN" ]; then
-    echo "You aren’t signed in to Vyavastha on this computer. $(how sign-in "sign in") to connect."
+    if pending_waiting; then
+      PAIR_AGAIN=1
+      echo "You aren’t signed in to Vyavastha on this computer yet. To connect, $(code_said). Once you approve, send this again."
+    else
+      echo "You aren’t signed in to Vyavastha on this computer. $WAY_IN"
+    fi
     return 1
   fi
 }
 
 not_reached() {
   case "$STATUS" in
-    401) echo "This computer’s connection to Vyavastha has ended. $(how sign-in "sign in") to connect again." ;;
+    401) echo "This computer’s connection to Vyavastha has ended. $WAY_IN_AGAIN" ;;
     429) echo "Vyavastha had too many requests just now. Try again in a minute." ;;
     000)
       if [ -n "$SLOW" ]; then echo "Vyavastha took too long to answer. Try again in a moment."
@@ -1712,14 +1905,16 @@ not_reached() {
 }
 
 command_sign_in() {
+  command_here
+  finish_pairing
   if [ -n "$TOKEN" ]; then
     api GET /me "" "$QUICK_SECONDS"
     if [ "$STATUS" = "200" ]; then
-      echo "Already signed in to Vyavastha ($SERVER) as $(json_text "$(answer email)"). ${VERB} ${CMD_SIGN_OUT} first to switch accounts."
+      echo "${CONNECTED:-Already signed in to Vyavastha ($SERVER) as $(json_text "$(answer email)").} ${VERB} ${CMD_SIGN_OUT} first to switch accounts."
       return
     fi
   fi
-  rm -f "$PENDING"
+  # A sign-in still waiting is told again, never started a second time.
   if ! start_pairing; then
     echo "Couldn’t start connecting to Vyavastha at $SERVER: ${PAIR_FAILED%.}."
     [ "$STATUS" = "000" ] && echo "Check the address and your connection. To use another server, set VYAVASTHA_SERVER before starting ${TOOL}."
@@ -1727,8 +1922,13 @@ command_sign_in() {
   fi
   machine=$(hostname | cut -d. -f1)
   [ -n "$machine" ] || machine=$(uname -n)
-  echo "To connect ${TOOL} on $machine to Vyavastha, open $PAIR_PAGE and enter the code $PAIR_CODE."
-  echo "The code works for 10 minutes. Once you approve, ${TOOL} finishes connecting by itself on your next request, or ${VERB_LOWER} ${CMD_STATUS}."
+  if [ -n "$PAIR_AGAIN" ]; then
+    echo "A sign-in is already waiting for you. To connect ${TOOL} on $machine to Vyavastha, $(code_said)."
+  else
+    echo "To connect ${TOOL} on $machine to Vyavastha, $(code_said)."
+  fi
+  lasts_said=$(code_lasts_said)
+  echo "${lasts_said:+$lasts_said }$(finish_said)"
 }
 
 command_sign_out() {
@@ -1767,9 +1967,10 @@ command_on() {
     if start_pairing; then
       # The page is open already: the session's first message doesn't open it a second time.
       [ -n "${SESSION:-}" ] && mkdir -p "$SESSIONS/$SESSION" && true > "$SESSIONS/$SESSION/said-sign-in"
-      echo "To sign in, enter the code $PAIR_CODE on the page that just opened in your browser ($PAIR_PAGE). It works for 10 minutes. Once you approve, your next message finishes connecting."
+      lasts_said=$(code_lasts_said)
+      echo "To sign in, $(code_said). ${lasts_said:+$lasts_said }Once you approve, your next message finishes connecting."
     else
-      echo "You aren’t signed in, and sign-in couldn’t start because Vyavastha’s server can’t be reached. $(how sign-in "sign in") once you’re online."
+      echo "You aren’t signed in, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN"
     fi
     repo_said
   else
@@ -1904,10 +2105,11 @@ command_status() {
   finish_pairing
   [ -n "${CONNECTED:-}" ] && echo "$CONNECTED" | sed 's/^Connected/connected/'
   if [ -z "$TOKEN" ]; then
-    if [ -f "$PENDING" ]; then
-      echo "Waiting for you to approve the connection in your browser. ${VERB} ${CMD_STATUS} again once you have."
+    if pending_waiting; then
+      PAIR_AGAIN=1
+      echo "Waiting for you to approve the connection: $(code_said). $(finish_said)"
     else
-      echo "Not signed in. ${VERB} ${CMD_SIGN_IN} to connect."
+      echo "Not signed in. $WAY_IN"
     fi
     return
   fi
@@ -1940,22 +2142,37 @@ command_settings() {
   if [ "$(summaries)" = "on" ]; then echo "- Summaries: on. Send “vyavastha summaries off” to turn them off."
   else echo "- Summaries: off. Send “vyavastha summaries on” to turn them on."; fi
   if [ -n "$TOKEN" ]; then echo "- Signed in as: $(saved email) in $(saved workspace). Send “vyavastha sign out” to sign out."
-  else echo "- Signed in as: nobody. Send “vyavastha sign in” to connect."; fi
+  else echo "- Signed in as: nobody. $WAY_IN"; fi
   echo "- Server: $SERVER. To use another, run “sh $SELF use-server <address>” in a terminal, or set VYAVASTHA_SERVER."
 }
 
+# Help: what Vyavastha does here in two lines, the three steps to start with the state of each, then every command,
+# one line each. It is read as the reason of a blocked message in both tools, so it stays short. No call is made
+# but the one that finishes a sign-in that waits.
 command_help() {
+  command_here
+  finish_pairing
+  if [ -n "$TOKEN" ]; then signed="You’re signed in as $(saved email) in $(saved workspace)."
+  elif pending_waiting; then PAIR_AGAIN=1; signed="A sign-in is waiting: $(code_said)."
+  else signed="You aren’t signed in yet."; fi
+  if project_on; then here="It is on here."; else here="It is off here now."; fi
   cat <<EOF
-Vyavastha commands, each sent as a message of its own:
+Vyavastha connects ${TOOL} to your team’s record. Where it is on, it checks each request against what your team has said and decided before ${AGENT} changes code.
+It also sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents.
 Start here
-- “vyavastha on” / “vyavastha off”: use Vyavastha in this project, or stop.
+1. Sign in: send “vyavastha sign in”. $signed
+2. Turn it on in this project: send “vyavastha on”. $here
+3. Then just work. Every message gets one line from Vyavastha saying what was sent, and what came of it.
+Everything else, each sent as a message of its own:
+Your setup
 - “vyavastha status”: whether you’re signed in, and whether this project, code sharing and summaries are on.
 - “vyavastha check”: tests sign-in, the connection, this project and the plugin’s version, and says how to fix each problem.
-- “vyavastha sign in” / “vyavastha sign out”: connect or disconnect this computer.
+- “vyavastha off”: stop using Vyavastha in this project.
+- “vyavastha sign out”: disconnect this computer.
 See what is shared
 - “vyavastha settings”: every setting and how to change it.
-- “vyavastha share code on” / “vyavastha share code off”: send your uncommitted changes with each message, or stop.
-- “vyavastha summaries on” / “vyavastha summaries off”: keep your messages and the replies in a chat of your own, summed up for teammates, or stop.
+- “vyavastha share code on” / “vyavastha share code off”: start or stop code sharing, which sends your uncommitted changes with each message.
+- “vyavastha summaries on” / “vyavastha summaries off”: start or stop summaries, which keep your messages and the replies in a chat of your own, summed up for teammates.
 - “vyavastha shared”: everything sent from this session.
 - “vyavastha chat” (or “vyavastha chat open”): this session’s chat in Vyavastha.
 - “vyavastha upload”: opens that chat so you can drop in a file for your next question.
@@ -1966,6 +2183,57 @@ Teammates
 - “vyavastha reply <number>: <your words>”, “vyavastha start <number>”, “vyavastha done <number>”, “vyavastha decline <number>”: answer an item of your inbox.
 EOF
   [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavastha:on, /vyavastha:shared and /vyavastha:check; ask, assign, reply, start, done and decline are typed only."
+}
+
+# What the tool's model is told when the developer's message asks how to use the plugin itself (guide_wanted): what
+# Vyavastha is, the phrases the developer sends, and that the
+# model cannot send them itself. No call is made for it. Slash commands are named only to Claude Code's model.
+guide_context() {
+  case "$CLIENT" in
+    codex) also="" ;;
+    *) also=" In Claude Code most of these are also slash commands, such as /vyavastha:sign-in, /vyavastha:on and /vyavastha:help, which the developer can run instead." ;;
+  esac
+  printf '%s' "The developer’s message asks about the Vyavastha plugin. Vyavastha connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and lets the developer ask teammates’ agents. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavastha sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavastha on”, and “vyavastha off” to stop. Everything it does: “vyavastha help”. Whether they are signed in and it is on: “vyavastha status”. Test the setup and say how to fix each problem: “vyavastha check”. Every setting: “vyavastha settings”. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavastha and sum them up for teammates: “vyavastha summaries on” and “vyavastha summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavastha share code on” and “vyavastha share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Every message in a project that is on gets one line saying what was sent.$also"
+}
+
+# Whether a message asks how to use the plugin itself: it is short (GUIDE_LONGEST), asks something (a question mark,
+# a question word, or a first word such as “can”), and within one sentence ties Vyavastha's name directly to the
+# plugin: “the Vyavastha plugin”, “Vyavastha’s commands”, “sign in to Vyavastha”, “set up / install / use / connect /
+# turn on Vyavastha”, “turn Vyavastha off”, “how does Vyavastha work”, “what can Vyavastha do”, “what does Vyavastha
+# send”. A message that only mentions the name near such words (“How do I connect to the database? Vyavastha said
+# Priya knows.”) never is, and neither is one addressed to Vyavastha (it starts with the name): those that ask for help
+# are the plugin's help command, and the rest are put to the team. $1 is the message's text.
+guide_wanted() {
+  [ "${#1}" -le "$GUIDE_LONGEST" ] || return 1
+  printf '%s' "$1" | grep -qi vyavastha || return 1
+  printf '%s' "$1" | awk 'BEGIN { RS = "\001"; wanted = 0 }
+    NR == 1 {
+      s = tolower($0)
+      if (index(s, "vyavastha") == 0) exit
+      # Addressed to Vyavastha: never this.
+      t = s; sub(/^[^a-z0-9]+/, "", t)
+      if (t ~ /^vyavastha([^a-z0-9_-]|$)/) exit
+      asked = index(s, "?") > 0
+      # Words, with each break between sentences or clauses kept as a full stop of its own, so a phrase never runs
+      # across one; a name joined to more letters by a hyphen or underscore (vyavastha_export) is another word.
+      gsub(/[.?!;:,()]+/, " . ", s)
+      gsub(/[^a-z0-9_.-]+/, " ", s); gsub(/ +/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s); s = " " s " "
+      if (s ~ / (how|what|where|why|which|when) /) asked = 1
+      if (s ~ /^ (can|could|do|does|is|are|should|would|will) /) asked = 1
+      if (!asked) exit
+      name = "vyavastha"
+      if (s ~ (" " name " (plugin|plugins|extension|hooks?|commands?|settings|setup|sign-in|sign in|summaries|code sharing|privacy)( s)? ")) wanted = 1
+      if (s ~ (" " name " s (plugin|commands?|settings|setup|sign-in|summaries|code sharing|privacy) ")) wanted = 1
+      if (s ~ (" (sign|log) (in|into|in to|out of) " name " ")) wanted = 1
+      if (s ~ (" (sign-in|signin|login|log-in) (to|into) " name " ")) wanted = 1
+      if (s ~ (" (use|using|start using|get started with|set up|setup|install|installing|reinstall|uninstall|update|upgrade|configure|connect|connecting|enable|disable|turn on|turn off|switch on|switch off|activate|deactivate) " name " ")) wanted = 1
+      if (s ~ (" (turn|switch) " name " (on|off) ")) wanted = 1
+      if (s ~ (" how (does|do|will|would|can) " name " work ")) wanted = 1
+      if (s ~ (" what (can|could|does|do|will|would) " name " (do|send|sends|share|shares|keep|keeps|see|sees|collect|store|read) ")) wanted = 1
+      if (s ~ (" what is " name " (\\. )?$")) wanted = 1
+      if (s ~ (" is " name " (on|off|installed|connected|working|sending|sharing|keeping) ")) wanted = 1
+    }
+    END { exit wanted ? 0 : 1 }'
 }
 
 # This session's chat in Vyavastha: sets CHAT_URL and CHAT_UPLOAD (empty when it couldn't be had).
@@ -2059,13 +2327,13 @@ command_check() {
   finish_pairing
   repositories=""
   if [ -z "$TOKEN" ]; then
-    if [ -f "$PENDING" ]; then echo "Problem: not signed in yet. Approve the connection in your browser, then send “vyavastha status”."
-    else echo "Problem: not signed in. $(how sign-in "sign in") to connect."; fi
+    if pending_waiting; then PAIR_AGAIN=1; echo "Problem: not signed in yet. To connect, $(code_said). $(finish_said)"
+    else echo "Problem: not signed in. $WAY_IN"; fi
   elif [ -n "$reached" ]; then
     api GET /me "" "$QUICK_SECONDS"
     case "$STATUS" in
       200) remember_me; repositories=$(answer repositories); echo "ok: signed in as $(json_text "$(answer email)") in $(json_text "$(json_get "$TMP/workspace" name)")." ;;
-      401) echo "Problem: this computer’s connection has ended. $(how sign-in "sign in") to connect again." ;;
+      401) echo "Problem: this computer’s connection has ended. $WAY_IN_AGAIN" ;;
       *) echo "Problem: whether you’re signed in couldn’t be checked just now. Try again in a minute." ;;
     esac
   else
@@ -2260,7 +2528,7 @@ command_ask_assistant() {
   fi
   finish_pairing
   if [ -z "$TOKEN" ]; then
-    echo "Not signed in to Vyavastha on this computer, so nothing can be asked. The developer signs in with ${CMD_SIGN_IN}."
+    echo "Not signed in to Vyavastha on this computer, so nothing can be asked. Tell the developer: $WAY_IN"
     return
   fi
   HERE="${HERE:-${CLAUDE_PROJECT_DIR:-$PWD}}"
@@ -2282,7 +2550,7 @@ command_ask_assistant() {
         printf 'Vyavastha gave no answer: %s\n' "$(json_text "$(answer notice)")"
       fi
       ;;
-    401) echo "This computer’s connection to Vyavastha has ended, so nothing was asked. The developer signs in again with ${CMD_SIGN_IN}." ;;
+    401) echo "This computer’s connection to Vyavastha has ended, so nothing was asked. Tell the developer: $WAY_IN_AGAIN" ;;
     429) echo "Too many requests to Vyavastha just now. Ask again in a minute." ;;
     000)
       if [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ]; then

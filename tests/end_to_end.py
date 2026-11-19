@@ -166,21 +166,6 @@ def main() -> int:
         sam.ok("POST", "/workspace/owner", {"user_id": ganesh_session["user"]["user_id"]})
         connect(ganesh, "github")
 
-        step("Sam pairs the plugin: /vyavastha:sign-in, then approves the code in the web app")
-        started = plugin("sign-in")
-        print("  " + started.strip().replace("\n", "\n  "))
-        code = re.search(r"code ([A-Z]{4}-[A-Z]{4})", started).group(1)
-        looked = sam.ok("POST", "/plugin/pairings/lookup", {"code": code})
-        print(f"  the web app shows: Connect Claude Code on {looked['machine']}? ({looked['workspace']})")
-        sam.ok("POST", "/plugin/pairings/approve", {"code": code, "approve": True})
-        status = plugin("status")
-        print("  " + status.strip().replace("\n", "\n  "))
-        expect("sam@northwind.dev" in status, "the plugin is signed in as Sam")
-        credentials = (home / "credentials").read_text()
-        expect("token=vyv-tool-" in credentials and oct((home / "credentials").stat().st_mode & 0o777) == "0o600",
-               "the token is kept in a file only Sam can read")
-        expect("vyv-tool-" not in started + status, "the token was never printed")
-
         step("Sam’s own clone of the repository")
         repo = work / "customer-platform"
         repo.mkdir()
@@ -194,12 +179,47 @@ def main() -> int:
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "Initial"], check=True, env=environment)
         subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "drop-customer-plan"], check=True)
 
-        step("Off until switched on: a session start and a message do nothing")
+        step("The first session after installing: sign-in starts by itself, and Sam approves the code in the web app")
         said = hook("session-start", "SessionStart", repo, source="startup")
-        expect("installed and off in this project" in said.get("systemMessage", ""),
-               "the first session start says once that the plugin is off here")
+        welcome = said.get("systemMessage", "")
+        expect(welcome.startswith("Vyavastha is installed. To connect this computer, enter the code ")
+               and f"({base}/" in welcome and "“vyavastha on”" in welcome and "“vyavastha help”" in welcome,
+               "the welcome gives the code and the Connect page’s address, then “vyavastha on” and “vyavastha help”")
+        found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", welcome)
+        code = found.group(1) if found else ""
+        again = hook("session-start", "SessionStart", repo, source="startup").get("systemMessage", "")
+        expect(code != "" and code in again, "a second session while it waits shows the same code")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Rename the helper in serializers.py")
+        expect(said == {} and not (home / "credentials").exists(),
+               "before Sam approves, an ordinary message in the project that is off is left alone")
+        if code:
+            looked = sam.ok("POST", "/plugin/pairings/lookup", {"code": code})
+            print(f"  the web app shows: Connect Claude Code on {looked['machine']}? ({looked['workspace']})")
+            sam.ok("POST", "/plugin/pairings/approve", {"code": code, "approve": True})
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Rename the helper in serializers.py")
+        expect(set(said) == {"systemMessage"}
+               and said["systemMessage"].startswith("Vyavastha: connected as sam@northwind.dev")
+               and "“vyavastha on”" in said["systemMessage"],
+               "after approving, Sam’s next ordinary message finishes connecting, says so, and goes through")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha how do I sign in?")
+        expect(said.get("decision") == "block" and "You’re signed in as sam@northwind.dev" in said.get("reason", ""),
+               "asking how to sign in is answered with help, which says Sam is signed in")
+        status = plugin("status")
+        print("  " + status.strip().replace("\n", "\n  "))
+        expect("sam@northwind.dev" in status, "the plugin is signed in as Sam")
+        credentials = (home / "credentials").read_text()
+        expect("token=vyv-tool-" in credentials and oct((home / "credentials").stat().st_mode & 0o777) == "0o600",
+               "the token is kept in a file only Sam can read")
+        expect("vyv-tool-" not in welcome + again + status + json.dumps(said), "the token was never printed")
+        expect("Already signed in" in plugin("sign-in"), "“vyavastha sign in” then says it is signed in already")
+
+        step("Off until switched on: a message does nothing, and a question about the plugin only tells Claude how")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
         expect(said == {}, "a message in a project that is off is left alone")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="How do I turn Vyavastha on here?")
+        expect(set(said) == {"hookSpecificOutput"} and "“vyavastha on”" in said["hookSpecificOutput"]["additionalContext"],
+               "a question about using Vyavastha gives Claude the phrases to tell Sam, and nothing more")
+        expect(sam.ok("GET", "/conversations") == [], "and nothing was sent")
 
         step("vyavastha on")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha on")
@@ -366,6 +386,9 @@ def main() -> int:
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
         expect("connection to Vyavastha has ended" in said.get("systemMessage", "") and not (home / "credentials").exists(),
                "the next request goes on unchecked, and the plugin says it was signed out")
+        said = hook("session-start", "SessionStart", repo, source="startup")
+        expect("To connect, enter the code " in said.get("systemMessage", ""),
+               "the next session in the project starts signing in again by itself")
     finally:
         server.terminate()
         try:

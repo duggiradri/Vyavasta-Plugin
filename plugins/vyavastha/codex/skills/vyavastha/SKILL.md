@@ -1,25 +1,39 @@
 ---
 name: vyavastha
-description: The team’s record in Vyavastha, and its plugin. Use when you need to know what a teammate is working on, what the team decided or who said what; and when the developer asks how to use the Vyavastha plugin, what it sends, or why a request was held.
+description: The team’s record in Vyavastha, and its plugin. Use when you need to know what a teammate is working on, what the team decided or who said what; and when the developer asks how to use, connect, sign in to or set up Vyavastha, how to turn it on or off, what it sends or shares, or why a request was held.
 ---
 
-The Vyavastha plugin checks each request against the team’s record before it reaches you. It is off in every
-project until the developer turns it on there. It answers its own commands by itself: they never reach you, so you
-cannot run them for the developer. Tell the developer to send the one they need as a message of its own:
+Vyavastha connects Codex to the developer’s team. In a project where it is on, it checks each request against what
+the team has said and decided before you change code, sums each session up for teammates under categories the
+developer controls, answers questions about the team, and lets the developer ask teammates’ agents. It is off in
+every project until the developer turns it on there, and from a project that is off it sends nothing of the developer’s work.
+
+The plugin answers its own commands itself, before they reach you, so you cannot run them for the developer. Tell the
+developer which phrase to send, as a message of its own.
+
+`vyavastha help` shows what Vyavastha does, the three steps to start with whether each is done, and every command.
 
 Start here
-- `vyavastha on` / `vyavastha off`: use Vyavastha in this project, or stop.
+1. Sign in: `vyavastha sign in` opens the sign-in page in the browser with a code to enter there, and once the developer approves, the next message finishes connecting, in any project.
+2. Turn it on in this project: `vyavastha on`, in each project the developer wants it in.
+3. Then just work: every message gets one line saying what was sent to Vyavastha and what came of it.
+
+Your setup
 - `vyavastha status`: whether this computer is signed in, and whether this project, code sharing and summaries are on.
 - `vyavastha check`: tests sign-in, the connection, this project and the plugin’s version, and says how to fix each problem.
-- `vyavastha sign in` / `vyavastha sign out`: connect or disconnect this computer.
+- `vyavastha off`: stop using Vyavastha in this project.
+- `vyavastha sign out`: disconnect this computer.
 
 See what is shared
 - `vyavastha settings`: every setting and how to change it.
-- `vyavastha share code on` / `vyavastha share code off`: send the uncommitted changes with each message (teammates see only a summary, never the code), or stop and delete what was kept.
-- `vyavastha summaries on` / `vyavastha summaries off`: keep the developer’s messages and your replies in a chat of their own in Vyavastha, summed up for teammates under categories they control there (on when the project is turned on), or stop.
+- `vyavastha share code on` / `vyavastha share code off`: code sharing, off until the developer turns it on, also sends the uncommitted changes with each message for the check (teammates see only a short summary, never the code; key files, ignored files, machine-written files and files that aren’t text are never sent); off stops it and deletes what was kept.
+- `vyavastha summaries on` / `vyavastha summaries off`: summaries keep the developer’s messages and your replies in a chat of their own in Vyavastha, summed up for teammates under categories they control there (on when the project is turned on), or stop.
 - `vyavastha shared`: everything sent from this session.
 - `vyavastha chat` (or `vyavastha chat open`): this session’s chat in Vyavastha.
 - `vyavastha upload`: opens that chat so the developer can drop in a file for their next question.
+
+Otherwise, from a project that is on, each message’s words, the repository and branch, and changed files’ names are
+sent.
 
 Teammates
 - `vyavastha inbox`: what teammates asked of the developer.
@@ -36,5 +50,6 @@ each is working on. A message of the developer’s that asks about the team is a
 reaches you, and you are given the answer: pass it on as it stands. When you need something else from the record,
 ask Vyavastha before any other source such as email or chat tools, with the command the plugin gave you at the
 start of the session (the plugin’s script with `ask "<the question>"`). Codex runs that command in a closed-off space
-that may keep it from reaching Vyavastha; when it says so, tell the developer they can ask the same thing by sending a message that starts
-with “Vyavastha,”. Do not guess what the team’s record says, and run nothing else of the plugin’s script.
+that may keep it from reaching Vyavastha; when it says so, tell the developer they can ask the same thing by sending
+a message that starts with “Vyavastha,”. Do not guess what the team’s record says, and run nothing else of the
+plugin’s script.

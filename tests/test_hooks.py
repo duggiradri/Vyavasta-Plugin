@@ -53,7 +53,7 @@ class Fake:
         self.approved = False
         self.status: dict[str, int] = {}
         # What the newer routes answer.
-        self.latest = "0.4.0"
+        self.latest = "0.4.1"
         self.minimum = "0.3.0"
         self.sharing: set[str] = set()
         self.extra: dict[str, dict] = {}
@@ -238,6 +238,7 @@ def run(request, tmp_path: Path, fake: Fake):
         return done
 
     run_.home = home
+    run_.server = fake.url
     run_.opened = lambda: opened.read_text().split() if opened.exists() else []
     return run_
 
@@ -285,7 +286,7 @@ def test_off_by_default_every_hook_does_nothing_and_the_first_session_says_so_on
     signed_in(run, fake)
     first = output(run("hook", "session-start", stdin=event("SessionStart", repo)))
     assert first == {"systemMessage": "Vyavastha is installed and off in this project. Send “vyavastha on” to use "
-                                      "it here."}
+                                      "it here, and “vyavastha help” to see everything it does."}
     assert output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"))) == {}
     (repo / "calc.py").write_text("changed\n")
     for name, kind in (("prompt", "UserPromptSubmit"), ("edited", "PostToolUse"), ("stopped", "Stop"),
@@ -926,15 +927,15 @@ def test_check_tests_each_part_and_says_how_to_fix_what_is_wrong(run, fake, repo
     assert any(line.startswith("Problem: not signed in.") for line in lines)
     assert "ok: this folder is the repository acme/api on GitHub." in lines
     assert any(line.startswith("Problem: Vyavastha is off in this project.") for line in lines)
-    assert "ok: this plugin (0.4.0) is the latest." in lines
+    assert "ok: this plugin (0.4.1) is the latest." in lines
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.latest = "0.5.0"
     lines = run("check", cwd=repo).stdout.splitlines()
     assert "ok: signed in as sam@acme.test in Acme." in lines and "ok: Vyavastha reads acme/api for you." in lines
     assert "ok: Vyavastha is on in this project." in lines
-    assert any(line.startswith("Problem: this plugin is 0.4.0 and 0.5.0 is out.") for line in lines)
-    fake.minimum = "0.4.1"
+    assert any(line.startswith("Problem: this plugin is 0.4.1 and 0.5.0 is out.") for line in lines)
+    fake.minimum = "0.4.2"
     assert any("must be updated" in line for line in run("check", cwd=repo).stdout.splitlines())
     outside = tmp_path / "plain"
     outside.mkdir()
@@ -1156,14 +1157,14 @@ def test_signed_out_nothing_is_reported(run, fake, repo):
 def test_under_codex_the_script_names_codex_and_says_which_tool_it_is(run, fake, repo):
     switched_on(run, fake, repo)
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))["systemMessage"]
-    assert "“vyavastha sign in”" in said and "Claude" not in said and "/vyavastha:" not in said
+    assert "BCDF-GHJK" in said and "Claude" not in said and "/vyavastha:" not in said
     signed_in(run, fake)
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))["systemMessage"]
     assert "before Codex changes code" in said and "Claude" not in said
     fake.requests.clear()
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days"), tool="codex")
     (sent,) = fake.calls("/check")
-    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavastha-codex/0.4.0"
+    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavastha-codex/0.4.1"
 
 
 @pytest.mark.parametrize("typed", ["vyavastha sign in", "Vyavastha sign-in.", "  VYAVASTHA  SIGN IN  "])
@@ -1222,7 +1223,7 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
     assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
-    assert manifest["name"] == claude["name"] == "vyavastha" and manifest["version"] == claude["version"] == "0.4.0"
+    assert manifest["name"] == claude["name"] == "vyavastha" and manifest["version"] == claude["version"] == "0.4.1"
     assert f'VERSION="{manifest["version"]}"' in SCRIPT.read_text()
     assert (PLUGIN / manifest["hooks"]).is_file() and (PLUGIN / manifest["skills"] / "vyavastha" / "SKILL.md").is_file()
     codex_skill = (PLUGIN / manifest["skills"] / "vyavastha" / "SKILL.md").read_text()
@@ -1905,3 +1906,516 @@ def test_a_project_turned_on_before_summaries_is_told_once_and_that_first_messag
     (next(run.home.glob("projects/*")) / "summaries").write_text("off\n")
     said = prompt(run, repo, "Change calc.py", session="s3")
     assert "Summaries are on in this project" not in said["systemMessage"]
+
+
+# -- 0.4.1: sign-in that opens by itself, help, and how the tool's model explains the plugin -------------------------
+
+CONNECT = "http://127.0.0.1/connect"
+WAY_IN = "Send “vyavastha sign in” to connect."
+
+
+def pending(run, code: str, started: float, until: float | None = None) -> None:
+    """A sign-in kept on this computer as the plugin keeps it, started and lasting as given."""
+    run.home.mkdir(parents=True, exist_ok=True)
+    lines = [f"server={run.server}", "device=old-device", f"started={int(started)}",
+             *([f"until={int(until)}"] if until is not None else []), f"code={code}", "page=http://127.0.0.1/old"]
+    (run.home / "pairing").write_text("\n".join(lines) + "\n")
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_the_first_session_signed_out_starts_sign_in_and_says_the_four_things_in_order(run, fake, repo, tool):
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, tool=tool))
+    assert said == {"systemMessage": "Vyavastha is installed. To connect this computer, enter the code BCDF-GHJK on the "
+                                     f"page that just opened in your browser ({CONNECT}). Once you approve, your next "
+                                     "message finishes connecting. Then send “vyavastha on” in each project you want "
+                                     "it in. “vyavastha help” shows everything."}
+    assert run.opened() == [CONNECT] and [call["path"] for call in fake.requests] == ["/pair"]
+    assert fake.calls("/pair")[0]["body"]["tool"] == ("codex" if tool else "claude-code")
+    # The project stays off: no project is turned on, and the next message sends nothing of itself; it only asks
+    # whether the sign-in was approved.
+    assert not list(run.home.glob("projects/*/on"))
+    assert prompt(run, repo, "Change calc.py", tool=tool) == {}
+    assert [call["path"] for call in fake.requests] == ["/pair", "/token"]
+    assert fake.calls("/token")[0]["body"] == {"device_code": "device-secret"}
+
+
+def test_the_first_session_signed_in_opens_nothing_and_stays_one_line(run, fake, repo):
+    signed_in(run, fake)
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert "\n" not in said and "“vyavastha help”" in said and said.startswith("Vyavastha is installed and off")
+    assert run.opened() == [] and fake.requests == []
+
+
+def test_the_first_session_says_plainly_when_the_server_cannot_be_reached(run, fake, repo):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, server=closed))
+    assert said == {"systemMessage": "Vyavastha is installed, but sign-in couldn’t start: Vyavastha’s server can’t be "
+                                     f"reached. {WAY_IN} Then send “vyavastha on” in each project you want it in. "
+                                     "“vyavastha help” shows everything."}
+    assert run.opened() == []
+
+
+def test_a_session_start_never_waits_long_for_a_slow_server(run, fake, repo):
+    fake.delay["/pair"] = 12
+    done = run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo)
+    assert "sign-in couldn’t start" in output(done)["systemMessage"] and done.seconds < 7
+    # A project that is on, with a sign-in waiting whose approval is slow to check: still well within 15 seconds.
+    del fake.delay["/pair"]
+    switched_on(run, fake, repo)
+    run("sign-in", cwd=repo)
+    fake.delay["/token"] = 12
+    done = run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo)
+    assert "BCDF-GHJK" in output(done)["systemMessage"] and done.seconds < 7
+
+
+def test_a_second_session_while_the_sign_in_waits_shows_the_same_code_and_opens_nothing(run, fake, repo):
+    run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo)
+    again = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo))
+    assert "enter the code BCDF-GHJK on the sign-in page (http://127.0.0.1/connect)" in again["systemMessage"]
+    assert "Once you approve, your next message finishes connecting. Then send “vyavastha on” in each project you " \
+           "want it in." in again["systemMessage"]
+    # “vyavastha on”, “vyavastha sign in”, a session in the project and its first message: the same code each time,
+    # never a second sign-in or a second page.
+    on = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s2", prompt="vyavastha on")))
+    assert "enter the code BCDF-GHJK on the sign-in page (http://127.0.0.1/connect)" in on["reason"]
+    assert "Once you approve, your next message finishes connecting." in on["reason"]
+    sign_in = run("sign-in", cwd=repo).stdout
+    assert sign_in.endswith("Once you approve, your next message finishes connecting.\n")
+    assert "already waiting" in sign_in and "BCDF-GHJK" in sign_in and "http://127.0.0.1/connect" in sign_in
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s3"), cwd=repo))
+    assert "BCDF-GHJK" in started["systemMessage"] and "your next message finishes connecting" in started["systemMessage"]
+    first = prompt(run, repo, "Change calc.py", session="s3")["systemMessage"]
+    assert "Enter the code BCDF-GHJK on the sign-in page (http://127.0.0.1/connect) to connect. Once you approve, " \
+           "your next message finishes connecting." in first
+    assert run.opened() == [CONNECT] and len(fake.calls("/pair")) == 1
+    # Approved: the next message finishes connecting.
+    fake.approved = True
+    assert "Connected as sam@acme.test in Acme." in prompt(run, repo, "Change calc.py", session="s3")["systemMessage"]
+
+
+def test_an_approved_sign_in_is_finished_by_the_next_session_in_a_project_that_is_off(run, fake, repo):
+    run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo)
+    fake.approved = True
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo))
+    assert said["systemMessage"].startswith("Vyavastha: connected as sam@acme.test in Acme. It is off in this project")
+    assert (run.home / "credentials").exists() and not (run.home / "pairing").exists()
+    # And then nothing more in projects that are off.
+    assert output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s3"), cwd=repo)) == {}
+
+
+@pytest.mark.parametrize("kept", ["until", "started only"])
+def test_a_sign_in_that_ran_out_is_started_afresh_and_its_code_never_shown(run, fake, repo, kept):
+    switched_on(run, fake, repo)
+    long_ago = time.time() - 700
+    pending(run, "OLDC-ODEX", long_ago, long_ago + 600 if kept == "until" else None)
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert "OLDC-ODEX" not in said and "enter the code BCDF-GHJK on the page that just opened" in said
+    assert len(fake.calls("/pair")) == 1 and run.opened() == [CONNECT]
+    # Run out again in the middle of the session, though still claimable: the next message neither shows the old code
+    # nor opens a page.
+    lately = time.time() - 620
+    pending(run, "OLDC-ODEX", lately, lately + 600 if kept == "until" else None)
+    line = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert "OLDC-ODEX" not in line and WAY_IN in line and len(fake.calls("/pair")) == 1
+    for shown in (run("status", cwd=repo).stdout, run("help", cwd=repo).stdout, run("check", cwd=repo).stdout):
+        assert "OLDC-ODEX" not in shown
+    # The next sign-in that is due starts afresh.
+    assert "BCDF-GHJK" in run("sign-in", cwd=repo).stdout and len(fake.calls("/pair")) == 2
+
+
+def test_a_session_in_a_project_that_is_on_starts_sign_in_by_itself_once(run, fake, repo):
+    switched_on(run, fake, repo)
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert said == ("Vyavastha: not signed in yet, so nothing is checked. To connect, enter the code BCDF-GHJK on the "
+                    f"page that just opened in your browser ({CONNECT}). Once you approve, your next message finishes "
+                    "connecting.")
+    assert run.opened() == [CONNECT]
+    # The session's first message doesn't start it again.
+    first = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert "Enter the code BCDF-GHJK" in first and run.opened() == [CONNECT] and len(fake.calls("/pair")) == 1
+    assert not fake.calls("/check")
+    # Turned down in the browser: the session's next message says how to sign in, and doesn't start it again.
+    fake.status["/token"] = 410
+    line = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert WAY_IN in line and len(fake.calls("/pair")) == 1 and not (run.home / "pairing").exists()
+    # A new session starts it again, once.
+    del fake.status["/token"]
+    run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo)
+    assert len(fake.calls("/pair")) == 2
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_every_signed_out_sentence_gives_the_same_way_in(run, fake, repo, tool):
+    switched_on(run, fake, repo)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    told = [
+        run("status", cwd=repo, tool=tool).stdout,
+        run("check", cwd=repo, tool=tool).stdout,
+        run("settings", cwd=repo, tool=tool).stdout,
+        run("inbox", cwd=repo, tool=tool).stdout,
+        run("ask", "What is Priya doing?", cwd=repo, tool=tool).stdout,
+        output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, tool=tool,
+                   server=closed))["systemMessage"],
+    ]
+    # A session whose sign-in was already started once, with none waiting now.
+    (run.home / "offline").unlink(missing_ok=True)
+    (run.home / "sessions" / "session-1").mkdir(parents=True, exist_ok=True)
+    (run.home / "sessions" / "session-1" / "said-sign-in").touch()
+    told.append(prompt(run, repo, "Change calc.py", tool=tool)["systemMessage"])
+    for said in told:
+        assert WAY_IN in said, said
+        assert "/vyavastha:" not in said and "sign-in”" not in said
+    # A connection that ended: the same, with “again”.
+    signed_in(run, fake)
+    fake.status["/me"] = 401
+    ended = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s9"), cwd=repo, tool=tool))
+    assert "Send “vyavastha sign in” to connect again." in ended["systemMessage"]
+    # Nowhere else in the script is a slash command given as the way in.
+    assert SCRIPT.read_text().count("/vyavastha:sign-in") == 1
+
+
+HELP_FORMS = ["vyavastha", "vyavastha help", "vyavastha ?", "Vyavastha.", "vyavastha how do I sign in",
+              "Vyavastha how do I sign in?", "vyavastha what can you do", "Vyavastha, what can you do?",
+              "vyavastha what does it send", "VYAVASTHA how does it work?", "vyavastha how to turn it on",
+              "Vyavastha: help me get started"]
+TEAM_FORMS = ["Vyavastha, what is Priya working on?", "vyavastha what is Priya working on",
+              "Vyavastha: who decided the export format?", "vyavastha how is the export going?",
+              "Ask Vyavastha what Priya is doing", "Add a vyavastha help link to the footer",
+              "vyavastha help text should be bigger in the footer", "Vyavastha, what can you tell me about the export?"]
+
+
+@pytest.mark.parametrize("typed", HELP_FORMS)
+def test_vyavastha_alone_help_and_questions_about_the_plugin_are_answered_with_help(run, fake, repo, typed):
+    said = prompt(run, repo, typed)
+    assert said["decision"] == "block" and said["reason"].startswith("Vyavastha connects Claude Code to your team’s")
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    said = prompt(run, repo, typed, tool="codex")
+    assert set(said) == {"decision", "reason"} and said["reason"].startswith("Vyavastha connects Codex")
+    assert not fake.calls("/check")
+
+
+@pytest.mark.parametrize("typed", TEAM_FORMS)
+def test_questions_for_the_team_and_requests_that_mention_vyavastha_go_where_they_always_went(run, fake, repo, typed):
+    signed_in(run, fake)
+    assert prompt(run, repo, typed) == {} and fake.requests == []
+    switched_on(run, fake, repo)
+    said = prompt(run, repo, typed)
+    assert "decision" not in said and fake.calls("/check")[0]["body"]["request"] == typed
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.check["context"]
+
+
+def test_help_starts_with_what_it_does_and_three_steps_that_say_where_you_stand(run, fake, repo):
+    for tool in (None, "codex"):
+        lines = run("help", cwd=repo, tool=tool).stdout.splitlines()
+        assert len(lines) <= 30
+        assert lines[0].startswith("Vyavastha connects ") and lines[1].startswith("It also sums each session up")
+        assert lines[2:6] == ["Start here",
+                              "1. Sign in: send “vyavastha sign in”. You aren’t signed in yet.",
+                              "2. Turn it on in this project: send “vyavastha on”. It is off here now.",
+                              "3. Then just work. Every message gets one line from Vyavastha saying what was sent, "
+                              "and what came of it."]
+        for group in ("Your setup", "See what is shared", "Teammates"):
+            assert group in lines
+    # In a project that is off, the next message finishes connecting too, and the project still needs turning on.
+    assert run("sign-in", cwd=repo).stdout.endswith("Once you approve, your next message finishes connecting. Then "
+                                                    "send “vyavastha on” in each project you want it in.\n")
+    assert "1. Sign in: send “vyavastha sign in”. A sign-in is waiting: enter the code BCDF-GHJK on the sign-in page " \
+           f"({CONNECT})." in run("help", cwd=repo).stdout
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    text = run("help", cwd=repo).stdout
+    assert "You’re signed in as sam@acme.test in Acme." in text and "It is on here." in text
+    assert "/vyavastha:" not in run("help", cwd=repo, tool="codex").stdout
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_a_question_about_using_vyavastha_gives_the_model_the_phrases_and_sends_nothing_when_off(run, fake, repo, tool):
+    signed_in(run, fake)
+    for asked in ("How do I sign in to Vyavastha?", "what does the vyavastha plugin send", "How do I turn vyavastha off?",
+                  "Can you help me connect Vyavastha?"):
+        said = prompt(run, repo, asked, tool=tool)
+        assert set(said) == {"hookSpecificOutput"}, asked
+        context = said["hookSpecificOutput"]["additionalContext"]
+        for phrase in ("“vyavastha sign in”", "“vyavastha on”", "“vyavastha help”", "“vyavastha status”",
+                       "“vyavastha check”", "“vyavastha settings”", "“vyavastha summaries on”",
+                       "“vyavastha share code on”"):
+            assert phrase in context
+        assert "as a message of its own" in context and "you cannot run them" in context
+        if tool:
+            assert "/vyavastha:" not in context and "Claude" not in context
+        else:
+            assert "/vyavastha:sign-in" in context
+    assert fake.requests == [] and run.opened() == []
+    # A message that only mentions Vyavastha, or asks nothing about using it, gets nothing.
+    for other in ("Rename the vyavastha folder to plugin", "What did Priya say about Vyavastha’s pricing page?"):
+        assert prompt(run, repo, other, tool=tool) == {}
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_in_a_project_that_is_on_the_guidance_comes_with_the_check(run, fake, repo, tool):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    said = prompt(run, repo, "What does Vyavastha send from this project?", tool=tool)
+    context = said["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith(fake.check["context"] + "\n\nThe developer’s message asks about the Vyavastha plugin.")
+    assert fake.calls("/check") and ("/vyavastha:" in context) == (tool is None)
+    # A request with no question about the plugin gets the check's context alone.
+    assert prompt(run, repo, "Change calc.py", tool=tool)["hookSpecificOutput"]["additionalContext"] == \
+        fake.check["context"]
+
+
+def test_the_guide_skill_is_for_the_model_and_runs_nothing():
+    text = (PLUGIN / "skills" / "guide" / "SKILL.md").read_text()
+    head, body = text.split("---")[1], text.split("---", 2)[2]
+    assert head.strip().startswith("description: ")
+    description = head.split("description: ", 1)[1]
+    for words in ("how to use", "sign in", "set up", "turn it on or off", "shares"):
+        assert words in description.lower()
+    assert "disable-model-invocation" not in head and "allowed-tools" not in head
+    assert "!`" not in body and "```" not in body and "vyavastha.sh" not in body and "$ARGUMENTS" not in body
+    for phrase in ("“vyavastha sign in”", "“vyavastha on”", "“vyavastha help”", "“vyavastha status”",
+                   "“vyavastha check”", "“vyavastha settings”", "“vyavastha summaries on”", "“vyavastha share code on”"):
+        assert phrase in body
+    assert "message of its own" in body and "cannot run them" in body
+    codex = (PLUGIN / "codex" / "skills" / "vyavastha" / "SKILL.md").read_text()
+    assert "cannot run them" in codex and "`vyavastha sign in`" in codex and "/vyavastha:" not in codex
+    assert "how to use, connect, sign in to or set up Vyavastha" in codex.split("---")[1]
+
+
+def png_size(path: Path) -> tuple[int, int, int]:
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR"
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), data[25]
+
+
+def test_the_logo_files_are_there_at_their_sizes_and_codex_names_them():
+    assets = PLUGIN / "assets"
+    svg = (assets / "logo.svg").read_text()
+    for drawn in ('stop-color="#c8483a"', 'stop-color="#9a2219"', 'stop-color="#5f100b"', 'fill="#f7ead8"',
+                  '<circle cx="50" cy="50" r="33"', 'viewBox="0 0 100 100"'):
+        assert drawn in svg
+    # Width, height and colour type 6: red, green, blue and transparency.
+    assert png_size(assets / "logo.png") == (512, 512, 6)
+    assert png_size(assets / "composer-icon.png") == (64, 64, 6)
+    for name in ("logo.png", "composer-icon.png", "logo.svg"):
+        assert (assets / name).stat().st_size < 5 * 1024 * 1024
+    interface = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["interface"]
+    assert interface["logo"] == "./assets/logo.png" and interface["composerIcon"] == "./assets/composer-icon.png"
+    assert interface["brandColor"] == "#9A2219"
+    for key in ("logo", "composerIcon"):
+        assert (PLUGIN / interface[key]).is_file()
+    # Claude Code reads no logo for a private marketplace's plugin, and its validator refuses the key.
+    assert "icon" not in json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+    readme = (PLUGIN.parents[1] / "README.md").read_text()
+    assert readme.startswith('<p align="center"><img src="plugins/vyavastha/assets/logo.png"')
+
+
+def test_the_version_is_the_same_everywhere():
+    root = PLUGIN.parents[1]
+    (entry,) = json.loads((root / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
+    versions = {entry["version"], json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
+                json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["version"]}
+    assert versions == {"0.4.1"} and 'VERSION="0.4.1"' in SCRIPT.read_text()
+
+
+# -- 0.4.1 review: the next message finishes connecting anywhere, guidance only about the plugin, and the rest ---------
+
+FINISHED = ("Vyavastha: connected as sam@acme.test in Acme. It is off in this project: sending “vyavastha on” here "
+            "switches it on, and “vyavastha help” shows everything.")
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_an_approved_sign_in_is_finished_by_the_next_message_in_a_project_that_is_off(run, fake, repo, tool):
+    run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, tool=tool)
+    fake.requests.clear()
+    # Not approved yet: nothing is said and the message goes through as it is, after one quick question.
+    assert prompt(run, repo, "Change calc.py so add() checks its types", tool=tool) == {}
+    assert [call["path"] for call in fake.requests] == ["/token"]
+    assert (run.home / "pairing").exists() and not (run.home / "credentials").exists()
+    # Approved in the browser: the next ordinary message finishes connecting, says so in one line, and is let through.
+    fake.approved = True
+    said = prompt(run, repo, "Change calc.py so add() checks its types", tool=tool)
+    assert said == {"systemMessage": FINISHED}
+    assert (run.home / "credentials").read_text().splitlines()[1] == f"token={TOKEN}"
+    assert not (run.home / "pairing").exists() and not list(run.home.glob("projects/*/on"))
+    # Nothing of the message was read or sent: each call carried the sign-in's own reference alone.
+    assert [call["path"] for call in fake.requests] == ["/token", "/token"]
+    for call in fake.requests:
+        assert call["body"] == {"device_code": "device-secret"} and b"calc" not in call["raw"]
+    # And then an off project costs nothing again.
+    fake.requests.clear()
+    assert prompt(run, repo, "Change calc.py", tool=tool) == {} and fake.requests == []
+
+
+def test_a_waiting_sign_in_never_slows_or_changes_a_message_in_a_project_that_is_off(run, fake, repo):
+    # A slow server: the one question gives up after 2 seconds and the message goes through untouched.
+    pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
+    fake.delay["/token"] = 6
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo)
+    print(f"\n[timing] off project, waiting sign-in, slow server: {done.seconds:.3f} s")
+    assert done.stdout == "" and done.seconds < 4
+    assert (run.home / "pairing").exists()
+    del fake.delay["/token"]
+    # A server that fails is not asked again for a minute.
+    fake.status["/token"] = 503
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
+    # A code that ran out is never asked about.
+    (run.home / "offline").unlink()
+    del fake.status["/token"]
+    pending(run, "OLDC-ODEX", time.time() - 700, time.time() - 100)
+    fake.approved = True
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
+    # A command still finishes it the way it always did.
+    pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
+    assert "connected as sam@acme.test in Acme." in run("status", cwd=repo).stdout
+    assert (run.home / "credentials").exists()
+
+
+def test_a_question_about_using_vyavastha_and_an_approved_sign_in_come_together_in_a_project_that_is_off(run, fake,
+                                                                                                         repo):
+    pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
+    fake.approved = True
+    said = prompt(run, repo, "How does Vyavastha work?")
+    assert said["systemMessage"] == FINISHED
+    assert said["hookSpecificOutput"]["additionalContext"].startswith("The developer’s message asks about the Vyavastha")
+    # A message put to Vyavastha by name that is not one of its commands finishes it as well.
+    (run.home / "credentials").unlink()
+    pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
+    assert prompt(run, repo, "Vyavastha, what did Priya send about the login help page?") == {"systemMessage": FINISHED}
+
+
+def test_every_sentence_about_a_waiting_sign_in_in_a_project_that_is_off_says_the_next_message_finishes_it(run, fake,
+                                                                                                         repo):
+    first = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    told = [first,
+            output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo))["systemMessage"],
+            run("sign-in", cwd=repo).stdout, run("status", cwd=repo).stdout, run("check", cwd=repo).stdout]
+    for said in told:
+        assert "Once you approve, your next message finishes connecting. Then send “vyavastha on” in each project you " \
+               "want it in." in said, said
+        assert "that finishes connecting" not in said and "which finishes connecting" not in said
+    for skill in (PLUGIN / "skills" / "guide" / "SKILL.md", PLUGIN / "codex" / "skills" / "vyavastha" / "SKILL.md"):
+        text = " ".join(skill.read_text().split())
+        assert "the next message finishes connecting, in any project" in text, skill
+    readme = " ".join((PLUGIN.parents[1] / "README.md").read_text().split())
+    assert "your next message finishes connecting, in any project" in readme
+    assert "asks Vyavastha’s server once whether you have approved it" in readme
+
+
+def test_a_long_message_in_a_project_that_is_off_is_not_read_when_only_the_folder_is_named_vyavastha(run, fake,
+                                                                                                    tmp_path):
+    folder = tmp_path / "vyavastha-plugin-copy"
+    folder.mkdir()
+    git(folder, "init", "-q", "--initial-branch=main")
+    signed_in(run, fake)
+    pasted = "\n".join(f'log line {n}: "quoted" \\ C:\\path\\to\tvalue \\u00e9' for n in range(16800))
+    assert len(pasted) > 840_000
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", folder, prompt=pasted), cwd=folder)
+    print(f"\n[timing] off project in a folder named vyavastha, {len(pasted):,} characters: {done.seconds:.3f} s")
+    # (Decoding the whole message took over 10 seconds; finding the folder alone costs about half a second.)
+    assert done.stdout == "" and fake.requests == [] and done.seconds < 2
+    # A long message that names Vyavastha far in is not read either: a question about the plugin is short.
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", folder, prompt=pasted + " how do I sign in to "
+                                             "vyavastha?"), cwd=folder)
+    assert done.stdout == "" and done.seconds < 2
+    # A short one still is.
+    said = prompt(run, folder, "How do I sign in to Vyavastha?", cwd=folder)
+    assert "The developer’s message asks about the Vyavastha plugin." in said["hookSpecificOutput"]["additionalContext"]
+    readme = " ".join((PLUGIN.parents[1] / "README.md").read_text().split())
+    assert "never the folder it was sent from" in readme
+
+
+GUIDE_NOT = ["Vyavastha, who is sharing code for the export?", "Vyavastha, what did Priya send about the login help page?",
+             "How do I connect to the staging database? Vyavastha said Priya knows.",
+             "vyavastha how do I connect to postgres", "Vyavastha: how do I use the export API?",
+             "Which database should I use? Vyavastha said Postgres.",
+             "How do I install vyavastha-utils from our registry?", "Where is the vyavastha_export job set up?",
+             "Vyavastha, how does the export work?", "Can you turn on the feature flag Vyavastha mentioned?",
+             "Can you help me use the API Vyavastha told me about?"]
+
+
+@pytest.mark.parametrize("asked", GUIDE_NOT)
+def test_questions_that_only_name_vyavastha_or_are_put_to_it_get_no_guidance(run, fake, repo, asked):
+    signed_in(run, fake)
+    said = prompt(run, repo, asked)
+    assert "hookSpecificOutput" not in said and fake.requests == []
+    switched_on(run, fake, repo)
+    for answer in ({}, {"ask": True}):
+        fake.check.pop("ask", None)
+        fake.check.update(answer)
+        said = prompt(run, repo, asked)
+        context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "asks about the Vyavastha plugin" not in context, (asked, answer)
+
+
+@pytest.mark.parametrize("asked", ["How does Vyavastha work?", "What can Vyavastha do?", "How do I set up vyavastha?",
+                                   "Is the Vyavastha plugin sending my code?", "Where are Vyavastha’s settings?",
+                                   "How do I log in to Vyavastha?", "What is Vyavastha?"])
+def test_questions_about_the_plugin_itself_get_the_guidance(run, fake, repo, asked):
+    signed_in(run, fake)
+    said = prompt(run, repo, asked)
+    assert said["hookSpecificOutput"]["additionalContext"].startswith("The developer’s message asks about the Vyavastha")
+
+
+def test_a_message_put_to_the_team_never_also_gets_the_guidance(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check["ask"] = True
+    said = prompt(run, repo, "What does Vyavastha send from this project?")
+    assert fake.calls("/ask")
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
+
+
+def test_sign_in_says_how_long_a_waiting_code_still_works(run, fake, repo):
+    pending(run, "WAIT-CODE", time.time() - 240, time.time() + 360)
+    said = run("sign-in", cwd=repo).stdout
+    assert "already waiting" in said and "WAIT-CODE" in said
+    assert "The code works for 6 more minutes." in said and "10 minutes" not in said
+    pending(run, "WAIT-CODE", time.time() - 560, time.time() + 40)
+    assert "The code works for 1 more minute." in run("sign-in", cwd=repo).stdout
+    # A new code lasts as long as the server says.
+    (run.home / "pairing").unlink()
+    assert "The code works for 10 minutes." in run("sign-in", cwd=repo).stdout
+    switched_on(run, fake, repo)
+    assert "The code works for 10 minutes." in run("on", cwd=repo).stdout
+
+
+def test_the_readme_and_codex_skill_group_the_commands_as_help_does(run, fake, repo):
+    help_lines = run("help", cwd=repo, tool="codex").stdout.splitlines()
+    groups = [line for line in help_lines if line in ("Start here", "Your setup", "See what is shared", "Teammates")]
+    assert groups == ["Start here", "Your setup", "See what is shared", "Teammates"]
+    readme = (PLUGIN.parents[1] / "README.md").read_text()
+    commands = readme.split("## Commands", 1)[1].split("\n## ", 1)[0]
+    codex = (PLUGIN / "codex" / "skills" / "vyavastha" / "SKILL.md").read_text()
+    for text in (commands, codex):
+        lines = text.splitlines()
+        places = [lines.index(group) for group in groups]
+        assert places == sorted(places)
+        start = lines[places[0] + 1:places[1]]
+        steps = [line for line in start if line.strip()]
+        assert [step[:3] for step in steps] == ["1. ", "2. ", "3. "]
+        assert "vyavastha sign in" in steps[0] and "vyavastha on" in steps[1]
+        setup = " ".join(lines[places[1]:places[2]])
+        for command in ("vyavastha status", "vyavastha check", "vyavastha off", "vyavastha sign out"):
+            assert command in setup
+
+
+def test_the_hooks_files_describe_the_plugin_as_its_listing_does():
+    for hooks, listing, tool in (("hooks.json", ".claude-plugin", "Claude"), ("codex.json", ".codex-plugin", "Codex")):
+        said = json.loads((PLUGIN / "hooks" / hooks).read_text())["description"]
+        described = json.loads((PLUGIN / listing / "plugin.json").read_text())["description"]
+        assert described.rstrip(".").lower() in said.lower() and f"before {tool} changes code" in said
+        assert "The first session on a computer that isn’t signed in opens the sign-in page." in said
+
+
+def test_the_composer_icon_keeps_its_drawing():
+    svg = (PLUGIN / "assets" / "composer-icon.svg").read_text()
+    assert 'viewBox="0 0 100 100"' in svg and 'fill="#f7ead8"' in svg and 'stop-color="#9a2219"' in svg
+    # Drawn for small sizes: the letter without the ring.
+    assert "<circle" not in svg

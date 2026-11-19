@@ -1,5 +1,5 @@
 {
-  "description": "Vyavastha: once switched on in a project, checks each request against your team’s record before Claude changes code, and tells teammates which files are changing.",
+  "description": "Vyavastha checks your requests against what your team has said and decided before Claude changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents, in each project where you switch it on. The first session on a computer that isn’t signed in opens the sign-in page.",
   "hooks": {
     "SessionStart": [
       {
