@@ -125,7 +125,9 @@ def main() -> int:
         done = subprocess.run(["sh", str(SCRIPT), *command], input=json.dumps(stdin) if stdin else "",
                               capture_output=True, text=True, cwd=cwd or work, timeout=120, env={
                                   "PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTHA_HOME": str(home),
-                                  "VYAVASTHA_SERVER": base, "CLAUDE_PROJECT_DIR": str(cwd or work)})
+                                  "VYAVASTHA_SERVER": base, "CLAUDE_PROJECT_DIR": str(cwd or work),
+                                  # Pages the plugin opens (sign-in, the session's chat) are not opened here.
+                                  "VYAVASTHA_BROWSER": "true"})
         if done.returncode != 0:
             failures.append(f"{' '.join(command)} exited {done.returncode}: {done.stderr}")
         return done.stdout
@@ -192,6 +194,21 @@ def main() -> int:
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "Initial"], check=True, env=environment)
         subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "drop-customer-plan"], check=True)
 
+        step("Off until switched on: a session start and a message do nothing")
+        said = hook("session-start", "SessionStart", repo, source="startup")
+        expect("installed and off in this project" in said.get("systemMessage", ""),
+               "the first session start says once that the plugin is off here")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
+        expect(said == {}, "a message in a project that is off is left alone")
+
+        step("vyavastha on")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha on")
+        reason = said.get("reason", "")
+        expect(said.get("decision") == "block" and "Vyavastha is on for customer-platform" in reason,
+               "the plugin answers “vyavastha on” itself")
+        expect("Vyavastha reads northwind/customer-platform for you" in reason and "Code sharing is off" in reason,
+               "and says the repository is read and code sharing is off")
+
         step("SessionStart")
         said = hook("session-start", "SessionStart", repo, source="startup")
         expect("signed in as sam@northwind.dev" in said.get("systemMessage", ""), "the session says it is signed in")
@@ -205,7 +222,9 @@ def main() -> int:
 
         step("UserPromptSubmit: a question")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="What does this repository do?")
-        expect(said == {}, "a question goes to Claude untouched")
+        expect("hookSpecificOutput" not in said and "decision" not in said
+               and said.get("systemMessage", "").startswith("Vyavastha · sent: your message."),
+               "a question goes to Claude untouched, with its one line")
 
         step("UserPromptSubmit: a question about the team, asked in Vyavastha as in its web app’s chat")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="What has my team said about customer_plan?")
@@ -217,6 +236,7 @@ def main() -> int:
         expect(len(chats) == 1, "the question and its answer are a chat of Sam’s in the web app")
         outside = work / "notes"
         outside.mkdir()
+        plugin("on", cwd=outside)
         said = hook("prompt", "UserPromptSubmit", outside, prompt="Vyavastha, what is my team working on?")
         expect(bool(said.get("hookSpecificOutput", {}).get("additionalContext")),
                "from a folder that is no repository it is asked all the same")
@@ -242,6 +262,94 @@ def main() -> int:
         expect(sorted(entry["path"] for entry in record.get("files", [])) == ["api/notes.md", "api/serializers.py"],
                "with the files git reports, and their line counts")
 
+        step("vyavastha share code on, then a message with a change in the working tree")
+        shared_on = plugin("share-code", "on", cwd=repo)
+        print("  " + shared_on.strip().replace("\n", "\n  "))
+        expect("Code sharing is on for northwind/customer-platform" in shared_on, "code sharing is on for the repository")
+        expect("summary" in shared_on and "Never sent from this computer: files git ignores" in shared_on,
+               "and the answer says teammates see only a summary, and what is never sent")
+        (repo / "api" / "views.py").write_text("def plan(customer):\n    return customer.subscription_tier\n")
+        (repo / ".env").write_text("STRIPE_KEY=sk_live_not_sent\n")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Return subscription_tier where customer_plan was used")
+        line = said.get("systemMessage", "")
+        expect("your uncommitted changes (" in line, "the line says the uncommitted changes went")
+        expect("1 file that looks like a key or password" in line, "and that the key file was left out")
+        listed = plugin("shared", cwd=repo)
+        print("  shared printed: " + listed.strip().replace("\n", "\n  ")[:800])
+        expect("Sent to Vyavastha from this session" in listed and "sk_live_not_sent" not in listed,
+               "“vyavastha shared” lists what this session sent, read from the server")
+        chat = plugin("chat", cwd=repo)
+        expect("/c/" in chat, "“vyavastha chat” gives the link to this session’s chat")
+        (repo / ".env").unlink()
+
+        step("Summaries: a message kept in this session’s chat, Claude’s reply when the turn ends, Sam’s summaries")
+        said = hook("prompt", "UserPromptSubmit", repo,
+                    prompt="Rename subscription_tier to plan_tier in api/views.py")
+        expect("Kept in this session’s chat for your summary." in said.get("systemMessage", ""),
+               "the line says the message was kept in this session’s chat for Sam’s summary")
+        reply = "I renamed subscription_tier to plan_tier in api/views.py; “the tests pass”.\n\nNothing else changed."
+        said = hook("stopped", "Stop", repo, stop_hook_active=False, last_assistant_message=reply)
+        expect(said == {}, "the Stop hook sends Claude’s reply and prints nothing")
+        chats = sam.ok("GET", "/conversations")
+        expect(len(chats) == 1, "the session is still one chat of Sam’s")
+        chat_id = chats[0]["conversation_id"] if chats else ""
+        shown = json.dumps(sam.ok("GET", f"/conversations/{chat_id}"), ensure_ascii=False) if chat_id else ""
+        expect("Rename subscription_tier to plan_tier" in shown and "the tests pass" in shown,
+               "the chat holds Sam’s message and Claude’s reply")
+        expect(ganesh.call("GET", f"/conversations/{chat_id}")[0] == 404, "and Ganesh can’t open it")
+        category = None
+        for _ in range(60):
+            mine = sam.ok("GET", "/summaries").get("mine", [])
+            category = next((row for row in mine if row["kind"] == "repository"
+                             and "customer-platform" in row["name"].casefold()), None)
+            if category:
+                break
+            time.sleep(1)
+        print("  Sam’s summaries: " + json.dumps(sam.ok("GET", "/summaries").get("mine", []), ensure_ascii=False)[:600])
+        expect(category is not None, "Sam’s summaries hold a category for the repository the session works in")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha summaries off")
+        expect(said.get("decision") == "block" and said.get("reason", "").startswith("Summaries are off"),
+               "“vyavastha summaries off” is answered by the plugin")
+        before = len(sam.ok("GET", f"/conversations/{chat_id}").get("messages", [])) if chat_id else -1
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Rename plan_tier back to subscription_tier")
+        expect("Not kept, because summaries are off." in said.get("systemMessage", ""), "the next line says not kept")
+        hook("stopped", "Stop", repo, stop_hook_active=False, last_assistant_message="Renamed it back.")
+        after = sam.ok("GET", f"/conversations/{chat_id}") if chat_id else {}
+        expect(len(after.get("messages", [])) == before and "Renamed it back" not in json.dumps(after),
+               "and nothing more is kept in the chat")
+        expect(len(sam.ok("GET", "/conversations")) == 1, "nor in a new one")
+        hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha summaries on")
+
+        step("vyavastha off, and on again")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha off")
+        expect(said.get("reason", "").startswith("Vyavastha is off for customer-platform"), "off says so in one line")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
+        expect(said == {}, "and then a message is left alone")
+        hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha on")
+
+        step("Teammates: Sam asks Ganesh’s agent; Ganesh asks Sam’s agent and assigns him a task")
+        asked = plugin("tell", "Ganesh", "What are you working on this week?", cwd=repo)
+        print("  tell printed: " + asked.strip().replace("\n", "\n  ")[:800])
+        expect("── To " in asked and "’s agent · from " in asked, "the message opens with its header")
+        expect("── From " in asked or "still" in asked, "and the agent’s answer follows under its own, or is on its way")
+        expect(asked.count("/?agent-chat=") == 1, "the link to the conversation is printed once")
+        sam_id = sam.ok("GET", "/session")["user"]["user_id"]
+        ganesh.ok("POST", f"/agent-chats/{sam_id}/messages", {"text": "Is customer_plan still in the API?",
+                                                               "kind": "message", "client_request_id": "e2e-1"})
+        ganesh.ok("POST", f"/agent-chats/{sam_id}/messages", {"text": "Add a test for subscription_tier.",
+                                                               "kind": "task", "client_request_id": "e2e-2"})
+        said = hook("session-start", "SessionStart", repo, source="startup")
+        start_line = said.get("systemMessage", "")
+        print("  SessionStart said: " + start_line.replace("\n", "\n  ")[:900])
+        expect("While you were away:" in start_line and "· asked your agent ──" in start_line
+               and "· assigned you a task ──" in start_line, "the next session starts with both, under headers")
+        task = re.search(r"(\d+)\. Add a test for subscription_tier", start_line)
+        if task:
+            said = hook("prompt", "UserPromptSubmit", repo, prompt=f"vyavastha start {task.group(1)}")
+            expect("decision" not in said and "Add a test for subscription_tier"
+                   in said.get("hookSpecificOutput", {}).get("additionalContext", ""),
+                   "starting the task gives its words to Claude as the request")
+
         step("Sam commits; Claude stops again")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Drop customer_plan"], check=True,
                        env=environment)
@@ -256,7 +364,7 @@ def main() -> int:
         print(f"  Settings lists: Claude Code on {tool['machine']}, {tool['workspace']}")
         sam.ok("DELETE", f"/plugin/tokens/{tool['token_id']}")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
-        expect("connection has ended" in said.get("systemMessage", "") and not (home / "credentials").exists(),
+        expect("connection to Vyavastha has ended" in said.get("systemMessage", "") and not (home / "credentials").exists(),
                "the next request goes on unchecked, and the plugin says it was signed out")
     finally:
         server.terminate()

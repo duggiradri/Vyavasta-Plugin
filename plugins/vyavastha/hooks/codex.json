@@ -1,5 +1,5 @@
 {
-  "description": "Vyavastha: checks each request against your team’s record before Codex changes code, and tells teammates which files are changing.",
+  "description": "Vyavastha: once switched on in a project, checks each request against your team’s record before Codex changes code, and tells teammates which files are changing.",
   "hooks": {
     "SessionStart": [
       {

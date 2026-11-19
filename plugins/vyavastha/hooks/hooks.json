@@ -1,5 +1,5 @@
 {
-  "description": "Vyavastha: checks each request against your team’s record before Claude changes code, and tells teammates which files are changing.",
+  "description": "Vyavastha: once switched on in a project, checks each request against your team’s record before Claude changes code, and tells teammates which files are changing.",
   "hooks": {
     "SessionStart": [
       {
@@ -31,6 +31,11 @@
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavastha.sh\" hook edited",
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavastha.sh\" hook edit-check",
+            "timeout": 5
           }
         ]
       }
