@@ -222,9 +222,11 @@ json_rows() {
 
 # A JSON string's text (the quotes taken off, its escapes undone): for ids, paths, words compared here, and an
 # answer printed as it was written. The text is split at its backslashes once and each piece printed as it comes,
-# so a long text with many escapes costs time in proportion to its length.
+# so a long text with many escapes costs time in proportion to its length. Its awk works in bytes, whatever the
+# locale (the whole script sets it, and the function keeps it on its own): an escaped character is written as the
+# bytes of UTF-8 by `sprintf("%c", n)`, which gives one byte only where awk works in bytes.
 json_text() {
-  printf '%s' "$1" | awk '
+  printf '%s' "$1" | LC_ALL=C awk '
     function hex(h,   v, k, c) {
       v = 0; h = tolower(h)
       for (k = 1; k <= length(h); k++) { c = index("0123456789abcdef", substr(h, k, 1)); if (c == 0) return 63; v = v * 16 + c - 1 }
@@ -323,7 +325,10 @@ QUOTE_END="End of the quoted record."
 # The awk function that splits one line of input into the lines a reader sees: at a carriage return (alone, or
 # before the line feed that ended the input line) and at every other character that ends a line (vertical tab, form
 # feed, the file, group and record separators, and Unicode's next-line, line and paragraph separators). Each other
-# control character, but a tab, becomes a space.
+# control character, but a tab, becomes a space. Every awk that runs it is run with LC_ALL=C, so it works in bytes on
+# every awk: the separators are found by their bytes in UTF-8 (built with `sprintf("%c", n)`, a byte only then), the
+# ranges of control characters are ranges of bytes, and bytes that are not valid UTF-8 are kept as they are rather
+# than stopping awk, so the words never vanish.
 LINES_AWK='
   function split_lines(s, part,   n) {
     sub(/\r$/, "", s)
@@ -344,7 +349,7 @@ LINES_AWK='
 # inside one marked, are printed as they are: never quoted twice. Nothing is printed for no words.
 quoted() {
   [ -n "$1" ] || return 0
-  printf '%s' "$1" | awk -v TOP="$QUOTE_TOP" -v MARK="$QUOTE_MARK" -v LAST="$QUOTE_END" "$LINES_AWK"'
+  printf '%s' "$1" | LC_ALL=C awk -v TOP="$QUOTE_TOP" -v MARK="$QUOTE_MARK" -v LAST="$QUOTE_END" "$LINES_AWK"'
     { n = split_lines($0, part); for (i = 1; i <= n; i++) line[++lines] = part[i] }
     END {
       inside = 0; records = 0; already = 1
@@ -365,9 +370,31 @@ quoted() {
 # A short field the server sent (a name, a time, a number or an address) on one line: every line break, tab and
 # other control character in it a space.
 one_line() {
-  printf '%s' "$1" | awk "$LINES_AWK"'
+  printf '%s' "$1" | LC_ALL=C awk "$LINES_AWK"'
     { n = split_lines($0, part)
       for (i = 1; i <= n; i++) { gsub(/\t/, " ", part[i]); printf "%s%s", (out++ ? " " : ""), part[i] } }'
+}
+
+# A person's name, or a workspace's or an email address, where the plugin prints it as its own words, outside a
+# quoted record (a header, a sentence): on one line (`one_line`), and at most PERSON_CHARACTERS characters, cut with
+# an ellipsis when it is longer, so a name can't carry a sentence of its own to the tool's model. Characters are
+# counted as UTF-8 counts them, every byte but those that carry on a character, so a cut never splits one. Only what
+# is printed is cut: the name kept and sent (who a reply goes to) stays whole.
+PERSON_CHARACTERS=40
+person() {
+  one_line "$1" | LC_ALL=C awk -v most="$PERSON_CHARACTERS" '
+    BEGIN { RS = "\001"; for (i = 128; i < 192; i++) more[sprintf("%c", i)] = 1 }
+    NR == 1 {
+      s = $0; chars = 0; cut = 0
+      for (i = 1; i <= length(s); i++) {
+        if (substr(s, i, 1) in more) continue
+        chars++
+        # Where the last character kept before the ellipsis ends.
+        if (chars == most) cut = i - 1
+        if (chars > most) { head = substr(s, 1, cut); sub(/ +$/, "", head); printf "%s…", head; exit }
+      }
+      printf "%s", s
+    }'
 }
 
 # A version number the server sent, as it is when it is one (numbers separated by dots), else nothing.
@@ -644,7 +671,7 @@ finish_pairing() {
         "$(one_line "$(json_text "$(answer workspace)")")"
       rm -f "$PENDING"
       TOKEN=$(token_for "$SERVER")
-      CONNECTED="Connected as $(saved email) in $(saved workspace)."
+      CONNECTED="Connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
       ;;
     404|410) rm -f "$PENDING" ;;
   esac
@@ -1202,8 +1229,8 @@ hook_session_start() {
   case "$STATUS" in
     200)
       remember_me
-      if [ -n "$CONNECTED" ]; then who="connected as $(saved email) in $(saved workspace)."
-      else who="signed in as $(one_line "$(json_text "$(answer email)")") in $(one_line "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
+      if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
+      else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
       greeting="Vyavastha: $who $(reach_said "$(answer repositories)")"
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavastha’s web app, so your uncommitted changes are no longer sent. Send “vyavastha share code on” to turn it on again."
@@ -1307,7 +1334,8 @@ remember_me() {
 
 # What teammates sent the developer, each under its header, numbered as the server numbers them; the numbers are
 # kept so “vyavastha reply 2: …” knows which item it answers. What they wrote, and what the developer's agent
-# answered, are quoted records beneath; the header is the plugin's own, on one line. The server gives a few dozen at
+# answered, are quoted records beneath; the header is the plugin's own, on one line, the name in it cut to a short
+# one (`person`), though the listing keeps it whole for a reply to go to. The server gives a few dozen at
 # a time: $2 is how many more wait (its `more`), said in one line when there are any.
 render_inbox() {
   true > "$TMP/listing"
@@ -1327,7 +1355,7 @@ render_inbox() {
       reply) what="replied"; has_message=1 ;;
       *) what="asked your agent"; has_message=1 ;;
     esac
-    printf '── %s. From %s · %s · %s ──\n' "$n" "$from" "$at" "$what"
+    printf '── %s. From %s · %s · %s ──\n' "$n" "$(person "$from")" "$at" "$what"
     quoted "$text"
     if [ -n "$answered" ]; then echo "Your agent answered:"; quoted "$answered"; fi
     [ "$kind" = "task" ] && [ -n "$state" ] && [ "$state" != "open" ] && printf 'This task is %s.\n' "$state"
@@ -2015,7 +2043,7 @@ command_sign_in() {
   if [ -n "$TOKEN" ]; then
     api GET /me "" "$QUICK_SECONDS"
     if [ "$STATUS" = "200" ]; then
-      echo "${CONNECTED:-Already signed in to Vyavastha ($SERVER) as $(one_line "$(json_text "$(answer email)")").} ${VERB} ${CMD_SIGN_OUT} first to switch accounts."
+      echo "${CONNECTED:-Already signed in to Vyavastha ($SERVER) as $(person "$(json_text "$(answer email)")").} ${VERB} ${CMD_SIGN_OUT} first to switch accounts."
       return
     fi
   fi
@@ -2082,7 +2110,7 @@ command_on() {
     api GET /me "" "$QUICK_SECONDS"
     if [ "$STATUS" = "200" ]; then
       remember_me
-      echo "${CONNECTED:-Signed in as $(one_line "$(json_text "$(answer email)")") in $(one_line "$(json_text "$(json_get "$TMP/workspace" name)")").}"
+      echo "${CONNECTED:-Signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")").}"
       repo_said "$(answer repositories)"
     else
       not_reached
@@ -2222,7 +2250,7 @@ command_status() {
   case "$STATUS" in
     200)
       remember_me
-      echo "Signed in as $(one_line "$(json_text "$(answer email)")") in $(one_line "$(json_text "$(json_get "$TMP/workspace" name)")"), on $(one_line "$(json_text "$(answer machine)")")."
+      echo "Signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")"), on $(one_line "$(json_text "$(answer machine)")")."
       repositories=$(answer repositories)
       if repository "$HERE" && [ -n "$REMOTE" ]; then
         name=$(repository_name "$REMOTE")
@@ -2246,7 +2274,7 @@ command_settings() {
   else echo "- Code sharing: off. Send “vyavastha share code on” to turn it on."; fi
   if [ "$(summaries)" = "on" ]; then echo "- Summaries: on. Send “vyavastha summaries off” to turn them off."
   else echo "- Summaries: off. Send “vyavastha summaries on” to turn them on."; fi
-  if [ -n "$TOKEN" ]; then echo "- Signed in as: $(saved email) in $(saved workspace). Send “vyavastha sign out” to sign out."
+  if [ -n "$TOKEN" ]; then echo "- Signed in as: $(person "$(saved email)") in $(person "$(saved workspace)"). Send “vyavastha sign out” to sign out."
   else echo "- Signed in as: nobody. $WAY_IN"; fi
   echo "- Server: $SERVER. To use another, run “sh $SELF use-server <address>” in a terminal, or set VYAVASTHA_SERVER."
 }
@@ -2257,7 +2285,7 @@ command_settings() {
 command_help() {
   command_here
   finish_pairing
-  if [ -n "$TOKEN" ]; then signed="You’re signed in as $(saved email) in $(saved workspace)."
+  if [ -n "$TOKEN" ]; then signed="You’re signed in as $(person "$(saved email)") in $(person "$(saved workspace)")."
   elif pending_waiting; then PAIR_AGAIN=1; signed="A sign-in is waiting: $(code_said)."
   else signed="You aren’t signed in yet."; fi
   if project_on; then here="It is on here."; else here="It is off here now."; fi
@@ -2446,12 +2474,12 @@ command_check() {
   elif [ -n "$reached" ]; then
     api GET /me "" "$QUICK_SECONDS"
     case "$STATUS" in
-      200) remember_me; repositories=$(answer repositories); echo "ok: signed in as $(one_line "$(json_text "$(answer email)")") in $(one_line "$(json_text "$(json_get "$TMP/workspace" name)")")." ;;
+      200) remember_me; repositories=$(answer repositories); echo "ok: signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")." ;;
       401) echo "Problem: this computer’s connection has ended. $WAY_IN_AGAIN" ;;
       *) echo "Problem: whether you’re signed in couldn’t be checked just now. Try again in a minute." ;;
     esac
   else
-    echo "Problem: signed in as $(saved email), but that couldn’t be checked while the server is out of reach."
+    echo "Problem: signed in as $(person "$(saved email)"), but that couldn’t be checked while the server is out of reach."
   fi
   if ! repository "$HERE"; then
     echo "Problem: this folder isn’t a git repository, so changes here can’t be checked. Questions about your team still work."
@@ -2517,16 +2545,17 @@ tell() {
   wait_on /tell "$TMP/tell"
   [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || { not_reached; return; }
   status=$(json_text "$(answer status)")
-  to=$(one_line "$(json_text "$(field "$(answer to)" name)")"); [ -n "$to" ] || to=$(one_line "$2")
-  from=$(one_line "$(json_text "$(field "$(answer from)" name)")"); [ -n "$from" ] || from=$(saved email)
+  # Who it went to and who sent it, as names printed in the plugin's own headers and sentences.
+  to=$(person "$(json_text "$(field "$(answer to)" name)")"); [ -n "$to" ] || to=$(person "$2")
+  from=$(person "$(json_text "$(field "$(answer from)" name)")"); [ -n "$from" ] || from=$(person "$(saved email)")
   at=$(one_line "$(json_text "$(answer at_said)")")
   notice=$(one_line "$(json_text "$(answer notice)")")
   url=$(one_line "$(json_text "$(answer url)")")
   case "$status" in
     unknown_person)
-      people=$(json_rows "$(answer people)" | while IFS= read -r one; do one_line "$(json_text "$one")"; echo; done \
+      people=$(json_rows "$(answer people)" | while IFS= read -r one; do person "$(json_text "$one")"; echo; done \
         | awk 'NF' | awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')
-      echo "Vyavastha doesn’t know a teammate called “$2”.${people:+ Your teammates: $people.}"
+      echo "Vyavastha doesn’t know a teammate called “$(person "$2")”.${people:+ Your teammates: $people.}"
       return ;;
     refused|unavailable)
       echo "${notice:-Vyavastha couldn’t send that just now.}"
@@ -2612,7 +2641,7 @@ set_task() {
   api POST /task "$TMP/task" "$QUICK_SECONDS"
   [ "$STATUS" = "200" ] || { not_reached; return 1; }
   TASK_TEXT=$(json_text "$(answer text)")
-  TASK_FROM=$(one_line "$(json_text "$(field "$(answer from)" name)")"); [ -n "$TASK_FROM" ] || TASK_FROM="$ITEM_FROM"
+  TASK_FROM=$(person "$(json_text "$(field "$(answer from)" name)")"); [ -n "$TASK_FROM" ] || TASK_FROM=$(person "$ITEM_FROM")
 }
 
 # Starting a task: it is marked accepted, and its text goes to the model as the developer's request (in a hook),
