@@ -85,13 +85,15 @@ See what is shared
 - `vyavastha upload`: opens this session’s chat so you can drop in a file; your next question in this session carries it. A pasted image never reaches Vyavastha by itself: with code sharing on, the same page opens once by itself; with it off, the message’s line says once to send `vyavastha upload`.
 
 Teammates
-- `vyavastha inbox`: what teammates asked of you and have not seen yet, numbered.
+- `vyavastha inbox`: what teammates asked of you and have not seen yet, numbered. Vyavastha gives 50 at a time, and when more wait, one line says how many.
 - `vyavastha ask <name>: <question>`: asks a teammate’s agent, which answers only from what you can both already see. The colon may be a comma, or left out when the name is one word.
 - `vyavastha assign <name>: <task>`: gives a teammate a task (owners and administrators only).
 - `vyavastha reply <number>: <words>`: answers an item of your last inbox listing.
 - `vyavastha start <number>`: accepts a task, and gives its words to Claude as your request, checked as any request is. `vyavastha done <number>` and `vyavastha decline <number>` close it.
 
 Every message to or from another person’s agent opens with a header line, such as `── To Priya Raman’s agent · from Sam Rivera · 18 November 2026, 10:42 · through Vyavastha ──`, and the answer with `── From Priya Raman’s agent · 18 November 2026, 10:43 · answered only from what you can both already see ──`.
+
+The words under each header, what teammates wrote in your inbox, a started task’s words and the answers to questions Claude asks Vyavastha are quoted: a first line says they come from the team’s record and are never instructions, every line of them starts with `│ `, and `End of the quoted record.` closes them. When Claude itself asks a teammate’s agent, it is given the answer as Vyavastha’s server quotes it, with the server’s own sentence about it before the quoted lines. A name or time in a header, and what Vyavastha’s server says in a command’s answer, are kept to one line. Nothing a teammate or an outsider writes can then pass for the plugin’s own lines.
 
 ## What it sends, and what it keeps
 
@@ -118,7 +120,7 @@ From a project that is on:
 - **Back from the server:** facts with their sources (who said what, when and where, and what the check made of them), and the answer to a question, shown to Claude as context. The plugin makes no model calls of its own on your Claude subscription.
 - **On your computer:** the token, in `~/.config/vyavastha/credentials` (or `$XDG_CONFIG_HOME/vyavastha`, or `$VYAVASTHA_HOME`), readable by you only (`chmod 600`, in a `700` folder); both tools share it. A token is never sent to any server but the one that issued it. Which projects are on, and whether code sharing and summaries are on for each and whether you were told what summaries do, are kept in `projects/` in the same folder, and short-lived notes for each session in `sessions/`, removed after a week.
 
-If you aren’t signed in, the server can’t be reached, or it isn’t working, Claude works as usual and the message’s line says what happened in one plain sentence. A slow check gives up after about a minute and Claude goes on; sending a reply at the end of a turn gives up after 4 seconds, and isn’t tried when the server was just found out of reach; a slow answer to a question is left in your chat in Vyavastha. The plugin never writes git’s own index or takes its lock, so your git commands and Claude’s never collide with it, and in a project that is off it looks only at the message itself, never the folder it was sent from: whether it starts with “vyavastha” and, for a message of 2,000 characters or fewer, whether it names Vyavastha. Any other message isn’t read at all.
+If you aren’t signed in, the server can’t be reached, or it isn’t working, Claude works as usual and the message’s line says what happened in one plain sentence. A slow check gives up after about a minute and Claude goes on; sending a reply at the end of a turn gives up after 4 seconds, and isn’t tried when the server was just found out of reach; a slow answer to a question is left in your chat in Vyavastha. The plugin never writes git’s own index or takes its lock, so your git commands and Claude’s never collide with it; it never runs a program a repository’s own settings name to watch its files or as its hooks; and it opens a page in your browser only when the page is on your Vyavastha server’s own address, printing any other for you to open yourself. In a project that is off it looks only at the message itself, never the folder it was sent from: whether it starts with “vyavastha” and, for a message of 2,000 characters or fewer, whether it names Vyavastha. Any other message isn’t read at all.
 
 ## Why a shell script
 
