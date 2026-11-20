@@ -1,14 +1,14 @@
 {
-  "name": "vyavastha",
+  "name": "vyavasta",
   "interface": {
-    "displayName": "Vyavastha"
+    "displayName": "Vyavasta"
   },
   "plugins": [
     {
-      "name": "vyavastha",
+      "name": "vyavasta",
       "source": {
         "source": "local",
-        "path": "./plugins/vyavastha"
+        "path": "./plugins/vyavasta"
       },
       "policy": {
         "installation": "AVAILABLE",

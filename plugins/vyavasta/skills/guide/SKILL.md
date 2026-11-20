@@ -1,0 +1,13 @@
+---
+description: "How to use the Vyavasta plugin: signing in, turning it on in a project, its commands, and what it sends and shares. Use when the developer asks how to use, connect, sign in to or set up Vyavasta, how to turn it on or off, what it does, or what it shares with their team."
+---
+
+Vyavasta connects Claude Code to the developer’s team. In a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and lets the developer ask teammates’ agents. It is off in every project until the developer turns it on there, and from a project that is off it sends nothing of the developer’s work.
+
+The plugin answers its own commands itself, before they reach you, so you cannot run them for the developer. Tell the developer which phrase to send, as a message of its own. In Claude Code most of them are also slash commands, such as /vyavasta:sign-in, /vyavasta:on and /vyavasta:help, which the developer can run instead.
+
+To start: “vyavasta sign in” opens the sign-in page in the browser with a code to enter there, and once they approve, the next message finishes connecting, in any project. Then “vyavasta on” in each project the developer wants it in (“vyavasta off” stops it there). After that they just work: every message gets one line saying what was sent to Vyavasta and what came of it. “vyavasta help” shows everything, “vyavasta status” says whether they are signed in and whether it is on, and “vyavasta check” tests the setup and says how to fix each problem.
+
+What it shares, and how to change it: “vyavasta settings” lists every setting. Summaries (“vyavasta summaries on” and “vyavasta summaries off”) keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates, under categories the developer chooses to show there. Code sharing (“vyavasta share code on” and “vyavasta share code off”, off until they turn it on) also sends their uncommitted changes for the check; teammates see only a short summary, never the code, and key files, ignored files, machine-written files and files that aren’t text are never sent. Otherwise, from a project that is on, each message’s words, the repository and branch, and changed files’ names are sent. “vyavasta shared” lists everything this session sent.
+
+Teammates: “vyavasta inbox” shows what teammates asked of the developer, and “vyavasta ask <name>: <question>” asks a teammate’s agent, which answers only from what both of them can already see.
