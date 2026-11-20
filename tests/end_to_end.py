@@ -1,4 +1,4 @@
-"""The whole loop on this computer, with no model: Vyavastha's server in demo mode, the plugin's own script paired
+"""The whole loop on this computer, with no model: Vyavasta's server in demo mode, the plugin's own script paired
 with it the way a developer pairs it, each hook fed the JSON Claude Code would send, and a teammate's account that
 sees the work.
 
@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "vyavastha" / "scripts" / "vyavastha.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "vyavasta" / "scripts" / "vyavasta.sh"
 REMOTE = "https://github.com/northwind/customer-platform.git"
 
 
@@ -40,7 +40,7 @@ class Browser:
     def call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | list | None]:
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(f"{self.base}/api/v1{path}", data=data, method=method, headers={
-            "X-Vyavastha": "1", **({"Content-Type": "application/json"} if data else {})})
+            "X-Vyavasta": "1", **({"Content-Type": "application/json"} if data else {})})
         try:
             with self.opener.open(request, timeout=30) as response:
                 text = response.read()
@@ -98,7 +98,7 @@ def step(title: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--project", type=Path, required=True, help="the Vyavastha project folder (with .venv)")
+    parser.add_argument("--project", type=Path, required=True, help="the Vyavasta project folder (with .venv)")
     parser.add_argument("--port", type=int, default=8804)
     args = parser.parse_args()
     project = args.project.resolve()
@@ -106,14 +106,14 @@ def main() -> int:
     data = project / "frontend" / "e2e" / ".artifacts" / f"plugin-loop-{args.port}"
     shutil.rmtree(data, ignore_errors=True)
     data.mkdir(parents=True)
-    work = Path(tempfile.mkdtemp(prefix="vyavastha-loop-"))
+    work = Path(tempfile.mkdtemp(prefix="vyavasta-loop-"))
     home = work / "plugin-home"
     log = (data / "server.log").open("w")
     server = subprocess.Popen(
         [str(project / ".venv" / "bin" / "python"), "-m", "mas_stealth.web_cli", "--demo", "--port", str(args.port)],
         cwd=project, stdout=log, stderr=subprocess.STDOUT,
-        env={**os.environ, "PYTHONPATH": "src", "VYAVASTHA_DATA_DIR": str(data), "VYAVASTHA_PUBLIC_ORIGIN": base,
-             "VYAVASTHA_DEMO_LATENCY_MS": "0", "VYAVASTHA_CODE_AGENT": "scripted", "PYTHONDONTWRITEBYTECODE": "1"})
+        env={**os.environ, "PYTHONPATH": "src", "VYAVASTA_DATA_DIR": str(data), "VYAVASTA_PUBLIC_ORIGIN": base,
+             "VYAVASTA_DEMO_LATENCY_MS": "0", "VYAVASTA_CODE_AGENT": "scripted", "PYTHONDONTWRITEBYTECODE": "1"})
     failures: list[str] = []
 
     def expect(condition: bool, what: str) -> None:
@@ -124,10 +124,10 @@ def main() -> int:
     def plugin(*command: str, stdin: dict | None = None, cwd: Path | None = None) -> str:
         done = subprocess.run(["sh", str(SCRIPT), *command], input=json.dumps(stdin) if stdin else "",
                               capture_output=True, text=True, cwd=cwd or work, timeout=120, env={
-                                  "PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTHA_HOME": str(home),
-                                  "VYAVASTHA_SERVER": base, "CLAUDE_PROJECT_DIR": str(cwd or work),
+                                  "PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTA_HOME": str(home),
+                                  "VYAVASTA_SERVER": base, "CLAUDE_PROJECT_DIR": str(cwd or work),
                                   # Pages the plugin opens (sign-in, the session's chat) are not opened here.
-                                  "VYAVASTHA_BROWSER": "true"})
+                                  "VYAVASTA_BROWSER": "true"})
         if done.returncode != 0:
             failures.append(f"{' '.join(command)} exited {done.returncode}: {done.stderr}")
         return done.stdout
@@ -182,9 +182,9 @@ def main() -> int:
         step("The first session after installing: sign-in starts by itself, and Sam approves the code in the web app")
         said = hook("session-start", "SessionStart", repo, source="startup")
         welcome = said.get("systemMessage", "")
-        expect(welcome.startswith("Vyavastha is installed. To connect this computer, enter the code ")
-               and f"({base}/" in welcome and "“vyavastha on”" in welcome and "“vyavastha help”" in welcome,
-               "the welcome gives the code and the Connect page’s address, then “vyavastha on” and “vyavastha help”")
+        expect(welcome.startswith("Vyavasta is installed. To connect this computer, enter the code ")
+               and f"({base}/" in welcome and "“vyavasta on”" in welcome and "“vyavasta help”" in welcome,
+               "the welcome gives the code and the Connect page’s address, then “vyavasta on” and “vyavasta help”")
         found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", welcome)
         code = found.group(1) if found else ""
         again = hook("session-start", "SessionStart", repo, source="startup").get("systemMessage", "")
@@ -198,10 +198,10 @@ def main() -> int:
             sam.ok("POST", "/plugin/pairings/approve", {"code": code, "approve": True})
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Rename the helper in serializers.py")
         expect(set(said) == {"systemMessage"}
-               and said["systemMessage"].startswith("Vyavastha: connected as sam@northwind.dev")
-               and "“vyavastha on”" in said["systemMessage"],
+               and said["systemMessage"].startswith("Vyavasta: connected as sam@northwind.dev")
+               and "“vyavasta on”" in said["systemMessage"],
                "after approving, Sam’s next ordinary message finishes connecting, says so, and goes through")
-        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha how do I sign in?")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta how do I sign in?")
         expect(said.get("decision") == "block" and "You’re signed in as sam@northwind.dev" in said.get("reason", ""),
                "asking how to sign in is answered with help, which says Sam is signed in")
         status = plugin("status")
@@ -211,22 +211,22 @@ def main() -> int:
         expect("token=vyv-tool-" in credentials and oct((home / "credentials").stat().st_mode & 0o777) == "0o600",
                "the token is kept in a file only Sam can read")
         expect("vyv-tool-" not in welcome + again + status + json.dumps(said), "the token was never printed")
-        expect("Already signed in" in plugin("sign-in"), "“vyavastha sign in” then says it is signed in already")
+        expect("Already signed in" in plugin("sign-in"), "“vyavasta sign in” then says it is signed in already")
 
         step("Off until switched on: a message does nothing, and a question about the plugin only tells Claude how")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
         expect(said == {}, "a message in a project that is off is left alone")
-        said = hook("prompt", "UserPromptSubmit", repo, prompt="How do I turn Vyavastha on here?")
-        expect(set(said) == {"hookSpecificOutput"} and "“vyavastha on”" in said["hookSpecificOutput"]["additionalContext"],
-               "a question about using Vyavastha gives Claude the phrases to tell Sam, and nothing more")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="How do I turn Vyavasta on here?")
+        expect(set(said) == {"hookSpecificOutput"} and "“vyavasta on”" in said["hookSpecificOutput"]["additionalContext"],
+               "a question about using Vyavasta gives Claude the phrases to tell Sam, and nothing more")
         expect(sam.ok("GET", "/conversations") == [], "and nothing was sent")
 
-        step("vyavastha on")
-        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha on")
+        step("vyavasta on")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta on")
         reason = said.get("reason", "")
-        expect(said.get("decision") == "block" and "Vyavastha is on for customer-platform" in reason,
-               "the plugin answers “vyavastha on” itself")
-        expect("Vyavastha reads northwind/customer-platform for you" in reason and "Code sharing is off" in reason,
+        expect(said.get("decision") == "block" and "Vyavasta is on for customer-platform" in reason,
+               "the plugin answers “vyavasta on” itself")
+        expect("Vyavasta reads northwind/customer-platform for you" in reason and "Code sharing is off" in reason,
                "and says the repository is read and code sharing is off")
 
         step("SessionStart")
@@ -243,13 +243,13 @@ def main() -> int:
         step("UserPromptSubmit: a question")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="What does this repository do?")
         expect("hookSpecificOutput" not in said and "decision" not in said
-               and said.get("systemMessage", "").startswith("Vyavastha · sent: your message."),
+               and said.get("systemMessage", "").startswith("Vyavasta · sent: your message."),
                "a question goes to Claude untouched, with its one line")
 
-        step("UserPromptSubmit: a question about the team, asked in Vyavastha as in its web app’s chat")
+        step("UserPromptSubmit: a question about the team, asked in Vyavasta as in its web app’s chat")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="What has my team said about customer_plan?")
         context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
-        expect(context.startswith("Vyavastha’s assistant answered this message") and "customer_plan" in context,
+        expect(context.startswith("Vyavasta’s assistant answered this message") and "customer_plan" in context,
                "Claude is given the assistant’s answer, to pass on")
         expect("Answered from your team’s record" in said.get("systemMessage", ""), "Sam is told it was asked there")
         chats = sam.ok("GET", "/conversations")
@@ -257,12 +257,12 @@ def main() -> int:
         outside = work / "notes"
         outside.mkdir()
         plugin("on", cwd=outside)
-        said = hook("prompt", "UserPromptSubmit", outside, prompt="Vyavastha, what is my team working on?")
+        said = hook("prompt", "UserPromptSubmit", outside, prompt="Vyavasta, what is my team working on?")
         expect(bool(said.get("hookSpecificOutput", {}).get("additionalContext")),
                "from a folder that is no repository it is asked all the same")
         asked = plugin("ask", "Who said what about customer_plan?", cwd=repo)
         print("  ask printed: " + asked.strip().replace("\n", "\n  ")[:600])
-        expect("From Vyavastha, the team’s record" in asked, "the tool’s model can ask Vyavastha itself")
+        expect("From Vyavasta, the team’s record" in asked, "the tool’s model can ask Vyavasta itself")
         expect(len(sam.ok("GET", "/conversations")) == 1, "all in the one chat of this session")
         expect(ganesh.ok("GET", "/conversations") == [], "and nobody else has it")
 
@@ -282,7 +282,7 @@ def main() -> int:
         expect(sorted(entry["path"] for entry in record.get("files", [])) == ["api/notes.md", "api/serializers.py"],
                "with the files git reports, and their line counts")
 
-        step("vyavastha share code on, then a message with a change in the working tree")
+        step("vyavasta share code on, then a message with a change in the working tree")
         shared_on = plugin("share-code", "on", cwd=repo)
         print("  " + shared_on.strip().replace("\n", "\n  "))
         expect("Code sharing is on for northwind/customer-platform" in shared_on, "code sharing is on for the repository")
@@ -296,10 +296,10 @@ def main() -> int:
         expect("1 file that looks like a key or password" in line, "and that the key file was left out")
         listed = plugin("shared", cwd=repo)
         print("  shared printed: " + listed.strip().replace("\n", "\n  ")[:800])
-        expect("Sent to Vyavastha from this session" in listed and "sk_live_not_sent" not in listed,
-               "“vyavastha shared” lists what this session sent, read from the server")
+        expect("Sent to Vyavasta from this session" in listed and "sk_live_not_sent" not in listed,
+               "“vyavasta shared” lists what this session sent, read from the server")
         chat = plugin("chat", cwd=repo)
-        expect("/c/" in chat, "“vyavastha chat” gives the link to this session’s chat")
+        expect("/c/" in chat, "“vyavasta chat” gives the link to this session’s chat")
         (repo / ".env").unlink()
 
         step("Summaries: a message kept in this session’s chat, Claude’s reply when the turn ends, Sam’s summaries")
@@ -327,9 +327,9 @@ def main() -> int:
             time.sleep(1)
         print("  Sam’s summaries: " + json.dumps(sam.ok("GET", "/summaries").get("mine", []), ensure_ascii=False)[:600])
         expect(category is not None, "Sam’s summaries hold a category for the repository the session works in")
-        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha summaries off")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta summaries off")
         expect(said.get("decision") == "block" and said.get("reason", "").startswith("Summaries are off"),
-               "“vyavastha summaries off” is answered by the plugin")
+               "“vyavasta summaries off” is answered by the plugin")
         before = len(sam.ok("GET", f"/conversations/{chat_id}").get("messages", [])) if chat_id else -1
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Rename plan_tier back to subscription_tier")
         expect("Not kept, because summaries are off." in said.get("systemMessage", ""), "the next line says not kept")
@@ -338,14 +338,14 @@ def main() -> int:
         expect(len(after.get("messages", [])) == before and "Renamed it back" not in json.dumps(after),
                "and nothing more is kept in the chat")
         expect(len(sam.ok("GET", "/conversations")) == 1, "nor in a new one")
-        hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha summaries on")
+        hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta summaries on")
 
-        step("vyavastha off, and on again")
-        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha off")
-        expect(said.get("reason", "").startswith("Vyavastha is off for customer-platform"), "off says so in one line")
+        step("vyavasta off, and on again")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta off")
+        expect(said.get("reason", "").startswith("Vyavasta is off for customer-platform"), "off says so in one line")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
         expect(said == {}, "and then a message is left alone")
-        hook("prompt", "UserPromptSubmit", repo, prompt="vyavastha on")
+        hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta on")
 
         step("Teammates: Sam asks Ganesh’s agent; Ganesh asks Sam’s agent and assigns him a task")
         asked = plugin("tell", "Ganesh", "What are you working on this week?", cwd=repo)
@@ -365,7 +365,7 @@ def main() -> int:
                and "· assigned you a task ──" in start_line, "the next session starts with both, under headers")
         task = re.search(r"(\d+)\. Add a test for subscription_tier", start_line)
         if task:
-            said = hook("prompt", "UserPromptSubmit", repo, prompt=f"vyavastha start {task.group(1)}")
+            said = hook("prompt", "UserPromptSubmit", repo, prompt=f"vyavasta start {task.group(1)}")
             expect("decision" not in said and "Add a test for subscription_tier"
                    in said.get("hookSpecificOutput", {}).get("additionalContext", ""),
                    "starting the task gives its words to Claude as the request")
@@ -384,7 +384,7 @@ def main() -> int:
         print(f"  Settings lists: Claude Code on {tool['machine']}, {tool['workspace']}")
         sam.ok("DELETE", f"/plugin/tokens/{tool['token_id']}")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
-        expect("connection to Vyavastha has ended" in said.get("systemMessage", "") and not (home / "credentials").exists(),
+        expect("connection to Vyavasta has ended" in said.get("systemMessage", "") and not (home / "credentials").exists(),
                "the next request goes on unchecked, and the plugin says it was signed out")
         said = hook("session-start", "SessionStart", repo, source="startup")
         expect("To connect, enter the code " in said.get("systemMessage", ""),

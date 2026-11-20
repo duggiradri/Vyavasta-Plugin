@@ -1,0 +1,32 @@
+{
+  "name": "vyavasta",
+  "version": "0.5.0",
+  "description": "Checks your requests against what your team has said and decided before Codex changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents.",
+  "author": {
+    "name": "Vyavasta",
+    "url": "https://vyavasta.com"
+  },
+  "homepage": "https://vyavasta.com",
+  "keywords": [
+    "team",
+    "decisions",
+    "code review",
+    "work in progress"
+  ],
+  "hooks": "./hooks/codex.json",
+  "skills": "./codex/skills/",
+  "interface": {
+    "displayName": "Vyavasta",
+    "shortDescription": "Your team’s record, in Codex: checks, summaries and answers.",
+    "longDescription": "Once you turn it on in a project, Vyavasta checks each request against what your team has said and decided before Codex changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents. Send “vyavasta help” to see how to start.",
+    "developerName": "Vyavasta",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://vyavasta.com",
+    "logo": "./assets/logo.png",
+    "composerIcon": "./assets/composer-icon.png",
+    "brandColor": "#9A2219"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "vyavasta",
+  "displayName": "Vyavasta",
+  "version": "0.5.0",
+  "description": "Checks your requests against what your team has said and decided before Claude changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents.",
+  "author": {
+    "name": "Vyavasta",
+    "url": "https://vyavasta.com"
+  },
+  "homepage": "https://vyavasta.com",
+  "keywords": [
+    "team",
+    "decisions",
+    "code review",
+    "work in progress"
+  ]
+}
