@@ -45,7 +45,7 @@ git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # plain sentence instead.
 [ -n "${VYAVASTA_DEBUG:-}" ] || exec 2>/dev/null
 
-VERSION="0.5.1"
+VERSION="0.5.2"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTA_TOOL=codex). The tool's own name,
@@ -60,6 +60,9 @@ esac
 # the plugin answers itself (in Claude Code the slash command does the same).
 WAY_IN="Send “vyavasta sign in” to connect."
 WAY_IN_AGAIN="Send “vyavasta sign in” to connect again."
+# What a server that checks no request does instead (/me says `"checks": false`: the demo, or one with no model),
+# said wherever a line would otherwise say that requests are checked.
+UNCHECKED="This Vyavasta server doesn’t check requests, so ${AGENT} is shown what your team has said about each one instead."
 # This script, by its full path: what the tool's model is told to run to ask Vyavasta a question.
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 case "$CLIENT" in codex) ASK_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
@@ -1245,7 +1248,8 @@ hook_session_start() {
       remember_me
       if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
       else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
-      greeting="Vyavasta: $who $(reach_said "$(answer repositories)")"
+      checks=$(answer checks)
+      greeting="Vyavasta: $who $(reach_said "$(answer repositories)" "$checks")"
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
       fi
@@ -1263,11 +1267,13 @@ $(render_inbox "$items" "$(answer more)")"
       fi
       sandboxed=""
       [ "$CLIENT" = "codex" ] && sandboxed=" Codex runs that command in a closed-off space that may keep it from reaching Vyavasta; when it says so, tell the developer they can ask the same thing by sending a message that starts with “Vyavasta,”."
+      if [ "$checks" = "false" ]; then checked="each request for one goes to Vyavasta before it reaches you, and you are shown what the team has said about it (this Vyavasta server checks no request)."
+      else checked="each request for one is checked against the record before it reaches you."; fi
       # The developer is told they are connected; the tool's model is told what Vyavasta is here for, and how
       # to ask it what the plugin did not already ask for them.
       printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
         "$(json_quote "$greeting")" \
-        "$(json_quote "Vyavasta is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavasta answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavasta before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" .$sandboxed Changes to the code are yours to make on this computer; each request for one is checked against the record before it reaches you. Messages that start with “vyavasta” are the developer’s commands to the plugin, which answers them itself.")"
+        "$(json_quote "Vyavasta is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavasta answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavasta before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" .$sandboxed Changes to the code are yours to make on this computer; $checked Messages that start with “vyavasta” are the developer’s commands to the plugin, which answers them itself.")"
       ;;
     401) say "Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
     *) say "Vyavasta: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
@@ -1314,7 +1320,8 @@ summaries_note() {
   mark_summaries_told
 }
 
-# What a session in this folder does, for the line a session starts with. $1 is /me's list of repositories.
+# What a session in this folder does, for the line a session starts with. $1 is /me's list of repositories, $2 its
+# `checks` (false where the server checks no request).
 reach_said() {
   if [ -z "${ROOT:-}" ]; then
     echo "This folder isn’t a git repository, so requests here aren’t checked; questions about your team are still answered."
@@ -1322,6 +1329,8 @@ reach_said() {
     echo "This repository has no copy on GitHub, so requests here aren’t checked; questions about your team are still answered."
   elif [ -n "$1" ] && ! lists_repository "$1" "$(repository_name "$REMOTE")"; then
     echo "Vyavasta doesn’t read $(repository_name "$REMOTE") for you, so requests here aren’t checked; questions about your team are still answered."
+  elif [ "${2:-}" = "false" ]; then
+    echo "$UNCHECKED Questions about your team are answered from its record."
   else
     echo "Requests are checked against your team’s record before ${AGENT} changes code, and questions about your team are answered from it."
   fi
@@ -1789,6 +1798,8 @@ handle_message() {
   else
     case "$verdict" in
       not_a_change) outcome="It isn’t a request for a change or a question about your team, so nothing was checked." ;;
+      # A server that checks no request (the demo, or one with no model): never told as checked, notice or not.
+      not_checked) outcome="${notice:-Not checked: this Vyavasta server doesn’t check requests.}" ;;
       not_connected)
         if [ -z "$ROOT" ]; then outcome="This folder isn’t a git repository, so nothing was checked. Questions about your team are still answered here."
         elif [ -z "$REMOTE" ]; then outcome="This folder has no copy on GitHub, so nothing was checked. Questions about your team are still answered here."
@@ -2131,7 +2142,7 @@ command_on() {
     if [ "$STATUS" = "200" ]; then
       remember_me
       echo "${CONNECTED:-Signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")").}"
-      repo_said "$(answer repositories)"
+      repo_said "$(answer repositories)" "$(answer checks)"
     else
       not_reached
       repo_said
@@ -2150,7 +2161,8 @@ command_on() {
   echo "Send “vyavasta help” for everything else, or “vyavasta off” to turn it off here."
 }
 
-# Whether Vyavasta reads this project's repository. $1, when given, is /me's list of repositories.
+# Whether Vyavasta reads this project's repository. $1, when given, is /me's list of repositories, and $2 its
+# `checks` (false where the server checks no request).
 repo_said() {
   if [ -z "$ROOT" ]; then
     echo "This folder isn’t a git repository, so changes here aren’t checked. Questions about your team are answered here all the same."
@@ -2158,7 +2170,8 @@ repo_said() {
     echo "This repository has no copy on GitHub, so changes here aren’t checked. Questions about your team are answered here all the same."
   elif [ -n "${1:-}" ]; then
     name=$(repository_name "$REMOTE")
-    if lists_repository "$1" "$name"; then echo "Vyavasta reads $name for you: requests here are checked against your team’s record."
+    if lists_repository "$1" "$name" && [ "${2:-}" = "false" ]; then echo "Vyavasta reads $name for you. $UNCHECKED"
+    elif lists_repository "$1" "$name"; then echo "Vyavasta reads $name for you: requests here are checked against your team’s record."
     else echo "Vyavasta doesn’t read $name for you, so changes here aren’t checked. Connect it with GitHub in Vyavasta’s Sources."; fi
   fi
 }
@@ -2274,7 +2287,9 @@ command_status() {
       repositories=$(answer repositories)
       if repository "$HERE" && [ -n "$REMOTE" ]; then
         name=$(repository_name "$REMOTE")
-        if lists_repository "$repositories" "$name"; then
+        if lists_repository "$repositories" "$name" && [ "$(answer checks)" = "false" ]; then
+          echo "Vyavasta reads $name for you: teammates see which files you’re changing. $UNCHECKED"
+        elif lists_repository "$repositories" "$name"; then
           echo "Vyavasta reads $name for you: requests here are checked, and teammates see which files you’re changing."
         else
           echo "Vyavasta doesn’t read $name for you, so nothing here is checked. Connect it with GitHub in Vyavasta’s Sources."
@@ -2487,14 +2502,15 @@ command_check() {
   reached=""
   [ "$STATUS" = "200" ] || [ "$STATUS" = "404" ] && reached=1
   finish_pairing
-  repositories=""
+  repositories=""; checks=""
   if [ -z "$TOKEN" ]; then
     if pending_waiting; then PAIR_AGAIN=1; echo "Problem: not signed in yet. To connect, $(code_said). $(finish_said)"
     else echo "Problem: not signed in. $WAY_IN"; fi
   elif [ -n "$reached" ]; then
     api GET /me "" "$QUICK_SECONDS"
     case "$STATUS" in
-      200) remember_me; repositories=$(answer repositories); echo "ok: signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")." ;;
+      200) remember_me; repositories=$(answer repositories); checks=$(answer checks)
+        echo "ok: signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")." ;;
       401) echo "Problem: this computer’s connection has ended. $WAY_IN_AGAIN" ;;
       *) echo "Problem: whether you’re signed in couldn’t be checked just now. Try again in a minute." ;;
     esac
@@ -2511,6 +2527,7 @@ command_check() {
     if [ -n "$repositories" ]; then
       if lists_repository "$repositories" "$name"; then echo "ok: Vyavasta reads $name for you."
       else echo "Problem: Vyavasta doesn’t read $name for you. Connect it with GitHub in Vyavasta’s Sources."; fi
+      [ "$checks" = "false" ] && echo "ok: this Vyavasta server doesn’t check requests, so ${AGENT} is shown what your team has said about each one instead."
     fi
   fi
   if project_on; then echo "ok: Vyavasta is on in this project."

@@ -69,7 +69,7 @@ class Fake:
         self.approved = False
         self.status: dict[str, int] = {}
         # What the newer routes answer.
-        self.latest = "0.5.1"
+        self.latest = "0.5.2"
         self.minimum = "0.3.0"
         self.sharing: set[str] = set()
         self.extra: dict[str, dict] = {}
@@ -974,15 +974,15 @@ def test_check_tests_each_part_and_says_how_to_fix_what_is_wrong(run, fake, repo
     assert any(line.startswith("Problem: not signed in.") for line in lines)
     assert "ok: this folder is the repository acme/api on GitHub." in lines
     assert any(line.startswith("Problem: Vyavasta is off in this project.") for line in lines)
-    assert "ok: this plugin (0.5.1) is the latest." in lines
+    assert "ok: this plugin (0.5.2) is the latest." in lines
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.latest = "0.6.0"
     lines = run("check", cwd=repo).stdout.splitlines()
     assert "ok: signed in as sam@acme.test in Acme." in lines and "ok: Vyavasta reads acme/api for you." in lines
     assert "ok: Vyavasta is on in this project." in lines
-    assert any(line.startswith("Problem: this plugin is 0.5.1 and 0.6.0 is out.") for line in lines)
-    fake.minimum = "0.5.2"
+    assert any(line.startswith("Problem: this plugin is 0.5.2 and 0.6.0 is out.") for line in lines)
+    fake.minimum = "0.5.3"
     assert any("must be updated" in line for line in run("check", cwd=repo).stdout.splitlines())
     outside = tmp_path / "plain"
     outside.mkdir()
@@ -1032,6 +1032,25 @@ def test_a_session_starts_by_saying_where_it_is_signed_in(run, fake, repo):
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo)))["systemMessage"]
     assert said == ("Vyavasta: signed in as sam@acme.test in Acme. Requests are checked against your team’s record "
                     "before Claude changes code, and questions about your team are answered from it.")
+
+
+def test_a_server_that_checks_no_request_is_never_said_to_check_one(run, fake, repo):
+    """The demo, or a server with no model, checks no request (/me says ``"checks": false``): no line says requests
+    are checked, and a request it says nothing of is told as unchecked even when the server gives no notice."""
+    unchecked = "This Vyavasta server doesn’t check requests, so Claude is shown what your team has said about each one instead."
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/me"] = {"checks": False}
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo)))
+    assert started["systemMessage"] == (f"Vyavasta: signed in as sam@acme.test in Acme. {unchecked} Questions about "
+                                        "your team are answered from its record.")
+    assert "checked against the record before it reaches you" not in started["hookSpecificOutput"]["additionalContext"]
+    for said in (run("on", cwd=repo).stdout, run("status", cwd=repo).stdout, run("check", cwd=repo).stdout):
+        assert unchecked in said or unchecked[0].lower() + unchecked[1:] in said, said
+        assert "requests here are checked" not in said, said
+    fake.check = {"verdict": "not_checked", "hold": False, "notice": "", "context": "", "statements": []}
+    line = prompt(run, repo, "Add a health check endpoint")["systemMessage"]
+    assert line.endswith("· Not checked: this Vyavasta server doesn’t check requests.") and "Checked against" not in line
 
 
 def test_ask_a_teammates_agent_prints_both_headers_the_answer_and_who_sees_it(run, fake, repo):
@@ -1216,7 +1235,7 @@ def test_under_codex_the_script_names_codex_and_says_which_tool_it_is(run, fake,
     fake.requests.clear()
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days"), tool="codex")
     (sent,) = fake.calls("/check")
-    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.5.1"
+    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.5.2"
 
 
 @pytest.mark.parametrize("typed", ["vyavasta sign in", "Vyavasta sign-in.", "  VYAVASTA  SIGN IN  "])
@@ -1275,7 +1294,7 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
     assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
-    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.5.1"
+    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.5.2"
     assert f'VERSION="{manifest["version"]}"' in SCRIPT.read_text()
     assert (PLUGIN / manifest["hooks"]).is_file() and (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").is_file()
     codex_skill = (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").read_text()
@@ -2277,7 +2296,7 @@ def test_the_version_is_the_same_everywhere():
     (entry,) = json.loads((root / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
     versions = {entry["version"], json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
                 json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["version"]}
-    assert versions == {"0.5.1"} and 'VERSION="0.5.1"' in SCRIPT.read_text()
+    assert versions == {"0.5.2"} and 'VERSION="0.5.2"' in SCRIPT.read_text()
 
 
 # -- 0.4.1 review: the next message finishes connecting anywhere, guidance only about the plugin, and the rest ---------
@@ -2764,7 +2783,7 @@ def test_the_servers_own_sentences_are_printed_on_one_line_wherever_the_model_ma
         fake.latest = latest
         assert "everything is up to date" not in run("check", cwd=repo).stdout
     fake.latest = "0.6.0"
-    assert "Problem: this plugin is 0.5.1 and 0.6.0 is out." in run("check", cwd=repo).stdout
+    assert "Problem: this plugin is 0.5.2 and 0.6.0 is out." in run("check", cwd=repo).stdout
 
 
 # -- names the plugin prints as its own are short; the awk that quotes works in bytes on every awk ------------------
@@ -2994,5 +3013,5 @@ def test_a_computer_signed_in_before_the_rename_stays_signed_in_from_its_earlier
 def test_the_plugin_names_itself_by_its_new_name_on_every_call(run, fake, repo):
     signed_in(run, fake)
     run("status", cwd=repo)
-    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.5.1"}
+    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.5.2"}
 
