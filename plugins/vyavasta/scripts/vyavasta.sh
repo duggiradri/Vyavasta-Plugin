@@ -45,7 +45,7 @@ git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # plain sentence instead.
 [ -n "${VYAVASTA_DEBUG:-}" ] || exec 2>/dev/null
 
-VERSION="0.5.2"
+VERSION="0.5.3"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTA_TOOL=codex). The tool's own name,
@@ -1359,11 +1359,12 @@ remember_me() {
 # kept so “vyavasta reply 2: …” knows which item it answers. What they wrote, and what the developer's agent
 # answered, are quoted records beneath; the header is the plugin's own, on one line, the name in it cut to a short
 # one (`person`), though the listing keeps it whole for a reply to go to. The server gives a few dozen at
-# a time: $2 is how many more wait (its `more`), said in one line when there are any.
+# a time: $2 is how many more wait (its `more`), said in one line when there are any. A server from before tasks
+# between teammates were taken out may still give a task: it is shown as an item like any other, answered with a
+# reply.
 render_inbox() {
   true > "$TMP/listing"
   json_rows "$1" > "$TMP/rows"
-  has_task=""; has_message=""
   while IFS= read -r row; do
     n=$(one_line "$(json_text "$(field "$row" n)")")
     message_id=$(one_line "$(json_text "$(field "$row" message_id)")")
@@ -1372,16 +1373,14 @@ render_inbox() {
     at=$(one_line "$(json_text "$(field "$row" at_said)")")
     text=$(json_text "$(field "$row" text)")
     answered=$(json_text "$(field "$row" answer)")
-    state=$(one_line "$(json_text "$(field "$(field "$row" task)" state)")")
     case "$kind" in
-      task) what="assigned you a task"; has_task=1 ;;
-      reply) what="replied"; has_message=1 ;;
-      *) what="asked your agent"; has_message=1 ;;
+      reply) what="replied" ;;
+      task) what="wrote to you" ;;
+      *) what="asked your agent" ;;
     esac
     printf '── %s. From %s · %s · %s ──\n' "$n" "$(person "$from")" "$at" "$what"
     quoted "$text"
     if [ -n "$answered" ]; then echo "Your agent answered:"; quoted "$answered"; fi
-    [ "$kind" = "task" ] && [ -n "$state" ] && [ "$state" != "open" ] && printf 'This task is %s.\n' "$state"
     printf '\n'
     printf '%s\t%s\t%s\t%s\n' "$n" "$message_id" "$kind" "$from" >> "$TMP/listing"
   done < "$TMP/rows"
@@ -1391,18 +1390,16 @@ render_inbox() {
     *) more=$(printf '%s' "$2" | sed 's/^0*//') ;;
   esac
   [ -n "$more" ] && echo "$(plural "$more" "more item from your teammates waits" "more items from your teammates wait") in Vyavasta."
-  if [ -n "$has_task" ] && [ -n "$has_message" ]; then
-    echo "Answer with “vyavasta reply <number>: <your words>”; for a task, “vyavasta start <number>”, “vyavasta done <number>” or “vyavasta decline <number>”."
-  elif [ -n "$has_task" ]; then
-    echo "For a task, send “vyavasta start <number>” to begin it, “vyavasta done <number>” or “vyavasta decline <number>”."
-  else
-    echo "Answer with “vyavasta reply <number>: <your words>”."
-  fi
+  echo "Answer with “vyavasta reply <number>: <your words>”."
 }
 
 # The words of a message read as one of the plugin's commands. Sets TYPED (the command) and TYPED_ARG (a name or
 # number), and writes free text to $TMP/typed-text. A command is a message that is exactly the phrase, case and
-# trailing punctuation ignored; ask, assign and reply carry words after a name or number.
+# trailing punctuation ignored; ask and reply carry words after a name or number.
+#
+# The commands for tasks between teammates were taken out: “vyavasta assign” (with or without words) and “vyavasta
+# start”, “done” and “decline” (with or without a number) are still read as the plugin's own, as `retired`, so that
+# none of them goes on to the model as a message.
 #
 # A message that is “vyavasta” and words that ask how to use the plugin itself is help: the words, after “vyavasta”
 # with or without a comma, must be the whole of one of the shapes below (“help”, “how do I sign in”, “what can you
@@ -1439,6 +1436,7 @@ parse_typed() {
       s = trim($0); low = tolower(s)
       if (low ~ /^vyavasth?a[ \t]+(ask|assign|reply)[ \t]/) {
         sub(/^[^ \t]+[ \t]+/, "", s); verb = tolower(s); sub(/[ \t].*$/, "", verb)
+        if (verb == "assign") { printf "retired\t\n"; exit }
         body = trim(substr(s, length(verb) + 1)); name = ""; text = ""
         k1 = index(body, ":"); k2 = index(body, ","); k = k1
         if (k == 0 || (k2 > 0 && k2 < k)) k = k2
@@ -1461,15 +1459,15 @@ parse_typed() {
       }
       rest = substr(low, n + 2)
       if (rest == "") rest = "help"
-      if (rest ~ /^(start|done|decline) #?[0-9]+$/) { split(rest, p, " "); sub(/^#/, "", p[2]); printf "%s\t%s\n", p[1], p[2]; exit }
+      if (rest ~ /^(start|done|decline) #?[0-9]+$/) { printf "retired\t\n"; exit }
       known["on"] = "on"; known["off"] = "off"; known["status"] = "status"; known["check"] = "check"
       known["settings"] = "settings"; known["help"] = "help"; known["sign in"] = "sign_in"; known["signin"] = "sign_in"
       known["sign out"] = "sign_out"; known["signout"] = "sign_out"; known["share code on"] = "share_on"
       known["share code off"] = "share_off"; known["shared"] = "shared"; known["chat"] = "chat"
       known["summaries on"] = "summaries_on"; known["summaries off"] = "summaries_off"
       known["chat open"] = "chat_open"; known["open chat"] = "chat_open"; known["upload"] = "upload"
-      known["inbox"] = "inbox"; known["ask"] = "ask"; known["assign"] = "assign"; known["reply"] = "reply"
-      known["start"] = "start"; known["done"] = "done"; known["decline"] = "decline"
+      known["inbox"] = "inbox"; known["ask"] = "ask"; known["reply"] = "reply"
+      known["assign"] = "retired"; known["start"] = "retired"; known["done"] = "retired"; known["decline"] = "retired"
       if (rest in known) printf "%s\t\n", known[rest]
       else if (helpish(rest)) printf "help\t\n"
     }' > "$TMP/typed"
@@ -1542,26 +1540,9 @@ hook_prompt() {
   TYPED=""; TYPED_ARG=""
   case "$(printf '%.80s' "$text" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')" in vyavasta*|vyavastha*) parse_typed "$text" ;; esac
   if [ -n "$TYPED" ]; then
-    # The plugin's own commands, answered here whether or not it is on, and never sent to the model; `start`
-    # alone lets the task it starts through.
+    # The plugin's own commands, answered here whether or not it is on, and never sent to the model.
     if project_on; then basename "$dir" > "$PDIR/session"; basename "$dir" > "$HOME_DIR/session"; fi
-    if [ "$TYPED" = "start" ]; then
-      START_LINE=""
-      command_start "$TYPED_ARG" > "$TMP/said"
-      reason=$(cat "$TMP/said")
-      if [ -n "$START_TEXT" ]; then
-        prompt=$(json_quote "$START_TEXT")
-        if project_on; then
-          handle_message "$prompt" "$dir"
-        else
-          printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
-            "$(json_quote "Vyavasta · $START_LINE")" "$(json_quote "$START_CONTEXT")"
-        fi
-        return
-      fi
-    else
-      reason=$(command_"$TYPED" "$TYPED_ARG")
-    fi
+    reason=$(command_"$TYPED" "$TYPED_ARG")
     if [ "$CLIENT" = "codex" ]; then
       printf '{"decision":"block","reason":%s}\n' "$(json_quote "$reason")"
     else
@@ -1648,7 +1629,6 @@ off_answer() {
 handle_message() {
   prompt=$1; dir=$2
   OUT_LINE=""; OUT_CONTEXT=""; OUT_REASON=""; attach_note=""
-  prefix="${START_LINE:+$START_LINE }"
   # Whether this message is kept for the developer's summary is settled before they are told what summaries do: the
   # message whose line first tells them is never kept.
   keep=false
@@ -1674,15 +1654,13 @@ handle_message() {
     else
       outcome="$WAY_IN ${AGENT} works as usual."
     fi
-    OUT_LINE=$(nothing_line "you aren’t signed in" "$prefix$outcome")
-    OUT_CONTEXT="${START_CONTEXT:-}"
+    OUT_LINE=$(nothing_line "you aren’t signed in" "$outcome")
     emit; return
   fi
   # A folder that is no repository has nothing to check, and a question about the team can still be asked from it.
   if repository "$HERE"; then :; else ROOT=""; REMOTE=""; BRANCH=""; fi
   if offline; then
-    OUT_LINE=$(nothing_line "Vyavasta’s server can’t be reached" "$prefix${AGENT} works as usual, and Vyavasta is tried again in a minute.")
-    OUT_CONTEXT="${START_CONTEXT:-}"
+    OUT_LINE=$(nothing_line "Vyavasta’s server can’t be reached" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
     emit; return
   fi
   NFILES=0; shared=""; consent=""
@@ -1720,24 +1698,24 @@ handle_message() {
   case "$STATUS" in
     200) ;;
     401)
-      OUT_LINE=$(nothing_line "this computer’s connection to Vyavasta has ended" "$prefix$WAY_IN_AGAIN ${AGENT} works as usual.")
-      OUT_CONTEXT="${START_CONTEXT:-}"; emit; return ;;
+      OUT_LINE=$(nothing_line "this computer’s connection to Vyavasta has ended" "$WAY_IN_AGAIN ${AGENT} works as usual.")
+      emit; return ;;
     429)
-      OUT_LINE=$(line "your message" "" "${prefix}Vyavasta had too many requests just now, so it wasn’t checked. ${AGENT} works as usual.")
-      OUT_CONTEXT="${START_CONTEXT:-}"; emit; return ;;
+      OUT_LINE=$(line "your message" "" "Vyavasta had too many requests just now, so it wasn’t checked. ${AGENT} works as usual.")
+      emit; return ;;
     000)
       if [ -n "$SLOW" ]; then
-        OUT_LINE=$(line "your message" "" "${prefix}Vyavasta took too long to answer, so it wasn’t checked this time. ${AGENT} works as usual.")
+        OUT_LINE=$(line "your message" "" "Vyavasta took too long to answer, so it wasn’t checked this time. ${AGENT} works as usual.")
       else
-        OUT_LINE=$(nothing_line "Vyavasta’s server can’t be reached" "$prefix${AGENT} works as usual, and Vyavasta is tried again in a minute.")
+        OUT_LINE=$(nothing_line "Vyavasta’s server can’t be reached" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
       fi
-      OUT_CONTEXT="${START_CONTEXT:-}"; emit; return ;;
+      emit; return ;;
     5*)
-      OUT_LINE=$(nothing_line "Vyavasta’s server isn’t working right now" "$prefix${AGENT} works as usual, and Vyavasta is tried again in a minute.")
-      OUT_CONTEXT="${START_CONTEXT:-}"; emit; return ;;
+      OUT_LINE=$(nothing_line "Vyavasta’s server isn’t working right now" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
+      emit; return ;;
     *)
-      OUT_LINE=$(line "your message" "" "${prefix}Vyavasta couldn’t check it just now. ${AGENT} works as usual.")
-      OUT_CONTEXT="${START_CONTEXT:-}"; emit; return ;;
+      OUT_LINE=$(line "your message" "" "Vyavasta couldn’t check it just now. ${AGENT} works as usual.")
+      emit; return ;;
   esac
   cp "$TMP/answer" "$TMP/checked"
   # Whether the message's words were kept in this session's chat for the developer's summary: the tool's reply to
@@ -1755,7 +1733,6 @@ handle_message() {
   keep_conflict "$dir" && new_conflict=1
   # What was sent, and what was not.
   sent="your message"; not_sent=""
-  [ -n "${START_LINE:-}" ] && sent="the task’s words"
   if [ -n "$shared" ]; then
     if [ "$was_shared" = "off" ] && [ "$verdict" != "not_connected" ]; then
       echo off > "$PDIR/sharing"; echo off > "$PDIR/sharing-told"
@@ -1788,11 +1765,11 @@ handle_message() {
     ask_vyavasta "$TMP/ask"
     sent=$(printf '%s' "$sent" | sed 's/^your message/your question/')
     if [ "$STATUS" != "200" ]; then
-      OUT_LINE=$(line "$sent" "$not_sent" "${prefix}Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent")
+      OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent")
     else
       outcome=$(json_text "$(answer notice)")
       [ -n "$outcome" ] || outcome="Vyavasta had no answer to give."
-      OUT_LINE=$(line "$sent" "$not_sent" "$prefix$outcome$consent")
+      OUT_LINE=$(line "$sent" "$not_sent" "$outcome$consent")
       OUT_CONTEXT=$(json_text "$(answer context)")
     fi
   else
@@ -1815,11 +1792,11 @@ handle_message() {
       # The notice below says what stands, so the line only says which kind of hold it is.
       if [ "$verdict" = "held" ]; then held_said="On hold; see below."
       else held_said="On hold: what your team has said doesn’t settle this request; see below."; fi
-      OUT_LINE=$(line "$sent" "$not_sent" "$prefix$held_said$consent" "$kept_said")
+      OUT_LINE=$(line "$sent" "$not_sent" "$held_said$consent" "$kept_said")
       OUT_REASON="$notice"
       emit; return
     fi
-    OUT_LINE=$(line "$sent" "$not_sent" "$prefix$outcome$consent" "$kept_said")
+    OUT_LINE=$(line "$sent" "$not_sent" "$outcome$consent" "$kept_said")
     OUT_CONTEXT="$context"
   fi
   if [ -n "${attach_note:-}" ]; then
@@ -1839,15 +1816,12 @@ handle_message() {
   [ -n "$CONFLICT_CONTEXT" ] && OUT_CONTEXT="$CONFLICT_CONTEXT${OUT_CONTEXT:+
 
 $OUT_CONTEXT}"
-  [ -n "${START_CONTEXT:-}" ] && OUT_CONTEXT="$START_CONTEXT${OUT_CONTEXT:+
-
-$OUT_CONTEXT}"
   if [ -n "$new_conflict" ]; then
     # Something the team said stands against the change already made: the message waits until the developer
     # chooses, and is kept to pass on if they continue.
     json_text "$prompt" > "$dir/conflict-prompt"
     rm -f "$dir/conflict-stop" "$dir/conflict-say"
-    OUT_LINE=$(line "$sent" "$not_sent" "${prefix}Paused: something your team has said stands against the changes already made on your computer. Your message waits until you answer." "$kept_said")
+    OUT_LINE=$(line "$sent" "$not_sent" "Paused: something your team has said stands against the changes already made on your computer. Your message waits until you answer." "$kept_said")
     OUT_REASON="$(json_text "$(field "$(cat "$dir/conflict")" notice)")
 
 Send “continue” to go on, or “stop” to leave the change where it is."
@@ -1857,11 +1831,9 @@ Send “continue” to go on, or “stop” to leave the change where it is."
 }
 
 # Whether a message's words are to be kept in the session's chat for the developer's summary: with summaries on (and
-# the developer told so), every message but those the plugin's own commands make (a started task's words) and the
-# answers to the plugin's own questions (never_kept).
+# the developer told so), every message but the answers to the plugin's own questions (never_kept).
 keep_this() {
   summaries_keep || return 1
-  [ -z "${START_LINE:-}" ] || return 1
   never_kept "${words:-}" && return 1
   return 0
 }
@@ -2347,10 +2319,9 @@ See what is shared
 Teammates
 - “vyavasta inbox”: what teammates asked of you.
 - “vyavasta ask <name>: <question>”: ask a teammate’s agent. It answers only from what you can both already see, and they see what you asked.
-- “vyavasta assign <name>: <task>”: give a teammate a task (owners and administrators).
-- “vyavasta reply <number>: <your words>”, “vyavasta start <number>”, “vyavasta done <number>”, “vyavasta decline <number>”: answer an item of your inbox.
+- “vyavasta reply <number>: <your words>”: answer an item of your inbox.
 EOF
-  [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:shared and /vyavasta:check; ask, assign, reply, start, done and decline are typed only."
+  [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:shared and /vyavasta:check; ask and reply are typed only."
 }
 
 # What the tool's model is told when the developer's message asks how to use the plugin itself (guide_wanted): what
@@ -2566,15 +2537,15 @@ command_inbox() {
   render_inbox "$items" "$(answer more)"
 }
 
-# A message to a teammate's agent (`ask`), a task for a teammate (`assign`), or a reply to an item of the inbox.
-# $1 is the kind (message or task), $2 who it is for, $3 the words, $4 the message it replies to.
+# A message to a teammate's agent (`ask`), or a reply to an item of the inbox. $1 is who it is for, $2 the words,
+# $3 the message it replies to.
 tell() {
   command_here
   need_token || return
   if repository "$HERE"; then :; else REMOTE=""; BRANCH=""; fi
   {
-    printf '{"to":%s,"text":%s,"kind":"%s"' "$(json_quote "$2")" "$(json_quote "$3")" "$1"
-    [ -n "${4:-}" ] && printf ',"reply_to":%s' "$(json_quote "$4")"
+    printf '{"to":%s,"text":%s,"kind":"message"' "$(json_quote "$1")" "$(json_quote "$2")"
+    [ -n "${3:-}" ] && printf ',"reply_to":%s' "$(json_quote "$3")"
     printf ',"session":%s,"remote":%s,"branch":%s,"tool":"%s"}' "$(json_quote "$(command_session)")" \
       "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
   } > "$TMP/tell"
@@ -2583,7 +2554,7 @@ tell() {
   [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || { not_reached; return; }
   status=$(json_text "$(answer status)")
   # Who it went to and who sent it, as names printed in the plugin's own headers and sentences.
-  to=$(person "$(json_text "$(field "$(answer to)" name)")"); [ -n "$to" ] || to=$(person "$2")
+  to=$(person "$(json_text "$(field "$(answer to)" name)")"); [ -n "$to" ] || to=$(person "$1")
   from=$(person "$(json_text "$(field "$(answer from)" name)")"); [ -n "$from" ] || from=$(person "$(saved email)")
   at=$(one_line "$(json_text "$(answer at_said)")")
   notice=$(one_line "$(json_text "$(answer notice)")")
@@ -2592,7 +2563,7 @@ tell() {
     unknown_person)
       people=$(json_rows "$(answer people)" | while IFS= read -r one; do person "$(json_text "$one")"; echo; done \
         | awk 'NF' | awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')
-      echo "Vyavasta doesn’t know a teammate called “$(person "$2")”.${people:+ Your teammates: $people.}"
+      echo "Vyavasta doesn’t know a teammate called “$(person "$1")”.${people:+ Your teammates: $people.}"
       return ;;
     refused|unavailable)
       echo "${notice:-Vyavasta couldn’t send that just now.}"
@@ -2602,8 +2573,8 @@ tell() {
   # hook, what is printed goes to the tool's model (it ran it): under the answer's header then stands the server's
   # own context for it, the app's sentence and the answer in the quoted block, and from a server that sends none,
   # the answer quoted here. In a hook it is the reason of a blocked message, which only the developer reads.
-  sent_text=$(json_text "$(answer text)"); [ -n "$sent_text" ] || sent_text="$3"
-  if [ "$1" = "message" ] && [ -z "${4:-}" ]; then
+  sent_text=$(json_text "$(answer text)"); [ -n "$sent_text" ] || sent_text="$2"
+  if [ -z "${3:-}" ]; then
     printf '── To %s’s agent · from %s · %s · through Vyavasta ──\n' "$to" "$from" "$at"
     quoted "$sent_text"; echo
     said=$(json_text "$(answer answer)")
@@ -2630,30 +2601,25 @@ tell() {
   fi
 }
 
-command_ask_teammate() { tell message "$1" "$(cat "$TMP/typed-text")"; }
 command_ask() {
   # Typed by the developer as “vyavasta ask <name>: …” (the hook passes a name and the words) or run by the tool's
   # model as `vyavasta.sh ask "<question>"` for the developer's own assistant.
   if [ -n "${TYPED:-}" ]; then
     if [ -z "$1" ]; then echo "Say who and what, such as “vyavasta ask Priya: are you changing the billing page?”"; return; fi
-    tell message "$1" "$(cat "$TMP/typed-text")"
+    tell "$1" "$(cat "$TMP/typed-text")"
     return
   fi
   command_ask_assistant "$@"
 }
 
-command_assign() {
-  if [ -z "$1" ]; then echo "Say who and what, such as “vyavasta assign Priya: update the export to the new format”."; return; fi
-  tell task "$1" "$(cat "$TMP/typed-text")"
-}
-
-# The item numbered $1 in the last inbox listing: sets ITEM_ID, ITEM_KIND and ITEM_FROM, or fails and says so.
+# The item numbered $1 in the last inbox listing: sets ITEM_ID and ITEM_FROM, or fails and says so. (A line of the
+# listing is an item's number, id, kind and sender. Nothing reads the kind since tasks between teammates were taken
+# out; it keeps its place, so a listing kept by another version of the plugin is read the same.)
 inbox_item() {
-  ITEM_ID=""; ITEM_KIND=""; ITEM_FROM=""
+  ITEM_ID=""; ITEM_FROM=""
   case "$1" in ''|*[!0-9]*) echo "Give the number of an item in your inbox, such as “vyavasta reply 1: thanks”."; return 1 ;; esac
   if [ -f "$HOME_DIR/inbox" ]; then
     ITEM_ID=$(awk -F '\t' -v n="$1" '$1 == n { print $2; exit }' "$HOME_DIR/inbox")
-    ITEM_KIND=$(awk -F '\t' -v n="$1" '$1 == n { print $3; exit }' "$HOME_DIR/inbox")
     ITEM_FROM=$(awk -F '\t' -v n="$1" '$1 == n { print $4; exit }' "$HOME_DIR/inbox")
   fi
   if [ -z "$ITEM_ID" ]; then
@@ -2665,47 +2631,13 @@ inbox_item() {
 command_reply() {
   if [ -z "$1" ]; then echo "Say which item and what, such as “vyavasta reply 1: yes, I’m on it”."; return; fi
   inbox_item "$1" || return
-  tell message "$ITEM_FROM" "$(cat "$TMP/typed-text")" "$ITEM_ID"
+  tell "$ITEM_FROM" "$(cat "$TMP/typed-text")" "$ITEM_ID"
 }
 
-# Marks a task of the inbox accepted, done or declined. Sets TASK_TEXT and TASK_FROM.
-set_task() {
-  TASK_TEXT=""; TASK_FROM=""
-  need_token || return 1
-  inbox_item "$1" || return 1
-  if [ "$ITEM_KIND" != "task" ]; then echo "Item $1 isn’t a task. Answer it with “vyavasta reply $1: <your words>”."; return 1; fi
-  printf '{"message_id":%s,"state":"%s"}' "$(json_quote "$ITEM_ID")" "$2" > "$TMP/task"
-  api POST /task "$TMP/task" "$QUICK_SECONDS"
-  [ "$STATUS" = "200" ] || { not_reached; return 1; }
-  TASK_TEXT=$(json_text "$(answer text)")
-  TASK_FROM=$(person "$(json_text "$(field "$(answer from)" name)")"); [ -n "$TASK_FROM" ] || TASK_FROM=$(person "$ITEM_FROM")
-}
-
-# Starting a task: it is marked accepted, and its text goes to the model as the developer's request (in a hook),
-# through the usual check. START_TEXT is the task's text when it was started. The words are the teammate's, so the
-# model is given them as a quoted record.
-command_start() {
-  START_TEXT=""; START_CONTEXT=""
-  set_task "$1" accepted || return
-  START_TEXT="$TASK_TEXT"
-  START_LINE="Started the task $TASK_FROM assigned you; $TASK_FROM will see that you started it."
-  START_CONTEXT="The developer accepted a task that $TASK_FROM assigned them through Vyavasta, and asks you to do it now. The task, in $TASK_FROM’s words:
-$(quoted "$TASK_TEXT")"
-  if [ -z "${IN_HOOK:-}" ]; then
-    echo "$START_LINE"
-    echo "The task:"
-    quoted "$TASK_TEXT"
-  fi
-}
-
-command_done() {
-  set_task "$1" done || return
-  echo "Marked done. $TASK_FROM will see it."
-}
-
-command_decline() {
-  set_task "$1" declined || return
-  echo "Declined. $TASK_FROM will see that you won’t take it on."
+# The commands for tasks between teammates (assign, start, done and decline), which were taken out: one line says so,
+# and how to write to a teammate. Nothing is sent to the server.
+command_retired() {
+  echo "Tasks between teammates were taken out of Vyavasta. To write to a teammate, send “vyavasta ask <name>: <your words>”."
 }
 
 # A question for the developer's own assistant in Vyavasta, asked by the tool's model or from a terminal: the
@@ -2768,7 +2700,7 @@ command_use_server() {
   esac
 }
 
-USAGE="Usage: vyavasta.sh on | off | status | check | settings | help | sign-in | sign-out | share-code on|off | summaries on|off | shared | chat [open] | upload | inbox | tell <name> <words> | assign <name> <words> | reply <number> <words> | start|done|decline <number> | ask \"<question>\" | use-server [address] | hook <event>"
+USAGE="Usage: vyavasta.sh on | off | status | check | settings | help | sign-in | sign-out | share-code on|off | summaries on|off | shared | chat [open] | upload | inbox | tell <name> <words> | reply <number> <words> | ask \"<question>\" | use-server [address] | hook <event>"
 
 # -- start here --------------------------------------------------------------------------------------------------
 
@@ -2808,19 +2740,18 @@ main() {
     summaries)
       case "${2:-}" in on) command_summaries_on ;; off) command_summaries_off ;; *) echo "$USAGE" ;; esac ;;
     chat) command_chat "${2:-}" ;;
-    tell|assign)
-      kind=message; [ "$1" = "assign" ] && kind=task
+    tell)
       who="${2:-}"
       shift 2 2>/dev/null || shift $#
       if [ -z "$who" ] || [ -z "$*" ]; then echo "$USAGE"; return; fi
-      tell "$kind" "$who" "$*" ;;
+      tell "$who" "$*" ;;
     reply)
       number="${2:-}"
       shift 2 2>/dev/null || shift $#
       if [ -z "$number" ] || [ -z "$*" ]; then echo "$USAGE"; return; fi
       printf '%s' "$*" > "$TMP/typed-text"
       command_reply "$number" ;;
-    start|done|decline) "command_$1" "${2:-}" ;;
+    assign|start|done|decline) command_retired ;;
     ask) shift; command_ask_assistant "$*" ;;
     use-server) command_use_server "${2:-}" ;;
     *) echo "$USAGE" ;;

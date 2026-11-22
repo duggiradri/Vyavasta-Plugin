@@ -347,7 +347,7 @@ def main() -> int:
         expect(said == {}, "and then a message is left alone")
         hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta on")
 
-        step("Teammates: Sam asks Ganesh’s agent; Ganesh asks Sam’s agent and assigns him a task")
+        step("Teammates: Sam asks Ganesh’s agent, and Ganesh writes to Sam through Sam’s agent chat")
         asked = plugin("tell", "Ganesh", "What are you working on this week?", cwd=repo)
         print("  tell printed: " + asked.strip().replace("\n", "\n  ")[:800])
         expect("── To " in asked and "’s agent · from " in asked, "the message opens with its header")
@@ -356,19 +356,12 @@ def main() -> int:
         sam_id = sam.ok("GET", "/session")["user"]["user_id"]
         ganesh.ok("POST", f"/agent-chats/{sam_id}/messages", {"text": "Is customer_plan still in the API?",
                                                                "kind": "message", "client_request_id": "e2e-1"})
-        ganesh.ok("POST", f"/agent-chats/{sam_id}/messages", {"text": "Add a test for subscription_tier.",
-                                                               "kind": "task", "client_request_id": "e2e-2"})
         said = hook("session-start", "SessionStart", repo, source="startup")
         start_line = said.get("systemMessage", "")
         print("  SessionStart said: " + start_line.replace("\n", "\n  ")[:900])
         expect("While you were away:" in start_line and "· asked your agent ──" in start_line
-               and "· assigned you a task ──" in start_line, "the next session starts with both, under headers")
-        task = re.search(r"(\d+)\. Add a test for subscription_tier", start_line)
-        if task:
-            said = hook("prompt", "UserPromptSubmit", repo, prompt=f"vyavasta start {task.group(1)}")
-            expect("decision" not in said and "Add a test for subscription_tier"
-                   in said.get("hookSpecificOutput", {}).get("additionalContext", ""),
-                   "starting the task gives its words to Claude as the request")
+               and "Is customer_plan still in the API?" in start_line,
+               "the next session starts with Ganesh’s message, under its header")
 
         step("Sam commits; Claude stops again")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Drop customer_plan"], check=True,

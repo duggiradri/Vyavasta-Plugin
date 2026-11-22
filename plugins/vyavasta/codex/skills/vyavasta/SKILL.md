@@ -38,8 +38,7 @@ sent.
 Teammates
 - `vyavasta inbox`: what teammates asked of the developer.
 - `vyavasta ask <name>: <question>`: asks a teammate’s agent, which answers only from what the developer and that teammate can both already see.
-- `vyavasta assign <name>: <task>`: gives a teammate a task (owners and administrators).
-- `vyavasta reply <number>: <words>`, `vyavasta start <number>`, `vyavasta done <number>`, `vyavasta decline <number>`: answer an item of the inbox. Starting a task gives you its words as the developer’s request.
+- `vyavasta reply <number>: <words>`: answers an item of the inbox.
 
 When a request was held, the developer was told what stands in the way. They go ahead by sending `Plan it anyway`.
 When the plugin says something the team has said stands against the change being made, the developer answers
