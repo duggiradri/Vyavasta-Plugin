@@ -31,11 +31,11 @@ You need Claude Code, git, and access to this repository.
 1. Add the marketplace and install the plugin:
 
    ```
-   /plugin marketplace add duggiradri/Vyavastha-Plugin
+   /plugin marketplace add duggiradri/Vyavasta-Plugin
    /plugin install vyavasta@vyavasta
    ```
 
-   For a copy on your disk, give its folder instead: `/plugin marketplace add /path/to/vyavasta-plugin`. From a terminal, the same two steps are `claude plugin marketplace add duggiradri/Vyavastha-Plugin` and `claude plugin install vyavasta@vyavasta`.
+   For a copy on your disk, give its folder instead: `/plugin marketplace add /path/to/vyavasta-plugin`. From a terminal, the same two steps are `claude plugin marketplace add duggiradri/Vyavasta-Plugin` and `claude plugin install vyavasta@vyavasta`.
 
 2. Start a new session (or run `/reload-plugins`). The first session opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
 
@@ -51,7 +51,7 @@ You need Claude Code, git, and access to this repository.
 
 You need Codex, git, and access to this repository. The same script runs under both tools; Codex gets its own hooks file (`plugins/vyavasta/hooks/codex.json`) and description (`plugins/vyavasta/.codex-plugin/plugin.json`).
 
-1. From a terminal, add the marketplace: `codex plugin marketplace add duggiradri/Vyavastha-Plugin`.
+1. From a terminal, add the marketplace: `codex plugin marketplace add duggiradri/Vyavasta-Plugin`.
 2. Install the plugin named Vyavasta from that marketplace in Codex’s plugin list, and restart Codex.
 3. Approve the plugin’s hooks once: Codex runs no hook until you have reviewed and trusted it. In the terminal, open `/hooks`; in the desktop app, choose **Review hooks**. Codex asks again after each update of the plugin.
 4. Start a new session. The first one opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
