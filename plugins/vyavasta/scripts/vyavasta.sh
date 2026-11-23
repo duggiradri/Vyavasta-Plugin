@@ -45,7 +45,7 @@ git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # plain sentence instead.
 [ -n "${VYAVASTA_DEBUG:-}" ] || exec 2>/dev/null
 
-VERSION="0.5.3"
+VERSION="0.5.4"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTA_TOOL=codex). The tool's own name,
@@ -66,6 +66,15 @@ UNCHECKED="This Vyavasta server doesn’t check requests, so ${AGENT} is shown w
 # This script, by its full path: what the tool's model is told to run to ask Vyavasta a question.
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 case "$CLIENT" in codex) ASK_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
+# How Codex's model is to run that command, said where it is given the command and again where the command finds
+# itself inside the sandbox: outside it, which Codex's model may ask for (the request is approved by the developer or
+# by Codex's own reviewer), and what to tell the developer when it is refused.
+OUTSIDE_THE_SANDBOX="Run it outside Codex’s sandbox, by asking for escalated permissions for this one command: it needs the internet to reach Vyavasta and its own settings folder, it only asks a question, and it changes nothing in the project. Inside the sandbox it cannot reach Vyavasta. If the request is refused, tell the developer they can ask the same thing by sending a message that starts with “Vyavasta,”."
+# What Codex's model is told when the command that asks found itself inside the sandbox: what stood in its way
+# there ($1: one cause, in a few words), and how to run it so that it reaches Vyavasta.
+boxed_said() {
+  echo "This command ran inside Codex’s sandbox, where $1, so it did not reach Vyavasta. Run the same command again outside the sandbox, asking for escalated permissions for it. If that is refused, tell the developer they can ask the same thing by sending a message that starts with “Vyavasta,”."
+}
 # Where the sign-in and the settings are kept: VYAVASTA_HOME when it is set, else vyavasta in the config folder. A
 # computer the plugin was used on before the rename has them in the config folder's vyavastha: that folder is used for
 # as long as no vyavasta folder is there, so nobody is signed out by the rename.
@@ -131,7 +140,7 @@ if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   TMP="$HOME_DIR/tmp.$$"
   mkdir -p "$TMP" || {
     if [ "${1:-}" = "ask" ] && [ "$CLIENT" = "codex" ]; then
-      echo "Codex kept this command from reaching Vyavasta. The developer can ask the same thing by sending a message that starts with “Vyavasta,”."
+      boxed_said "it cannot make a folder for its scratch files"
     elif [ "${1:-}" != "hook" ]; then
       echo "This command couldn’t make a scratch folder, so it can’t run here. Send it as a message instead, such as “vyavasta check”."
     fi
@@ -1270,8 +1279,10 @@ While you were away:
 $(render_inbox "$items" "$(answer more)")"
         fi
       fi
+      # Codex runs its model's commands in a sandbox with no network, where this one can't reach Vyavasta: the model
+      # is told to ask for it to run outside, which Codex lets it ask for, and what to say when that is refused.
       sandboxed=""
-      [ "$CLIENT" = "codex" ] && sandboxed=" Codex runs that command in a closed-off space that may keep it from reaching Vyavasta; when it says so, tell the developer they can ask the same thing by sending a message that starts with “Vyavasta,”."
+      [ "$CLIENT" = "codex" ] && sandboxed=" $OUTSIDE_THE_SANDBOX"
       if [ "$checks" = "false" ]; then checked="each request for one goes to Vyavasta before it reaches you, and you are shown what the team has said about it (this Vyavasta server checks no request)."
       else checked="each request for one is checked against the record before it reaches you."; fi
       # The developer is told they are connected; the tool's model is told what Vyavasta is here for, and how
@@ -1473,7 +1484,7 @@ parse_typed() {
       known["share code off"] = "share_off"; known["shared"] = "shared"; known["chat"] = "chat"
       known["summaries on"] = "summaries_on"; known["summaries off"] = "summaries_off"
       known["chat open"] = "chat_open"; known["open chat"] = "chat_open"; known["upload"] = "upload"
-      known["inbox"] = "inbox"; known["ask"] = "ask"; known["reply"] = "reply"
+      known["inbox"] = "inbox"; known["ask"] = "ask"; known["reply"] = "reply"; known["team"] = "team"
       known["assign"] = "retired"; known["start"] = "retired"; known["done"] = "retired"; known["decline"] = "retired"
       if (rest in known) printf "%s\t\n", known[rest]
       else if (helpish(rest)) printf "help\t\n"
@@ -1520,6 +1531,17 @@ maybe_typed() {
     END { exit found }' "$TMP/input"
 }
 
+# What a message's hook prints when the plugin answered the message itself ($1 is the answer): the developer is shown
+# the answer, and the message is never sent to the tool's model.
+answered_here() {
+  if [ "$CLIENT" = "codex" ]; then
+    printf '{"decision":"block","reason":%s}\n' "$(json_quote "$1")"
+  else
+    printf '{"decision":"block","reason":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}\n' \
+      "$(json_quote "$1")"
+  fi
+}
+
 hook_prompt() {
   HERE=$(input_folder)
   project_of "$HERE"
@@ -1549,13 +1571,7 @@ hook_prompt() {
   if [ -n "$TYPED" ]; then
     # The plugin's own commands, answered here whether or not it is on, and never sent to the model.
     if project_on; then basename "$dir" > "$PDIR/session"; basename "$dir" > "$HOME_DIR/session"; fi
-    reason=$(command_"$TYPED" "$TYPED_ARG")
-    if [ "$CLIENT" = "codex" ]; then
-      printf '{"decision":"block","reason":%s}\n' "$(json_quote "$reason")"
-    else
-      printf '{"decision":"block","reason":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}\n' \
-        "$(json_quote "$reason")"
-    fi
+    answered_here "$(command_"$TYPED" "$TYPED_ARG")"
     return
   fi
   # A message that asks how to use Vyavasta: the tool's model is told how, with whatever else it is given.
@@ -1725,6 +1741,15 @@ handle_message() {
       emit; return ;;
   esac
   cp "$TMP/answer" "$TMP/checked"
+  if [ "$(json_text "$(answer verdict)")" = "teammate" ]; then
+    # A message for a teammate, in so many words (“ask Priya what’s up”, “tell Sam’s agent I’m changing the billing
+    # page”): the server says for whom and with which words, and it is sent on as “vyavasta ask <name>: …” is.
+    # Answered here: the tool's model isn't asked, and nothing of it is kept for the developer's summary.
+    told=$(answer tell)
+    json_text "$(field "$told" text)" > "$TMP/typed-text"
+    answered_here "$(tell "$(json_text "$(field "$told" to)")" "$(cat "$TMP/typed-text")")"
+    return
+  fi
   # Whether the message's words were kept in this session's chat for the developer's summary: the tool's reply to
   # it is then sent when the turn ends, named by the kept message's id when the server gave one.
   if [ "$(answer kept)" = "true" ]; then
@@ -2324,11 +2349,13 @@ See what is shared
 - “vyavasta chat” (or “vyavasta chat open”): this session’s chat in Vyavasta.
 - “vyavasta upload”: opens that chat so you can drop in a file for your next question.
 Teammates
+- “vyavasta team”: what each teammate is working on, from the summaries they share with the team.
 - “vyavasta inbox”: what teammates asked of you.
-- “vyavasta ask <name>: <question>”: ask a teammate’s agent. It answers only from what you can both already see, and they see what you asked.
+- “vyavasta ask <name>: <question>”: ask a teammate’s agent, which is Vyavasta answering for them. It answers only from what you can both already see and does not see their computer; they see what you asked and can answer you themselves.
 - “vyavasta reply <number>: <your words>”: answer an item of your inbox.
 EOF
   [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:shared and /vyavasta:check; ask and reply are typed only."
+  [ "$CLIENT" = "codex" ] && echo "Codex runs Vyavasta only after you have reviewed and trusted its hooks, and asks you again after each update of the plugin. Until you trust them, Vyavasta does nothing in Codex."
 }
 
 # What the tool's model is told when the developer's message asks how to use the plugin itself (guide_wanted): what
@@ -2544,6 +2571,39 @@ command_inbox() {
   render_inbox "$items" "$(answer more)"
 }
 
+# What teammates are working on, as far as each shows it: their summaries by category, each with when it was last
+# brought up to date. Summaries are written by a model from a person's own chats, so where the tool's model reads this
+# (the command run outside a hook) the listing stands in the quoted block.
+command_team() {
+  need_token || return
+  api GET /team "" "$QUICK_SECONDS"
+  [ "$STATUS" = "200" ] || { not_reached; return; }
+  if [ "$(answer available)" != "true" ]; then
+    echo "This Vyavasta server writes no summaries, so there is nothing to show of your teammates’ work."
+    return
+  fi
+  people=$(answer people)
+  if [ -z "$people" ] || [ "$people" = "[]" ]; then
+    echo "None of your teammates has a summary to show yet. A summary is written from a person’s own chats and coding sessions, and each person chooses which of theirs their teammates see."
+    return
+  fi
+  json_rows "$people" | while IFS= read -r one; do
+    name=$(person "$(json_text "$(field "$one" name)")")
+    json_rows "$(field "$one" categories)" | while IFS= read -r category; do
+      label=$(one_line "$(json_text "$(field "$category" name)")")
+      [ "$(json_text "$(field "$category" kind)")" = "repository" ] && label="the repository $label"
+      printf '%s · %s · brought up to date %s\n' "$name" "$label" "$(one_line "$(json_text "$(field "$category" updated_said)")")"
+      json_rows "$(field "$category" points)" | while IFS= read -r point; do
+        printf -- '- %s\n' "$(one_line "$(json_text "$point")")"
+      done
+      echo
+    done
+  done > "$TMP/team"
+  echo "What your teammates are working on, from the summaries they share with the team:"
+  if [ -n "${IN_HOOK:-}" ]; then echo; cat "$TMP/team"; else quoted "$(cat "$TMP/team")"; echo; fi
+  echo "Each summary is its person’s own, written from their chats and coding sessions. To ask one of them, send “vyavasta ask <name>: <your question>”."
+}
+
 # A message to a teammate's agent (`ask`), or a reply to an item of the inbox. $1 is who it is for, $2 the words,
 # $3 the message it replies to.
 tell() {
@@ -2655,7 +2715,7 @@ command_ask_assistant() {
     return
   fi
   if [ "$CLIENT" = "codex" ] && ! writable; then
-    echo "Codex kept this command from reaching Vyavasta. The developer can ask the same thing by sending a message that starts with “Vyavasta,”."
+    boxed_said "it cannot write its own settings folder"
     return
   fi
   finish_pairing
@@ -2687,8 +2747,14 @@ command_ask_assistant() {
     401) echo "This computer’s connection to Vyavasta has ended, so nothing was asked. Tell the developer: $WAY_IN_AGAIN" ;;
     429) echo "Too many requests to Vyavasta just now. Ask again in a minute." ;;
     000)
-      if [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ]; then
-        echo "Codex kept this command from reaching Vyavasta. The developer can ask the same thing by sending a message that starts with “Vyavasta,”."
+      # Out of reach at once, under Codex: inside its sandbox, which Codex says of a command it runs there
+      # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so, and both
+      # are said. (That the session's network is off, CODEX_SANDBOX_NETWORK_DISABLED, Codex says of every command,
+      # of one it runs outside the sandbox too: seen in Codex 0.171. It is never taken for the sandbox.)
+      if [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ] && [ -n "${CODEX_SANDBOX:-}" ]; then
+        boxed_said "the network is switched off"
+      elif [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ]; then
+        echo "Vyavasta could not be reached from this command, so nothing was asked. If it ran inside Codex’s sandbox, run the same command again outside the sandbox, asking for escalated permissions for it. If it ran outside, Vyavasta’s server is out of reach right now."
       else
         echo "Vyavasta can’t be reached right now, so nothing was asked."
       fi ;;
@@ -2707,7 +2773,7 @@ command_use_server() {
   esac
 }
 
-USAGE="Usage: vyavasta.sh on | off | status | check | settings | help | sign-in | sign-out | share-code on|off | summaries on|off | shared | chat [open] | upload | inbox | tell <name> <words> | reply <number> <words> | ask \"<question>\" | use-server [address] | hook <event>"
+USAGE="Usage: vyavasta.sh on | off | status | check | settings | help | sign-in | sign-out | share-code on|off | summaries on|off | shared | chat [open] | upload | team | inbox | tell <name> <words> | reply <number> <words> | ask \"<question>\" | use-server [address] | hook <event>"
 
 # -- start here --------------------------------------------------------------------------------------------------
 
@@ -2739,7 +2805,7 @@ main() {
         edited|stopped) hook_report "$2" ;;
       esac
       ;;
-    on|off|status|check|settings|help|shared|upload|inbox) "command_$1" ;;
+    on|off|status|check|settings|help|shared|upload|inbox|team) "command_$1" ;;
     sign-in) command_sign_in ;;
     sign-out) command_sign_out ;;
     share-code)

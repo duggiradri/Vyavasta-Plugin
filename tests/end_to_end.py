@@ -28,6 +28,8 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "vyavasta" / "scripts" / "vyavasta.sh"
 REMOTE = "https://github.com/northwind/customer-platform.git"
+# This plugin's version, as its script names itself on every call.
+VERSION = re.search(r'^VERSION="([^"]+)"', SCRIPT.read_text(), re.M).group(1)
 
 
 class Browser:
@@ -362,6 +364,26 @@ def main() -> int:
         expect("While you were away:" in start_line and "· asked your agent ──" in start_line
                and "Is customer_plan still in the API?" in start_line,
                "the next session starts with Ganesh’s message, under its header")
+
+        step("Teammates in plain words: “Ask Ganesh …” is sent on by the plugin, and “vyavasta team” lists their work")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Ask Ganesh whether customer_plan can go this week")
+        reason = said.get("reason", "")
+        print("  the hook answered: " + reason.replace("\n", "\n  ")[:700])
+        expect(said.get("decision") == "block" and "── To " in reason and "’s agent · from " in reason,
+               "a message that begins by naming a teammate is answered by the plugin, under the same header")
+        expect("whether customer_plan can go this week" in reason and "Ask Ganesh" not in reason,
+               "and only the words for the teammate are sent")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta team")
+        reason = said.get("reason", "")
+        print("  vyavasta team said: " + reason.replace("\n", "\n  ")[:500])
+        expect(said.get("decision") == "block" and (
+            reason.startswith("What your teammates are working on, from the summaries they share with the team:")
+            or reason.startswith("None of your teammates has a summary to show yet.")),
+            "“vyavasta team” is answered by the plugin with what teammates show of their work, or that none does yet")
+        (tool,) = sam.ok("GET", "/plugin/tokens")["tokens"]
+        heard = {one["tool"]: one for one in tool.get("heard", [])}
+        expect("Claude Code" in heard and heard["Claude Code"]["version"] == VERSION and bool(heard["Claude Code"]["at"]),
+               "the web app lists Claude Code on this computer with this plugin’s version and when it was last heard from")
 
         step("Sam commits; Claude stops again")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Drop customer_plan"], check=True,

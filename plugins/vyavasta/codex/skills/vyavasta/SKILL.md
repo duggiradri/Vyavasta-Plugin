@@ -1,6 +1,6 @@
 ---
 name: vyavasta
-description: The team’s record in Vyavasta, and its plugin. Use when you need to know what a teammate is working on, what the team decided or who said what; and when the developer asks how to use, connect, sign in to or set up Vyavasta, how to turn it on or off, what it sends or shares, or why a request was held.
+description: The team’s record in Vyavasta, and its plugin. Use when you need to know what a teammate is working on, what the team decided or who said what; when the developer asks how to use, connect, sign in to or set up Vyavasta, how to turn it on or off, what it sends or shares, or why a request was held; and when one of its own commands (a message such as “vyavasta check”) reaches you unanswered, which means the plugin is not running.
 ---
 
 Vyavasta connects Codex to the developer’s team. In a project where it is on, it checks each request against what
@@ -36,8 +36,9 @@ Otherwise, from a project that is on, each message’s words, the repository and
 sent.
 
 Teammates
+- `vyavasta team`: what each teammate is working on, from the summaries they share with the team.
 - `vyavasta inbox`: what teammates asked of the developer.
-- `vyavasta ask <name>: <question>`: asks a teammate’s agent, which answers only from what the developer and that teammate can both already see.
+- `vyavasta ask <name>: <question>`: asks a teammate’s agent, which is Vyavasta answering for that teammate, only from what the developer and they can both already see. It does not see the teammate’s computer or coding session. The teammate sees the question and can answer it themselves. A message in plain words that names the teammate first (“ask Priya what’s up”) is sent the same way.
 - `vyavasta reply <number>: <words>`: answers an item of the inbox.
 
 When a request was held, the developer was told what stands in the way. They go ahead by sending `Plan it anyway`.
@@ -48,7 +49,18 @@ Questions about the team. Vyavasta keeps the team’s record: what teammates sai
 each is working on. A message of the developer’s that asks about the team is answered by Vyavasta before it
 reaches you, and you are given the answer: pass it on as it stands. When you need something else from the record,
 ask Vyavasta before any other source such as email or chat tools, with the command the plugin gave you at the
-start of the session (the plugin’s script with `ask "<the question>"`). Codex runs that command in a closed-off space
-that may keep it from reaching Vyavasta; when it says so, tell the developer they can ask the same thing by sending
-a message that starts with “Vyavasta,”. Do not guess what the team’s record says, and run nothing else of the
-plugin’s script.
+start of the session (the plugin’s script with `ask "<the question>"`). Run that command outside Codex’s sandbox, by
+asking for escalated permissions for it: it needs the internet to reach Vyavasta and its own settings folder, it only
+asks a question, and it changes nothing in the project. Inside the sandbox it cannot reach Vyavasta, and says so. If
+the request is refused, tell the developer they can ask the same thing by sending a message that starts with
+“Vyavasta,”. Do not guess what the team’s record says, and run nothing else of the plugin’s script.
+
+When the plugin is not running. Codex runs a plugin’s hooks only after the developer has reviewed and trusted them,
+and it asks them to review again after every update of the plugin. Until they do, Vyavasta does nothing in Codex:
+nothing is checked, answered or summed up, and no line from Vyavasta appears under the developer’s messages. You can
+tell that this is so when one of the plugin’s own commands (a message such as `vyavasta check`, `vyavasta status` or
+`vyavasta on`) reaches you, because the plugin answers those itself whenever it runs; and when the session began
+with no note from Vyavasta in a project the developer says it is on in. Then run nothing of the plugin’s script. Tell
+the developer that Vyavasta’s hooks are waiting for their review in Codex (Codex says the hooks need review), that
+trusting them and starting a new session turns Vyavasta on again, and that Codex asks this once more after each
+update of the plugin.

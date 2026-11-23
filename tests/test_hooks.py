@@ -50,7 +50,7 @@ def told_context(name: str, answer: str) -> str:
 
 
 COMMANDS = ["on", "off", "status", "check", "settings", "help", "sign-in", "sign-out", "share-code-on",
-            "share-code-off", "summaries-on", "summaries-off", "shared", "chat", "upload", "inbox"]
+            "share-code-off", "summaries-on", "summaries-off", "shared", "chat", "upload", "inbox", "team"]
 
 
 class Fake:
@@ -69,7 +69,7 @@ class Fake:
         self.approved = False
         self.status: dict[str, int] = {}
         # What the newer routes answer.
-        self.latest = "0.5.3"
+        self.latest = "0.5.4"
         self.minimum = "0.3.0"
         self.sharing: set[str] = set()
         self.extra: dict[str, dict] = {}
@@ -86,6 +86,8 @@ class Fake:
         self.tell_context = True
         # How many more inbox items wait than are given (the server gives 50 at most).
         self.inbox_more = 0
+        # What teammates show of their work (GET /team).
+        self.team = {"available": True, "people": []}
         # The sentence a refusal carries (``status`` sets which routes refuse).
         self.refused = "Refused."
         # Seconds a route takes to answer.
@@ -182,6 +184,8 @@ class Fake:
                 if path == "/inbox":
                     return self._answer(200, {"items": fake.inbox, "count": len(fake.inbox) + fake.inbox_more,
                                               "more": fake.inbox_more})
+                if path == "/team":
+                    return self._answer(200, fake.team)
                 if path == "/tell":
                     if fake.tell_slow > 0 and len(fake.calls("/tell")) <= fake.tell_slow:
                         return self._answer(200, {**fake.tell, "status": "pending", "answer": "",
@@ -648,28 +652,57 @@ def test_the_model_can_ask_vyavasta_itself_in_the_session_the_developer_last_wro
     assert f'sh "{SCRIPT}" ask "<the question>"' in told["additionalContext"]
     codex = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))
     assert f'VYAVASTA_TOOL=codex sh "{SCRIPT}" ask' in codex["hookSpecificOutput"]["additionalContext"]
-    assert "message that starts with “Vyavasta,”" in codex["hookSpecificOutput"]["additionalContext"]
+    # Codex's model is told to run it outside the sandbox, which it may ask for, and what to say when that is refused.
+    told_codex = codex["hookSpecificOutput"]["additionalContext"]
+    assert ("Run it outside Codex’s sandbox, by asking for escalated permissions for this one command" in told_codex
+            and "Inside the sandbox it cannot reach Vyavasta." in told_codex
+            and "message that starts with “Vyavasta,”" in told_codex)
+    assert "sandbox" not in told["additionalContext"]
 
 
-def test_under_codex_a_sandboxed_ask_says_how_to_ask_instead_and_never_prints_a_shell_error(run, fake, repo,
-                                                                                           tmp_path):
+def test_under_codex_a_sandboxed_ask_says_what_stood_in_its_way_and_to_run_it_outside(run, fake, repo, tmp_path):
+    """Codex runs its model's commands in a sandbox with no network, where the settings folder can't be written
+    either. The command that asks says which of these stood in its way, and that it is to be run again outside the
+    sandbox (which Codex's model may ask for), with what to tell the developer when that is refused."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    # Codex's sandbox: the settings folder can't be written, and the network can't be reached.
+    outside = ("Run the same command again outside the sandbox, asking for escalated permissions for it. If that is "
+               "refused, tell the developer they can ask the same thing by sending a message that starts with "
+               "“Vyavasta,”.")
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         closed = probe.getsockname()[1]
     (run.home / "credentials").write_text(f"server=http://127.0.0.1:{closed}\ntoken={TOKEN}\n")
-    done = run("ask", "What is Priya doing?", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}")
-    assert done.stdout.strip() == ("Codex kept this command from reaching Vyavasta. The developer can ask the same "
-                                   "thing by sending a message that starts with “Vyavasta,”.")
+    # The network is off: Codex says of a command that it runs it in its sandbox (CODEX_SANDBOX).
+    done = run("ask", "What is Priya doing?", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}",
+               extra={"CODEX_SANDBOX": "seatbelt", "CODEX_SANDBOX_NETWORK_DISABLED": "1"})
+    assert done.stdout.strip() == ("This command ran inside Codex’s sandbox, where the network is switched off, so it "
+                                   "did not reach Vyavasta. " + outside)
+    # Outside the sandbox Codex still says that the session's network is off (it says so of every command), so that
+    # alone is never taken for the sandbox: a server out of reach there is said to be one, with both readings.
+    for said in ({"CODEX_SANDBOX_NETWORK_DISABLED": "1"}, {}):
+        done = run("ask", "What is Priya doing?", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}",
+                   extra=said)
+        assert done.stdout.strip() == (
+            "Vyavasta could not be reached from this command, so nothing was asked. If it ran inside Codex’s sandbox, "
+            "run the same command again outside the sandbox, asking for escalated permissions for it. If it ran "
+            "outside, Vyavasta’s server is out of reach right now."), said
+    # In Claude Code there is no such sandbox to speak of.
+    done = run("ask", "What is Priya doing?", cwd=repo, server=f"http://127.0.0.1:{closed}")
+    assert done.stdout.strip() == "Vyavasta can’t be reached right now, so nothing was asked."
+    # The settings folder can't be written: said as that, and never as a shell's own error.
     run.home.chmod(0o500)
     try:
         done = run("ask", "What is Priya doing?", cwd=repo, tool="codex")
-        assert done.stdout.strip().startswith("Codex kept this command from reaching Vyavasta.")
+        assert done.stdout.strip() == ("This command ran inside Codex’s sandbox, where it cannot write its own "
+                                       "settings folder, so it did not reach Vyavasta. " + outside)
         assert "Operation not permitted" not in done.stdout + done.stderr
     finally:
         run.home.chmod(0o700)
+    # Outside the sandbox, with the network off for the session as Codex says of every command, it asks and answers.
+    (run.home / "credentials").write_text(f"server={fake.url}\ntoken={TOKEN}\n")
+    done = run("ask", "What is Priya doing?", cwd=repo, tool="codex", extra={"CODEX_SANDBOX_NETWORK_DISABLED": "1"})
+    assert done.stdout.startswith(f"{QUOTE_TOP}\n│ {fake.asked['answer']}\n{QUOTE_END}\n")
 
 
 # -- the one line for every message ------------------------------------------------------------------------------
@@ -977,15 +1010,15 @@ def test_check_tests_each_part_and_says_how_to_fix_what_is_wrong(run, fake, repo
     assert any(line.startswith("Problem: not signed in.") for line in lines)
     assert "ok: this folder is the repository acme/api on GitHub." in lines
     assert any(line.startswith("Problem: Vyavasta is off in this project.") for line in lines)
-    assert "ok: this plugin (0.5.3) is the latest." in lines
+    assert "ok: this plugin (0.5.4) is the latest." in lines
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.latest = "0.6.0"
     lines = run("check", cwd=repo).stdout.splitlines()
     assert "ok: signed in as sam@acme.test in Acme." in lines and "ok: Vyavasta reads acme/api for you." in lines
     assert "ok: Vyavasta is on in this project." in lines
-    assert any(line.startswith("Problem: this plugin is 0.5.3 and 0.6.0 is out.") for line in lines)
-    fake.minimum = "0.5.4"
+    assert any(line.startswith("Problem: this plugin is 0.5.4 and 0.6.0 is out.") for line in lines)
+    fake.minimum = "0.5.5"
     assert any("must be updated" in line for line in run("check", cwd=repo).stdout.splitlines())
     outside = tmp_path / "plain"
     outside.mkdir()
@@ -1218,7 +1251,7 @@ def test_under_codex_the_script_names_codex_and_says_which_tool_it_is(run, fake,
     fake.requests.clear()
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days"), tool="codex")
     (sent,) = fake.calls("/check")
-    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.5.3"
+    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.5.4"
 
 
 @pytest.mark.parametrize("typed", ["vyavasta sign in", "Vyavasta sign-in.", "  VYAVASTA  SIGN IN  "])
@@ -1277,7 +1310,7 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
     assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
-    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.5.3"
+    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.5.4"
     assert f'VERSION="{manifest["version"]}"' in SCRIPT.read_text()
     assert (PLUGIN / manifest["hooks"]).is_file() and (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").is_file()
     codex_skill = (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").read_text()
@@ -2279,7 +2312,7 @@ def test_the_version_is_the_same_everywhere():
     (entry,) = json.loads((root / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
     versions = {entry["version"], json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
                 json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["version"]}
-    assert versions == {"0.5.3"} and 'VERSION="0.5.3"' in SCRIPT.read_text()
+    assert versions == {"0.5.4"} and 'VERSION="0.5.4"' in SCRIPT.read_text()
 
 
 # -- 0.4.1 review: the next message finishes connecting anywhere, guidance only about the plugin, and the rest ---------
@@ -2748,7 +2781,7 @@ def test_the_servers_own_sentences_are_printed_on_one_line_wherever_the_model_ma
         fake.latest = latest
         assert "everything is up to date" not in run("check", cwd=repo).stdout
     fake.latest = "0.6.0"
-    assert "Problem: this plugin is 0.5.3 and 0.6.0 is out." in run("check", cwd=repo).stdout
+    assert "Problem: this plugin is 0.5.4 and 0.6.0 is out." in run("check", cwd=repo).stdout
 
 
 # -- names the plugin prints as its own are short; the awk that quotes works in bytes on every awk ------------------
@@ -2974,7 +3007,7 @@ def test_a_computer_signed_in_before_the_rename_stays_signed_in_from_its_earlier
 def test_the_plugin_names_itself_by_its_new_name_on_every_call(run, fake, repo):
     signed_in(run, fake)
     run("status", cwd=repo)
-    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.5.3"}
+    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.5.4"}
 
 
 # -- 0.5.3: tasks between teammates are taken out: their commands answer in one line, an older server's task is an item --
@@ -3164,4 +3197,99 @@ def test_the_welcome_on_a_connected_computer_is_the_plugins_own_words_with_the_k
     assert "\n" not in said and "before anything else" not in said and email not in said
     # Said from what this computer keeps: the server is not asked.
     assert fake.requests == []
+
+
+# -- 0.5.4: a message for a teammate in plain words, what teammates work on, and Codex when its hooks do not run -----
+
+def test_a_message_for_a_teammate_in_plain_words_is_sent_on_and_answered_by_the_plugin(run, fake, repo):
+    """“Ask Priya what’s up”: the server says whom it is for and with which words, and the plugin sends it on as
+    “vyavasta ask Priya: …” is sent. The tool's model is not asked, and nothing of it waits for the tool's reply."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = {"verdict": "teammate", "hold": False, "tell": {"to": "Priya", "text": "what’s up?"},
+                  "repository": "acme/api", "notice": "", "context": "", "statements": [], "kept": False}
+    for tool in (None, "codex"):
+        said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Ask Priya what’s up?"),
+                          tool=tool))
+        assert said["decision"] == "block"
+        # Claude Code is told not to pass the message on; Codex blocks it by the decision alone.
+        assert ("hookSpecificOutput" in said) == (tool is None)
+        sent = fake.calls("/tell")[-1]["body"]
+        assert (sent["to"], sent["text"], sent["kind"], sent["tool"]) == ("Priya", "what’s up?", "message",
+                                                                          tool or "claude-code")
+        lines = said["reason"].splitlines()
+        assert lines[0].startswith("── To Priya Raman’s agent · from Sam Rivera · ")
+        assert "│ what’s up?" in lines and "│ Priya is moving the export to v2." in lines
+    assert len(fake.calls("/check")) == 2 and fake.calls("/ask") == []
+    # No reply of the tool's is sent for it when the turn ends.
+    run("hook", "stopped", stdin=event("Stop", repo, last_assistant_message="Done."))
+    assert fake.calls("/turn") == []
+    # What the server could not send is said as it says it.
+    fake.check = {**fake.check, "tell": {"to": "Pri", "text": "what’s up?"}}
+    fake.tell = {**fake.tell, "status": "unknown_person", "people": ["Priya Raman", "Helen Ortiz"]}
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Ask Pri what’s up?")))
+    assert said["reason"] == "Vyavasta doesn’t know a teammate called “Pri”. Your teammates: Priya Raman, Helen Ortiz."
+
+
+def test_vyavasta_team_lists_what_each_teammate_shares_of_their_work(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta team")))
+    assert said["decision"] == "block" and not fake.calls("/check")
+    assert said["reason"].startswith("None of your teammates has a summary to show yet.")
+    fake.team = {"available": True, "people": [
+        {"name": "Priya Raman", "categories": [
+            {"kind": "miscellaneous", "name": "Miscellaneous", "points": ["Planning the export."],
+             "updated_said": "22 November 2026, 15:54"},
+            {"kind": "repository", "name": "api", "points": ["Fixing the rounding.", "Adding a test\nfor it."],
+             "updated_said": "21 November 2026, 10:00"}]},
+        {"name": "Helen Ortiz", "categories": [
+            {"kind": "initiative", "name": "Billing v2", "points": ["Deciding the plan names."],
+             "updated_said": "20 November 2026, 09:00"}]}]}
+    last = ("Each summary is its person’s own, written from their chats and coding sessions. To ask one of them, send "
+            "“vyavasta ask <name>: <your question>”.")
+    for tool in (None, "codex"):
+        said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Vyavasta team"), tool=tool))
+        assert said["reason"].splitlines() == [
+            "What your teammates are working on, from the summaries they share with the team:", "",
+            "Priya Raman · Miscellaneous · brought up to date 22 November 2026, 15:54", "- Planning the export.", "",
+            "Priya Raman · the repository api · brought up to date 21 November 2026, 10:00", "- Fixing the rounding.",
+            "- Adding a test for it.", "",
+            "Helen Ortiz · Billing v2 · brought up to date 20 November 2026, 09:00", "- Deciding the plan names.", "",
+            last]
+    assert len(fake.calls("/team")) == 3
+    # Run as a command, where the tool's model reads what it prints (Claude Code's /vyavasta:team): a summary is
+    # written by a model from someone's chats, so the listing stands in the quoted block.
+    printed = run("team", cwd=repo).stdout
+    assert printed.startswith("What your teammates are working on, from the summaries they share with the team:\n"
+                              f"{QUOTE_TOP}\n│ Priya Raman · Miscellaneous · brought up to date 22 November 2026, 15:54\n"
+                              "│ - Planning the export.\n")
+    assert f"│ - Deciding the plan names.\n│ \n{QUOTE_END}\n" in printed or \
+        f"│ - Deciding the plan names.\n{QUOTE_END}\n" in printed
+    assert printed.rstrip().endswith(last)
+    # A server that writes no summaries, and one out of reach, each say so.
+    fake.team = {"available": False, "people": []}
+    assert run("team", cwd=repo).stdout.strip() == ("This Vyavasta server writes no summaries, so there is nothing to "
+                                                    "show of your teammates’ work.")
+    fake.status["/team"] = 500
+    assert run("team", cwd=repo).stdout.strip() == "Vyavasta’s server isn’t working right now. Try again in a minute."
+    # It is in the help, and Claude Code has it as a slash command (``COMMANDS``).
+    assert "- “vyavasta team”: what each teammate is working on" in run("help", cwd=repo).stdout
+
+
+def test_codex_is_told_how_to_ask_outside_its_sandbox_and_what_to_say_when_its_hooks_do_not_run(run, fake, repo):
+    """What Codex's model reads of the plugin when it opens its skill: how the command that asks is to be run, and
+    how to tell that the plugin's hooks are not running (Codex runs none of them after an update of the plugin until
+    the developer has reviewed and trusted them again), with what to tell the developer then."""
+    skill = (PLUGIN / "codex" / "skills" / "vyavasta" / "SKILL.md").read_text()
+    said = " ".join(skill.split())
+    assert "Run that command outside Codex’s sandbox, by asking for escalated permissions for it" in said
+    assert "closed-off space" not in said
+    assert "When the plugin is not running." in said
+    assert "it asks them to review again after every update of the plugin" in said
+    assert "Then run nothing of the plugin’s script." in said
+    assert "`vyavasta team`" in said
+    # The same is said to the developer where they read the commands, in Codex only.
+    assert "asks you again after each update of the plugin" in run("help", cwd=repo, tool="codex").stdout
+    assert "trusted its hooks" not in run("help", cwd=repo).stdout
 
