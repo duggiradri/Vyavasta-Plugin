@@ -43,7 +43,7 @@ Teammates
 - `vyavasta inbox`: what teammates told the developer and asked of them. What is new also comes with the developer’s next message: you are given it then, to show at the top of your reply.
 - `vyavasta tell <name>: <words>`: tells a teammate something, as written. They see it in Vyavasta at once, and in their own coding tool with their next message there.
 - `vyavasta ask <name>: <question>`: asks a teammate’s agent, which is Vyavasta answering for that teammate, only from what the developer and they can both already see. It does not see the teammate’s computer or coding session. The teammate sees the question and can answer it themselves.
-- `@<name> <words>`: a message that starts with “@” and a teammate’s name tells them something, as written, the same as `vyavasta tell`. The plugin sends it itself, before you see it.
+- `@<name> <words>`: a message that starts with “@” and a teammate’s name tells them something, as written, the same as `vyavasta tell`. The plugin sends it itself, before you see it. `@team <words>` tells everyone else in the workspace, and a message that starts with several names (`@priya @sam <words>`) tells each of them.
 - `vyavasta reply <number>: <words>`: answers an item of the inbox.
 - `vyavasta documents`: the team’s documents the developer may read in Vyavasta, numbered. `vyavasta documents search <words>` finds passages in them, and `vyavasta documents read <number>` reads one, part by part.
 
@@ -75,7 +75,8 @@ Messages for teammates. Vyavasta carries messages between teammates, and a teamm
 address. The developer reaches a teammate with “@” and their name. When a message mentions a teammate as part of
 other work (“push this, then tell @priya”), you send it, after any work it depends on is done, with the command the plugin gives you at the
 start of the session and again with such a message (the plugin’s script with `tell "<the teammate’s name>"` and
-the message on its input). Write the message in plain words that can be understood on their own, and send only
+the message on its input; several names with commas between them, or `team`, send the one message to each of them).
+Write the message in plain words that can be understood on their own, and send only
 what is true by then. Run that command outside Codex’s sandbox too, by asking for escalated permissions for it: it
 needs the internet to reach Vyavasta and its own settings folder, it sends only the message you give it, and it
 changes nothing in the project. If the request is refused, tell the developer that it was not sent, and that they
@@ -84,11 +85,12 @@ to reach a teammate unless the developer names one. The teammate sees the messag
 own coding tool with their next message there, and answers it themselves.
 
 When the plugin is not running. Codex runs a plugin’s hooks only after the developer has reviewed and trusted them,
-and it asks them to review again after every update of the plugin. Until they do, Vyavasta does nothing in Codex:
-nothing is checked, answered or summed up, and no line from Vyavasta appears under the developer’s messages. You can
-tell that this is so when one of the plugin’s own commands (a message such as `vyavasta check`, `vyavasta status` or
-`vyavasta on`) reaches you, because the plugin answers those itself whenever it runs; and when the session began
-with no note from Vyavasta in a project the developer says it is on in. Then run nothing of the plugin’s script. Tell
-the developer that Vyavasta’s hooks are waiting for their review in Codex (Codex says the hooks need review), that
-trusting them and starting a new session turns Vyavasta on again, and that Codex asks this once more after each
-update of the plugin.
+and after every update of the plugin, which Codex installs by itself, it runs none of them until the developer
+reviews them again. Until then Vyavasta does nothing in Codex: nothing is checked, answered or summed up. A message
+that starts with “vyavasta” (one of the plugin’s commands, such as `vyavasta status`, `vyavasta check` or
+`vyavasta on`) is always answered by the plugin’s hooks before it reaches you. So if such a message reaches you with
+no answer from the plugin, the hooks did not run, and after a plugin update that means Codex is waiting for the
+developer to review them. Then run nothing of the plugin’s script. Tell the developer, in one or two sentences, to
+approve Vyavasta’s hooks in Codex (open `/hooks` in the terminal, or choose “Review hooks” in the desktop app) and
+then send the message again, in a new session if it is still not answered. Nothing else shows this: a message with
+no note from Vyavasta proves nothing, since Vyavasta is off in every project until the developer turns it on there.

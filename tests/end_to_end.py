@@ -141,12 +141,14 @@ def main() -> int:
         if not condition:
             failures.append(what)
 
-    def plugin(*command: str, stdin: dict | None = None, cwd: Path | None = None, typed: str | None = None) -> str:
-        # (``typed``: what stands on the command's input as it is, as a message for a teammate does.)
+    def plugin(*command: str, stdin: dict | None = None, cwd: Path | None = None, typed: str | None = None,
+               home_dir: Path | None = None) -> str:
+        # (``typed``: what stands on the command's input as it is, as a message for a teammate does; ``home_dir``:
+        # another person's settings folder, as on their own computer.)
         done = subprocess.run(["sh", str(SCRIPT), *command],
                               input=typed if typed is not None else json.dumps(stdin) if stdin else "",
                               capture_output=True, text=True, cwd=cwd or work, timeout=120, env={
-                                  "PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTA_HOME": str(home),
+                                  "PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTA_HOME": str(home_dir or home),
                                   "VYAVASTA_SERVER": base, "CLAUDE_PROJECT_DIR": str(cwd or work),
                                   # Pages the plugin opens (sign-in, the session's chat) are not opened here.
                                   "VYAVASTA_BROWSER": "true"})
@@ -226,6 +228,11 @@ def main() -> int:
                and said["systemMessage"].startswith("Vyavasta: connected as sam@northwind.dev")
                and "“vyavasta on”" in said["systemMessage"],
                "after approving, Sam’s next ordinary message finishes connecting, says so, and goes through")
+        guides = [mail for mail in sam.ok("GET", "/demo/inbox?email=sam@northwind.dev")
+                  if mail["subject"] == "Vyavasta in Claude Code and Codex: your guide (keep this email)"]
+        expect(len(guides) == 1 and "A guide to every command was emailed to you; it is worth keeping."
+               in said["systemMessage"],
+               "the first connection brings the guide to every command by email, once, and the line says so")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta how do I sign in?")
         expect(said.get("decision") == "block" and "You’re signed in as sam@northwind.dev" in said.get("reason", ""),
                "asking how to sign in is answered with help, which says Sam is signed in")
@@ -522,6 +529,40 @@ def main() -> int:
         expect(said.get("decision") == "block" and reason.startswith("── To ") and "Delivered. " in reason
                and "│ CI is green, tagging v2.1 now" in reason,
                "“vyavasta tell <name>: …” is sent by the plugin itself, as it is written")
+
+        step("Several at once: “@team …” and two names reach each teammate in their own thread, with whom else")
+        ines = Browser(base)
+        ganesh.ok("POST", "/workspace/invitations", {"email": "ines@northwind.dev", "role": "member"})
+        invited = [mail for mail in ines.ok("GET", "/demo/inbox?email=ines@northwind.dev") if mail.get("link")]
+        ines.ok("POST", "/auth/verify", {"token": re.search(r"token=([^&\s]+)", invited[0]["link"]).group(1)})
+        ines.ok("PATCH", "/me", {"name": "Ines Duarte"})
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="@team the release is out")
+        reason = said.get("reason", "")
+        print("  “@team the release is out” printed:\n  " + reason.replace("\n", "\n  "))
+        expect(said.get("decision") == "block" and "Delivered to the whole team (2 people)." in reason
+               and reason.count("/?agent-chat=") == 1 and "│ the release is out" in reason,
+               "“@team …” is sent by the plugin to everyone else, confirmed in one block")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="@ganesh @ines hello from the loop")
+        reason = said.get("reason", "")
+        print("  “@ganesh @ines hello from the loop” printed:\n  " + reason.replace("\n", "\n  "))
+        expect(said.get("decision") == "block" and "Delivered to ganesh and Ines Duarte." in reason,
+               "a message that starts with two names reaches both")
+        ines_thread = ines.ok("GET", f"/agent-chats/{sam_id}")["messages"]
+        expect([(row["text"], row["sent_with"]) for row in ines_thread] == [
+            ("the release is out", "Sent to the whole team (2 people)."),
+            ("hello from the loop", "Also sent to ganesh.")],
+            "Ines reads each in her thread with Sam, with whom else it went to")
+        ines_home = work / "ines-home"
+        signing = plugin("sign-in", home_dir=ines_home)
+        found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", signing)
+        if found:
+            ines.ok("POST", "/plugin/pairings/approve", {"code": found.group(1), "approve": True})
+        listed = plugin("inbox", home_dir=ines_home)
+        print("  Ines’s “vyavasta inbox” printed:\n  " + listed.strip().replace("\n", "\n  "))
+        lines = listed.splitlines()
+        expect("Sent to the whole team (2 people)." in lines and "Also sent to ganesh." in lines
+               and "│ the release is out" in lines and "│ hello from the loop" in lines,
+               "in her own coding tool, each item says whom else it went to, on a line under its header")
 
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta open settings")
         expect(said.get("decision") == "block" and f"{base}/settings" in said.get("reason", ""),
