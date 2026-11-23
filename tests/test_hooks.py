@@ -3338,14 +3338,14 @@ def test_codex_is_told_how_to_ask_outside_its_sandbox_and_what_to_say_when_its_h
 
 # -- 0.5.5: telling a teammate as part of the work, and what teammates sent with the next message ---------------------
 
-ARRIVED = [{"n": 1, "message_id": "pm_7", "from": {"name": "Manoj Kumar"}, "kind": "told",
+ARRIVED = [{"n": 1, "message_id": "pm_7", "from": {"name": "Rohan Mehta"}, "kind": "told",
             "text": "Pushed 002afdd to main of acme/api: the build scripts are fixed.", "answer": None, "at": "x",
             "at_said": "23 November 2026, 00:23"},
            {"n": 2, "message_id": "pm_8", "from": {"name": "Priya Raman"}, "kind": "message",
             "text": "Are you changing the export?", "answer": "Sam is changing calc.py.", "at": "y",
             "at_said": "23 November 2026, 00:25"}]
 ARRIVED_LISTING = (
-    "── 1. From Manoj Kumar · 23 November 2026, 00:23 · told you ──\n"
+    "── 1. From Rohan Mehta · 23 November 2026, 00:23 · told you ──\n"
     f"{QUOTE_TOP}\n│ Pushed 002afdd to main of acme/api: the build scripts are fixed.\n{QUOTE_END}\n\n"
     "── 2. From Priya Raman · 23 November 2026, 00:25 · asked your agent ──\n"
     f"{QUOTE_TOP}\n│ Are you changing the export?\n{QUOTE_END}\n"
@@ -3388,10 +3388,10 @@ def test_what_teammates_sent_comes_with_the_next_message_under_its_line_and_at_t
                            ["Are you changing the export?"], ["Sam is changing calc.py."]]
     assert plain["systemMessage"] == line.split("\n\n🔔")[0].replace("Codex", "Claude")
     # The numbers are kept, so a reply finds its item.
-    fake.tell = {**fake.tell, "status": "sent", "to": {"name": "Manoj Kumar"}, "answer": "", "notice": ""}
+    fake.tell = {**fake.tell, "status": "sent", "to": {"name": "Rohan Mehta"}, "answer": "", "notice": ""}
     output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta reply 1: thanks, pulling now")))
     sent = fake.calls("/tell")[-1]["body"]
-    assert (sent["reply_to"], sent["to"], sent["text"]) == ("pm_7", "Manoj Kumar", "thanks, pulling now")
+    assert (sent["reply_to"], sent["to"], sent["text"]) == ("pm_7", "Rohan Mehta", "thanks, pulling now")
     # A request that is held still tells the developer what arrived, on its line; the model is not asked.
     fake.check = {"verdict": "held", "hold": True, "notice": "On hold: Priya said the export stays.", "context": "",
                   "statements": [], "anyway": {"phrase": "Plan it anyway", "context": "x"}}
@@ -3419,17 +3419,17 @@ def test_what_teammates_sent_comes_with_the_next_message_under_its_line_and_at_t
 
 
 def test_a_message_that_names_a_teammate_to_tell_gives_the_model_the_command_that_sends_it(run, fake, repo):
-    """“Push the changes. Let Manoj know that they are pushed.”: the work is the tool's, and so is the telling, once
+    """“Push the changes. Let Rohan know that they are pushed.”: the work is the tool's, and so is the telling, once
     the work is done and in words that say what was done. The server says whom the message names; the plugin tells the
     tool's model how to send it, by this script's own path, with the message on the command's input."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.check = {"verdict": "not_a_change", "hold": False, "notice": "", "context": "", "statements": [],
-                  "to_teammates": [{"name": "Manoj Kumar"}]}
+                  "to_teammates": [{"name": "Rohan Mehta"}]}
     for tool in (None, "codex"):
-        said = prompt(run, repo, "Push the changes. Let manoj know that the changes have been pushed.", tool=tool)
+        said = prompt(run, repo, "Push the changes. Let rohan know that the changes have been pushed.", tool=tool)
         guide = said["hookSpecificOutput"]["additionalContext"]
-        assert guide.startswith("The developer’s message names Manoj Kumar with words for telling or asking them "
+        assert guide.startswith("The developer’s message names Rohan Mehta with words for telling or asking them "
                                 "something. Vyavasta carries messages between teammates: if the message asks for "
                                 "that, send it with this command, after any work it depends on is done, the message "
                                 "on the lines between (written as it is, with nothing escaped):\n" + tell_command(tool))
@@ -3444,20 +3444,20 @@ def test_a_message_that_names_a_teammate_to_tell_gives_the_model_the_command_tha
         assert "decision" not in said and said["systemMessage"].startswith("Vyavasta · sent: your message.")
     assert fake.calls("/tell") == []
     # Two and three names read as a sentence names them; a name is cut to a short one, as everywhere.
-    fake.check["to_teammates"] = [{"name": "Manoj Kumar"}, {"name": "Priya Raman"}]
-    two = prompt(run, repo, "Tell Manoj and Priya once it is merged")["hookSpecificOutput"]["additionalContext"]
-    assert two.startswith("The developer’s message names Manoj Kumar and Priya Raman with words")
-    fake.check["to_teammates"] = [{"name": "Manoj Kumar"}, {"name": "Priya Raman"}, {"name": "Helen Ortiz " + "x" * 80}]
+    fake.check["to_teammates"] = [{"name": "Rohan Mehta"}, {"name": "Priya Raman"}]
+    two = prompt(run, repo, "Tell Rohan and Priya once it is merged")["hookSpecificOutput"]["additionalContext"]
+    assert two.startswith("The developer’s message names Rohan Mehta and Priya Raman with words")
+    fake.check["to_teammates"] = [{"name": "Rohan Mehta"}, {"name": "Priya Raman"}, {"name": "Helen Ortiz " + "x" * 80}]
     three = prompt(run, repo, "Tell them all")["hookSpecificOutput"]["additionalContext"]
-    assert three.startswith("The developer’s message names Manoj Kumar, Priya Raman, and Helen Ortiz xxxxxxxxxxxxxxxxxxxxxxxxxxx… with")
+    assert three.startswith("The developer’s message names Rohan Mehta, Priya Raman, and Helen Ortiz xxxxxxxxxxxxxxxxxxxxxxxxxxx… with")
     # With what the check found, the guidance follows it; with what arrived, that still comes first.
     fake.check = {"verdict": "clear", "hold": False, "notice": "Checked.", "statements": [],
                   "context": "Vyavasta checked this request: nothing stands against it.",
-                  "to_teammates": [{"name": "Manoj Kumar"}]}
+                  "to_teammates": [{"name": "Rohan Mehta"}]}
     fake.extra["/check"] = {"inbox": {"items": ARRIVED[:1], "count": 1, "more": 0}}
-    both = prompt(run, repo, "Fix the rounding and tell Manoj")["hookSpecificOutput"]["additionalContext"]
+    both = prompt(run, repo, "Fix the rounding and tell Rohan")["hookSpecificOutput"]["additionalContext"]
     assert both.startswith(OPENS_WITH)
-    assert both.index("Vyavasta checked this request") < both.index("The developer’s message names Manoj Kumar")
+    assert both.index("Vyavasta checked this request") < both.index("The developer’s message names Rohan Mehta")
     # No teammate named, in any of the ways a server may say it: nothing is added.
     fake.extra["/check"] = {}
     for none in ([], None, "x"):
@@ -3482,43 +3482,43 @@ def test_the_model_tells_a_teammate_with_the_message_on_the_commands_input_taken
     prompt(run, repo, "Fix the rounding", session="session-7")
     fake.requests.clear()
     words = "Pushed 002afdd to main of acme/api: `calc.py` rounds to 2 places now, at $0 cost.\nSay “go” and I’ll tag it."
-    fake.tell = {"status": "told", "to": {"name": "Manoj Kumar", "first": "Manoj"}, "from": {"name": "Sam Rivera"},
+    fake.tell = {"status": "told", "to": {"name": "Rohan Mehta", "first": "Rohan"}, "from": {"name": "Sam Rivera"},
                  "at_said": "23 November 2026, 00:23", "text": "", "answer": "", "answer_at_said": "", "context": "",
-                 "notice": "Delivered. Manoj sees it in Vyavasta now, and in their coding tool with their next "
-                           "message there. Your thread with Manoj: http://127.0.0.1/?agent-chat=usr_m",
+                 "notice": "Delivered. Rohan sees it in Vyavasta now, and in their coding tool with their next "
+                           "message there. Your thread with Rohan: http://127.0.0.1/?agent-chat=usr_m",
                  "url": "http://127.0.0.1/?agent-chat=usr_m", "waiting": None, "people": []}
     for tool in (None, "codex"):
-        done = run("tell", "Manoj", raw=(words + "\n").encode(), cwd=repo, tool=tool)
+        done = run("tell", "Rohan", raw=(words + "\n").encode(), cwd=repo, tool=tool)
         assert fake.calls("/tell")[-1]["body"] == {
-            "to": "Manoj", "text": words, "kind": "message", "intent": "tell", "session": "session-7",
+            "to": "Rohan", "text": words, "kind": "message", "intent": "tell", "session": "session-7",
             "remote": "https://github.com/acme/api.git", "branch": "main", "tool": tool or "claude-code"}
         # Told the teammate: under a header that names them, never their agent, with where they see it.
         assert done.stdout.splitlines() == [
-            "── To Manoj Kumar · from Sam Rivera · 23 November 2026, 00:23 · through Vyavasta ──",
+            "── To Rohan Mehta · from Sam Rivera · 23 November 2026, 00:23 · through Vyavasta ──",
             QUOTE_TOP, "│ Pushed 002afdd to main of acme/api: `calc.py` rounds to 2 places now, at $0 cost.",
             "│ Say “go” and I’ll tag it.", QUOTE_END, "",
-            "Delivered. Manoj sees it in Vyavasta now, and in their coding tool with their next message there. Your "
-            "thread with Manoj: http://127.0.0.1/?agent-chat=usr_m"]
+            "Delivered. Rohan sees it in Vyavasta now, and in their coding tool with their next message there. Your "
+            "thread with Rohan: http://127.0.0.1/?agent-chat=usr_m"]
     # The words may follow the name instead, and a lone “-” says they are on the input.
-    run("tell", "Manoj", "the", "fix", "is", "pushed", cwd=repo)
+    run("tell", "Rohan", "the", "fix", "is", "pushed", cwd=repo)
     assert fake.calls("/tell")[-1]["body"]["text"] == "the fix is pushed"
-    run("tell", "Manoj", "-", raw=b"from the input\n", cwd=repo)
+    run("tell", "Rohan", "-", raw=b"from the input\n", cwd=repo)
     assert fake.calls("/tell")[-1]["body"]["text"] == "from the input"
     # A question told a teammate is answered by their agent as well, and printed as an answer is.
-    fake.tell = {**fake.tell, "status": "answered", "answer": "Manoj is on the importer.",
+    fake.tell = {**fake.tell, "status": "answered", "answer": "Rohan is on the importer.",
                  "answer_at_said": "23 November 2026, 00:24", "notice": ""}
-    asked = run("tell", "Manoj", raw="Are you on the importer?".encode(), cwd=repo).stdout
-    assert "── To Manoj Kumar’s agent · from Sam Rivera ·" in asked and "│ Manoj is on the importer." in asked
+    asked = run("tell", "Rohan", raw="Are you on the importer?".encode(), cwd=repo).stdout
+    assert "── To Rohan Mehta’s agent · from Sam Rivera ·" in asked and "│ Rohan is on the importer." in asked
     # Neither a name nor words: how the command is used, and nothing sent.
     before = len(fake.calls("/tell"))
-    assert "Usage" in run("tell", cwd=repo).stdout and "Usage" in run("tell", "Manoj", cwd=repo).stdout
-    assert "Usage" in run("tell", "Manoj", "-", cwd=repo).stdout
+    assert "Usage" in run("tell", cwd=repo).stdout and "Usage" in run("tell", "Rohan", cwd=repo).stdout
+    assert "Usage" in run("tell", "Rohan", "-", cwd=repo).stdout
     # A message longer than the server takes is refused here, with why.
-    long = run("tell", "Manoj", raw=("é" * 4001).encode(), cwd=repo).stdout
+    long = run("tell", "Rohan", raw=("é" * 4001).encode(), cwd=repo).stdout
     assert long.strip() == ("That message is too long for Vyavasta, which takes 4,000 characters at most. Nothing was "
                             "sent: send a shorter one.")
     assert len(fake.calls("/tell")) == before
-    run("tell", "Manoj", raw=("é" * 4000).encode(), cwd=repo)
+    run("tell", "Rohan", raw=("é" * 4000).encode(), cwd=repo)
     assert len(fake.calls("/tell")) == before + 1 and fake.calls("/tell")[-1]["body"]["text"] == "é" * 4000
 
 
@@ -3567,25 +3567,25 @@ def test_under_codex_a_sandboxed_tell_says_what_stood_in_its_way_and_how_the_dev
         probe.bind(("127.0.0.1", 0))
         closed = probe.getsockname()[1]
     (run.home / "credentials").write_text(f"server=http://127.0.0.1:{closed}\ntoken={TOKEN}\n")
-    done = run("tell", "Manoj", raw=b"The fix is pushed.", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}",
+    done = run("tell", "Rohan", raw=b"The fix is pushed.", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}",
                extra={"CODEX_SANDBOX": "seatbelt", "CODEX_SANDBOX_NETWORK_DISABLED": "1"})
     assert done.stdout.strip() == ("This command ran inside Codex’s sandbox, where the network is switched off, so it "
                                    "did not reach Vyavasta. " + outside)
     # That the session's network is off Codex says of every command: alone it is never taken for the sandbox.
-    done = run("tell", "Manoj", raw=b"The fix is pushed.", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}",
+    done = run("tell", "Rohan", raw=b"The fix is pushed.", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}",
                extra={"CODEX_SANDBOX_NETWORK_DISABLED": "1"})
     assert done.stdout.strip() == (
         "Vyavasta could not be reached from this command, so nothing was sent. If it ran inside Codex’s sandbox, run "
         "the same command again outside the sandbox, asking for escalated permissions for it. If it ran outside, "
         "Vyavasta’s server is out of reach right now.")
     # In Claude Code there is no such sandbox to speak of.
-    done = run("tell", "Manoj", raw=b"The fix is pushed.", cwd=repo, server=f"http://127.0.0.1:{closed}")
+    done = run("tell", "Rohan", raw=b"The fix is pushed.", cwd=repo, server=f"http://127.0.0.1:{closed}")
     assert done.stdout.strip() == ("Vyavasta’s server can’t be reached right now. Check your internet connection, or "
                                    "try again in a minute.")
     # The settings folder can't be written: said as that, and never as a shell's own error.
     run.home.chmod(0o500)
     try:
-        done = run("tell", "Manoj", raw=b"The fix is pushed.", cwd=repo, tool="codex")
+        done = run("tell", "Rohan", raw=b"The fix is pushed.", cwd=repo, tool="codex")
         assert done.stdout.strip() == ("This command ran inside Codex’s sandbox, where it cannot write its own "
                                        "settings folder, so it did not reach Vyavasta. " + outside)
     finally:
@@ -3593,10 +3593,10 @@ def test_under_codex_a_sandboxed_tell_says_what_stood_in_its_way_and_how_the_dev
     # Outside the sandbox, with the network off for the session as Codex says of every command, it is sent.
     (run.home / "credentials").write_text(f"server={fake.url}\ntoken={TOKEN}\n")
     (run.home / "offline").unlink(missing_ok=True)
-    run("tell", "Manoj", raw=b"The fix is pushed.", cwd=repo, tool="codex", extra={"CODEX_SANDBOX_NETWORK_DISABLED": "1"})
+    run("tell", "Rohan", raw=b"The fix is pushed.", cwd=repo, tool="codex", extra={"CODEX_SANDBOX_NETWORK_DISABLED": "1"})
     assert fake.calls("/tell")[-1]["body"]["text"] == "The fix is pushed."
     # Typed by the developer, the plugin's own hook sends it, which Codex runs outside the sandbox.
-    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta tell Manoj: pushed"),
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta tell Rohan: pushed"),
                       tool="codex"))
     assert said["decision"] == "block" and fake.calls("/tell")[-1]["body"]["text"] == "pushed"
 
@@ -3617,7 +3617,7 @@ def test_codex_and_claude_are_told_in_their_skills_how_a_teammate_is_told(run, f
     switched_on(run, fake, repo)
     fake.inbox = ARRIVED
     began = output(run("hook", "session-start", stdin=event("SessionStart", repo)))
-    assert "While you were away:\n── 1. From Manoj Kumar · 23 November 2026, 00:23 · told you ──\n" in began["systemMessage"]
+    assert "While you were away:\n── 1. From Rohan Mehta · 23 November 2026, 00:23 · told you ──\n" in began["systemMessage"]
     # And the tool's model is given what came while they were away, to open its first reply with.
     told = began["hookSpecificOutput"]["additionalContext"]
     assert told.startswith(OPENS_WITH.replace("While the developer worked", "While the developer was away")
