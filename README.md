@@ -2,7 +2,7 @@
 
 # Vyavasta for Claude Code and Codex
 
-One plugin for two coding tools, laid out as its own private plugin marketplace. With it, Claude Code or Codex on your own computer works with your team’s Vyavasta workspace. What follows says Claude; under Codex it is the same, with Codex in its place.
+One plugin for two coding tools, laid out as its own plugin marketplace. With it, Claude Code or Codex on your own computer works with your team’s Vyavasta workspace. What follows says Claude; under Codex it is the same, with Codex in its place.
 
 The plugin is **off in every project** until you send `vyavasta on` there. Off, it sends nothing; only its own commands are answered, and a question about using it is explained to Claude. On:
 
@@ -27,16 +27,15 @@ The web app stays the place for setup, the record, your team and review. You app
 
 ## Install in Claude Code (for a tester)
 
-You need Claude Code, git, and access to this repository.
+You need Claude Code and git. This repository is open to anyone, so no GitHub account is needed.
 
-1. Add the marketplace and install the plugin:
+1. In a terminal, run this one command. It adds the marketplace and installs the plugin, and run again it changes nothing:
 
    ```
-   /plugin marketplace add duggiradri/Vyavasta-Plugin
-   /plugin install vyavasta@vyavasta
+   claude plugin marketplace add duggiradri/Vyavasta-Plugin && claude plugin install vyavasta@vyavasta
    ```
 
-   For a copy on your disk, give its folder instead: `/plugin marketplace add /path/to/vyavasta-plugin`. From a terminal, the same two steps are `claude plugin marketplace add duggiradri/Vyavasta-Plugin` and `claude plugin install vyavasta@vyavasta`.
+   Inside Claude Code the same two steps are `/plugin marketplace add duggiradri/Vyavasta-Plugin` and `/plugin install vyavasta@vyavasta`. For a copy on your disk, give its folder instead: `/plugin marketplace add /path/to/vyavasta-plugin`.
 
 2. Start a new session (or run `/reload-plugins`). On a computer that isn’t connected yet, the first session opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
 
@@ -50,10 +49,22 @@ You need Claude Code, git, and access to this repository.
 
 ## Install in Codex (for a tester)
 
-You need Codex, git, and access to this repository. The same script runs under both tools; Codex gets its own hooks file (`plugins/vyavasta/hooks/codex.json`) and description (`plugins/vyavasta/.codex-plugin/plugin.json`).
+You need Codex and git. The same script runs under both tools; Codex gets its own hooks file (`plugins/vyavasta/hooks/codex.json`) and description (`plugins/vyavasta/.codex-plugin/plugin.json`).
 
-1. From a terminal, add the marketplace: `codex plugin marketplace add duggiradri/Vyavasta-Plugin`. If the terminal answers that `codex` is not found, Codex may be on your Mac only inside the ChatGPT app. Try the same command through the app’s own copy: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin marketplace add duggiradri/Vyavasta-Plugin`.
-2. Install the plugin named Vyavasta from that marketplace in Codex’s plugin list, and restart Codex.
+1. In a terminal, run this one command. It adds the marketplace and installs the plugin, and run again it changes nothing:
+
+   ```
+   codex plugin marketplace add duggiradri/Vyavasta-Plugin && codex plugin add vyavasta@vyavasta
+   ```
+
+   If the terminal answers that `codex` is not found, Codex may be on your Mac only inside the ChatGPT app. Try the same command through the app’s own copy:
+
+   ```
+   /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin marketplace add duggiradri/Vyavasta-Plugin && /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin add vyavasta@vyavasta
+   ```
+
+   If Codex answers that the marketplace is already added from a different source, you installed the plugin under this repository’s earlier address: run `codex plugin marketplace remove vyavasta`, then the command again.
+2. Restart Codex.
 3. Approve the plugin’s hooks once: Codex runs no hook until you have reviewed and trusted it. In the terminal, open `/hooks`; in the desktop app, choose **Review hooks**. Codex asks again after each update of the plugin.
 4. Start a new session. On a computer that isn’t connected yet, the first one opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
 5. In your project, send `vyavasta on` as a message of its own.
