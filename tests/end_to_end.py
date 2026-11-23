@@ -123,8 +123,10 @@ def main() -> int:
         if not condition:
             failures.append(what)
 
-    def plugin(*command: str, stdin: dict | None = None, cwd: Path | None = None) -> str:
-        done = subprocess.run(["sh", str(SCRIPT), *command], input=json.dumps(stdin) if stdin else "",
+    def plugin(*command: str, stdin: dict | None = None, cwd: Path | None = None, typed: str | None = None) -> str:
+        # (``typed``: what stands on the command's input as it is, as a message for a teammate does.)
+        done = subprocess.run(["sh", str(SCRIPT), *command],
+                              input=typed if typed is not None else json.dumps(stdin) if stdin else "",
                               capture_output=True, text=True, cwd=cwd or work, timeout=120, env={
                                   "PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTA_HOME": str(home),
                                   "VYAVASTA_SERVER": base, "CLAUDE_PROJECT_DIR": str(cwd or work),
@@ -184,9 +186,12 @@ def main() -> int:
         step("The first session after installing: sign-in starts by itself, and Sam approves the code in the web app")
         said = hook("session-start", "SessionStart", repo, source="startup")
         welcome = said.get("systemMessage", "")
-        expect(welcome.startswith("Vyavasta is installed. To connect this computer, enter the code ")
-               and f"({base}/" in welcome and "“vyavasta on”" in welcome and "“vyavasta help”" in welcome,
-               "the welcome gives the code and the Connect page’s address, then “vyavasta on” and “vyavasta help”")
+        expect("  V Y A V A S T A  ·  your team’s record, in Claude Code\n" in welcome
+               and "\nVyavasta is installed. To connect this computer, enter the code " in welcome
+               and f"({base}/" in welcome and "“vyavasta on”" in welcome and "“vyavasta help”" in welcome
+               and welcome.splitlines()[-1].startswith("Try: "),
+               "the welcome opens with the banner, gives the code and the Connect page’s address, then “vyavasta on” "
+               "and “vyavasta help”, and what to try")
         found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", welcome)
         code = found.group(1) if found else ""
         again = hook("session-start", "SessionStart", repo, source="startup").get("systemMessage", "")
@@ -329,6 +334,15 @@ def main() -> int:
             time.sleep(1)
         print("  Sam’s summaries: " + json.dumps(sam.ok("GET", "/summaries").get("mine", []), ensure_ascii=False)[:600])
         expect(category is not None, "Sam’s summaries hold a category for the repository the session works in")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta summary")
+        reason = said.get("reason", "")
+        print("  vyavasta summary said: " + reason.replace("\n", "\n  ")[:700])
+        expect(said.get("decision") == "block" and reason.startswith("Your summaries, as Vyavasta keeps them:")
+               and reason.rstrip().endswith("under “Summaries” in Vyavasta’s web app."),
+               "“vyavasta summary” is answered by the plugin with Sam’s own summaries")
+        expect("You · the repository " in reason and ("· shown to teammates ·" in reason
+                                                      or "· hidden from teammates ·" in reason),
+               "and each category says whether teammates see it")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta summaries off")
         expect(said.get("decision") == "block" and said.get("reason", "").startswith("Summaries are off"),
                "“vyavasta summaries off” is answered by the plugin")
@@ -384,6 +398,63 @@ def main() -> int:
         heard = {one["tool"]: one for one in tool.get("heard", [])}
         expect("Claude Code" in heard and heard["Claude Code"]["version"] == VERSION and bool(heard["Claude Code"]["at"]),
                "the web app lists Claude Code on this computer with this plugin’s version and when it was last heard from")
+
+        step("Telling a teammate as part of the work: Claude is told how, sends it, and each is told with their next answer")
+        said = hook("prompt", "UserPromptSubmit", repo,
+                    prompt="Push the changes. Let Ganesh know that the changes have been pushed.")
+        context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        # (Ganesh joined by invitation and gave no name: he is named as the rest of the app names him.)
+        expect("decision" not in said and "The developer’s message names ganesh with words for telling" in context
+               and f'sh "{SCRIPT}" tell "<the teammate’s name>" <<\'MESSAGE\'' in context,
+               "a message that asks for work and for a teammate to be told goes on to Claude, with the command that "
+               "sends a teammate a message")
+        # Claude does the work, then runs that command, the message on its input, taken as it is.
+        words = "Pushed drop-customer-plan: `customer_plan` is gone from the API response, at $0 cost to callers."
+        told = plugin("tell", "Ganesh", cwd=repo, typed=words + "\n")
+        print("  tell printed: " + told.strip().replace("\n", "\n  ")[:700])
+        expect(told.startswith("── To ") and "’s agent" not in told.splitlines()[0] and f"│ {words}" in told
+               and "Delivered. " in told and told.count("/?agent-chat=") == 1,
+               "what is told a teammate is delivered as it is written, under a header that names them, with where they see it")
+        expect("── From " not in told, "and no agent answers what asks nothing")
+        expect(ganesh.ok("GET", "/agent-chats")["unread"] >= 1, "it waits for Ganesh in the web app, unread")
+        asked = ganesh.ok("POST", "/conversations", {"text": "What is new today?", "client_request_id": "e2e-what-is-new"})
+        answer = {}
+        for _ in range(120):
+            answer = ganesh.ok("GET", f"/conversations/{asked['conversation_id']}")["messages"][-1]
+            if answer.get("role") == "assistant" and answer.get("status") != "pending":
+                break
+            time.sleep(0.25)
+        wrote = [block for block in answer.get("blocks", []) if block.get("type") == "teammate_messages"]
+        expect(len(wrote) == 1 and any(item["kind"] == "told" and item["text"] == words and
+                                       item["from"]["name"] == "Sam Rivera" for item in wrote[0]["items"]),
+               "and his next answer in the web app’s chat holds it, to stand at its top")
+        ganesh.ok("POST", f"/agent-chats/{sam_id}/messages", {"text": "Thanks. Tag it v2.1 when CI is green.",
+                                                               "intent": "tell", "client_request_id": "e2e-2"})
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Add a test for the serializer")
+        line = said.get("systemMessage", "")
+        context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        print("  the line said: " + line.replace("\n", "\n  ")[:900])
+        expect("🔔 New from your teammates, through Vyavasta:" in line and "· told you ──" in line
+               and "│ Thanks. Tag it v2.1 when CI is green." in line,
+               "what Ganesh told Sam comes with Sam’s next message, under its line")
+        expect(context.startswith("While the developer worked, their teammates sent them what is below through "
+                                  "Vyavasta. Show it to the developer once, at the very start of your reply")
+               and "│ Thanks. Tag it v2.1 when CI is green." in context,
+               "and Claude is given it first, to open its reply with")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="And one for the view")
+        expect("🔔" not in json.dumps(said, ensure_ascii=False), "told once: the message after it carries nothing")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta reply 1: Will do.")
+        expect(said.get("decision") == "block" and said.get("reason", "").startswith("── To "),
+               "“vyavasta reply 1” answers it, by the number it was listed under")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta tell Ganesh: CI is green, tagging v2.1 now")
+        reason = said.get("reason", "")
+        expect(said.get("decision") == "block" and reason.startswith("── To ") and "Delivered. " in reason
+               and "│ CI is green, tagging v2.1 now" in reason,
+               "“vyavasta tell <name>: …” is sent by the plugin itself, as it is written")
+
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta open settings")
+        expect(said.get("decision") == "block" and f"{base}/settings" in said.get("reason", ""),
+               "“vyavasta open settings” is answered by the plugin with the settings page of this server")
 
         step("Sam commits; Claude stops again")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Drop customer_plan"], check=True,

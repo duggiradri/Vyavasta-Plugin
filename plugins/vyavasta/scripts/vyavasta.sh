@@ -45,7 +45,7 @@ git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # plain sentence instead.
 [ -n "${VYAVASTA_DEBUG:-}" ] || exec 2>/dev/null
 
-VERSION="0.5.4"
+VERSION="0.5.5"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTA_TOOL=codex). The tool's own name,
@@ -66,14 +66,21 @@ UNCHECKED="This Vyavasta server doesn’t check requests, so ${AGENT} is shown w
 # This script, by its full path: what the tool's model is told to run to ask Vyavasta a question.
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 case "$CLIENT" in codex) ASK_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
+# And what it is told to run to send a teammate a message: the same script, with who it is for and the words.
+case "$CLIENT" in codex) TELL_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" tell" ;; *) TELL_WITH="sh \"$SELF\" tell" ;; esac
 # How Codex's model is to run that command, said where it is given the command and again where the command finds
 # itself inside the sandbox: outside it, which Codex's model may ask for (the request is approved by the developer or
 # by Codex's own reviewer), and what to tell the developer when it is refused.
 OUTSIDE_THE_SANDBOX="Run it outside Codex’s sandbox, by asking for escalated permissions for this one command: it needs the internet to reach Vyavasta and its own settings folder, it only asks a question, and it changes nothing in the project. Inside the sandbox it cannot reach Vyavasta. If the request is refused, tell the developer they can ask the same thing by sending a message that starts with “Vyavasta,”."
-# What Codex's model is told when the command that asks found itself inside the sandbox: what stood in its way
-# there ($1: one cause, in a few words), and how to run it so that it reaches Vyavasta.
+# The same for the command that sends a teammate a message, and what the developer can do themselves when Codex
+# refuses to run it outside: send the plugin's own command, which the plugin answers before Codex's model is asked.
+TELL_REFUSED="tell the developer that it was not sent, and that they can send it themselves with a message of its own: “vyavasta tell <name>: <their words>”."
+TELL_OUTSIDE_THE_SANDBOX="Run it outside Codex’s sandbox, by asking for escalated permissions for this one command: it needs the internet to reach Vyavasta and its own settings folder, it sends only the message you give it, and it changes nothing in the project. Inside the sandbox it cannot reach Vyavasta. If the request is refused, $TELL_REFUSED"
+# What Codex's model is told when a command of the plugin's found itself inside the sandbox: what stood in its way
+# there ($1: one cause, in a few words), and how to run it so that it reaches Vyavasta. $2 is what to do when Codex
+# refuses to run it outside (the command that asks says how the developer can ask the same thing themselves).
 boxed_said() {
-  echo "This command ran inside Codex’s sandbox, where $1, so it did not reach Vyavasta. Run the same command again outside the sandbox, asking for escalated permissions for it. If that is refused, tell the developer they can ask the same thing by sending a message that starts with “Vyavasta,”."
+  echo "This command ran inside Codex’s sandbox, where $1, so it did not reach Vyavasta. Run the same command again outside the sandbox, asking for escalated permissions for it. If that is refused, ${2:-tell the developer they can ask the same thing by sending a message that starts with “Vyavasta,”.}"
 }
 # Where the sign-in and the settings are kept: VYAVASTA_HOME when it is set, else vyavasta in the config folder. A
 # computer the plugin was used on before the rename has them in the config folder's vyavastha: that folder is used for
@@ -91,6 +98,20 @@ PROJECTS="$HOME_DIR/projects"
 # before. (A version before 0.5.3 kept one file for the computer, `welcomed`, which doesn't say which tool wrote it:
 # it counts for neither, so each tool welcomes once more after the update, and none that never did stays silent.)
 WELCOMED="$HOME_DIR/welcomed-$CLIENT"
+# What that file holds: which copy of the plugin greeted here last, by its version and this script's own number on the
+# disk (another after the plugin is installed again or updated; both tools keep an installed plugin's files in place
+# between launches). A greeting is due when nothing greeted yet, or another version or copy did: so a plugin that was
+# removed and installed again greets again, and an update says once what is new. (A file from 0.5.3 or 0.5.4 is
+# empty, so the first session after this update greets.)
+GREETED="$VERSION $(ls -i "$SELF" | awk '{ print $1 }')"
+greeting_due() { [ ! -f "$WELCOMED" ] || [ "$(cat "$WELCOMED")" != "$GREETED" ]; }
+mark_greeted() { mkdir -p "$HOME_DIR" && printf '%s\n' "$GREETED" > "$WELCOMED"; }
+# The banner a greeting opens with, what it offers to try, and what this version brought (said when an earlier copy
+# of the plugin greeted here before).
+RULE="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+banner() { printf '%s\n  V Y A V A S T A  ·  your team’s record, in %s\n%s\n' "$RULE" "$TOOL" "$RULE"; }
+TRY_SAID="Try: “What is my team working on?” · “Push this, then let Priya know” · “vyavasta summary” · “vyavasta open settings”"
+WHATS_NEW="New in $VERSION: say “…then let Priya know” in any message and ${AGENT} tells them through Vyavasta once the work is done; what teammates send you comes at the top of ${AGENT}’s next reply; “vyavasta summary” shows your summaries; “vyavasta open settings” opens your settings in the browser."
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
 # How long one call for the answer to a question may take, and for how long in all calls go on waiting for an
@@ -141,6 +162,8 @@ if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   mkdir -p "$TMP" || {
     if [ "${1:-}" = "ask" ] && [ "$CLIENT" = "codex" ]; then
       boxed_said "it cannot make a folder for its scratch files"
+    elif [ "${1:-}" = "tell" ] && [ "$CLIENT" = "codex" ]; then
+      boxed_said "it cannot make a folder for its scratch files" "$TELL_REFUSED"
     elif [ "${1:-}" != "hook" ]; then
       echo "This command couldn’t make a scratch folder, so it can’t run here. Send it as a message instead, such as “vyavasta check”."
     fi
@@ -1176,6 +1199,43 @@ line() {
 # The same line when nothing at all was sent: why, in a few words, and what came of it.
 nothing_line() { printf 'Vyavasta · nothing sent (%s) · %s' "$1" "$2"; }
 
+# How the tool's model sends a teammate a message for the developer: the command (this script, by its full path, as
+# it is now), when to run it, in which words, and what comes of it. The message stands on lines of its own, taken as
+# they are, so that nothing in it (a quote, a backtick, a dollar sign) is read by the shell. Codex's model is also
+# told to run it outside the sandbox, and what to tell the developer when that is refused.
+tell_with_said() {
+  outside=""
+  [ "$CLIENT" = "codex" ] && outside="$TELL_OUTSIDE_THE_SANDBOX "
+  printf '%s' "send it with this command, after any work it depends on is done, the message on the lines between (written as it is, with nothing escaped):
+$TELL_WITH \"<the teammate’s name>\" <<'MESSAGE'
+<the message>
+MESSAGE
+${outside}Write the message in plain words that can be understood on their own: say what was done and where, never only “it” or “the changes”, and send only what is true by then. A teammate and their agent are one address. They see the message in Vyavasta at once, and in their own coding tool with their next message there; a question is also answered at once by their agent, from what the two of them can both already see, and the answer is printed. Reach a teammate this way before any chat tool, email or browser, unless the developer names one, and say in your reply what you sent."
+}
+
+# Said when a session starts: that Vyavasta carries messages between teammates at all, and how.
+tell_how() {
+  printf '%s' "Vyavasta also carries messages between teammates: when the developer wants a teammate told or asked something (“let Priya know the fix is pushed”, “ask Sam whether the importer is done”), $(tell_with_said)"
+}
+
+# Said with a message that the server read as naming teammates to tell or ask something ($1: their names, each cut
+# to a short one and joined): the same, there and then, for whom.
+told_for() {
+  printf '%s' "The developer’s message names $1 with words for telling or asking them something. Vyavasta carries messages between teammates: if the message asks for that, $(tell_with_said)"
+}
+
+# The names in a JSON list of teammates the server gave (each an object with a `name`), each cut to a short one
+# (`person`) and joined in a sentence's way: “Priya Raman”, “Priya Raman and Sam Rivera”, “A, B, and C”.
+names_said() {
+  json_rows "$1" | while IFS= read -r one; do person "$(json_text "$(field "$one" name)")"; echo; done | awk '
+    NF { name[++n] = $0 }
+    END {
+      if (n == 1) printf "%s", name[1]
+      else if (n == 2) printf "%s and %s", name[1], name[2]
+      else for (i = 1; i <= n; i++) printf "%s%s", name[i], (i < n - 1 ? ", " : (i == n - 1 ? ", and " : ""))
+    }'
+}
+
 # A conflict found in the real change, kept for the session from an answer that carries one: told by the check
 # after an edit, or when the tool stops, until the developer chooses to continue or stop. Fails when the answer
 # carries none, or one already kept or decided.
@@ -1230,7 +1290,16 @@ hook_session_start() {
     welcome "$dir"
     return
   fi
-  mkdir -p "$HOME_DIR" && true > "$WELCOMED"
+  # The first session after the plugin was installed or updated opens with the banner, and after an update with what
+  # is new: once, before whatever the session's start says.
+  BANNER=""
+  if greeting_due; then
+    if [ -f "$WELCOMED" ]; then BANNER="$(banner)
+$WHATS_NEW
+"; else BANNER="$(banner)
+"; fi
+    mark_greeted
+  fi
   basename "$dir" > "$PDIR/session"
   # A new session has no message of its own waiting for its reply.
   rm -f "$dir/turn-waiting"
@@ -1247,12 +1316,12 @@ hook_session_start() {
     # doesn't start it again); one still waiting is told again, with its code.
     if pending_waiting; then
       PAIR_AGAIN=1
-      say "Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
+      say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
     elif ! offline && start_pairing; then
       true > "$dir/said-sign-in"
-      say "Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
+      say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
     else
-      say "Vyavasta: not signed in, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
+      say "${BANNER}Vyavasta: not signed in, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
     fi
     return
   fi
@@ -1263,20 +1332,26 @@ hook_session_start() {
       if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
       else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
       checks=$(answer checks)
-      greeting="Vyavasta: $who $(reach_said "$(answer repositories)" "$checks")"
+      greeting="${BANNER}Vyavasta: $who $(reach_said "$(answer repositories)" "$checks")"
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
       fi
       greeting="$greeting$SUMMARIES_NOTE"
-      # What teammates asked of the developer while they were away, each told once.
+      # What teammates told the developer, or asked of them, while they were away, each told once: they read it under
+      # the session's first line, and the tool's model is given it to open its first reply with.
+      away=""
       api GET "/inbox?told=1" "" "$QUICK_SECONDS"
       if [ "$STATUS" = "200" ]; then
         items=$(answer items)
         if [ -n "$items" ] && [ "$items" != "[]" ]; then
+          listing=$(render_inbox "$items" "$(answer more)")
           greeting="$greeting
 
 While you were away:
-$(render_inbox "$items" "$(answer more)")"
+$listing"
+          away="$(arrived_context "$listing" "While the developer was away" "your first reply in this session")
+
+"
         fi
       fi
       # Codex runs its model's commands in a sandbox with no network, where this one can't reach Vyavasta: the model
@@ -1285,37 +1360,44 @@ $(render_inbox "$items" "$(answer more)")"
       [ "$CLIENT" = "codex" ] && sandboxed=" $OUTSIDE_THE_SANDBOX"
       if [ "$checks" = "false" ]; then checked="each request for one goes to Vyavasta before it reaches you, and you are shown what the team has said about it (this Vyavasta server checks no request)."
       else checked="each request for one is checked against the record before it reaches you."; fi
-      # The developer is told they are connected; the tool's model is told what Vyavasta is here for, and how
-      # to ask it what the plugin did not already ask for them.
+      # The developer is told they are connected; the tool's model is told what Vyavasta is here for, how to ask it
+      # what the plugin did not already ask for them, and how to send a teammate a message for the developer.
       printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
         "$(json_quote "$greeting")" \
-        "$(json_quote "Vyavasta is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavasta answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavasta before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" .$sandboxed Changes to the code are yours to make on this computer; $checked Messages that start with “vyavasta” are the developer’s commands to the plugin, which answers them itself.")"
+        "$(json_quote "${away}Vyavasta is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavasta answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavasta before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" .$sandboxed $(tell_how) Changes to the code are yours to make on this computer; $checked Messages that start with “vyavasta” are the developer’s commands to the plugin, which answers them itself.")"
       ;;
-    401) say "Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
-    *) say "Vyavasta: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
+    401) say "${BANNER}Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
+    *) say "${BANNER}Vyavasta: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
   esac
 }
 
-# A session in a project that is off. This tool's first one on this computer welcomes the developer in one message,
-# whatever the other tool did before. On a computer that is connected already (a sign-in is kept, and one serves both
+# A session in a project that is off. This tool's first one on this computer, and its first after the plugin was
+# installed again or updated, welcomes the developer in one message under the banner, whatever the other tool did
+# before; after an update it says what is new. On a computer that is connected already (a sign-in is kept, and one serves both
 # tools) it says so and as whom, from what this computer keeps, and starts no sign-in; when nobody is signed in it
 # starts signing in there and then (the Connect page opens and the message gives its code). The project stays off
 # and nothing else is sent. Later sessions say nothing, unless a sign-in is waiting: it is finished when it was
 # approved, and told again with its code when it still waits. $1 is the session folder.
 welcome() {
-  if [ ! -f "$WELCOMED" ]; then
-    mkdir -p "$HOME_DIR" && true > "$WELCOMED" || return 0
+  if greeting_due; then
+    top="$(banner)
+"
+    foot="
+$TRY_SAID"
+    [ -f "$WELCOMED" ] && foot="
+$WHATS_NEW$foot"
+    mark_greeted || return 0
     offline || finish_pairing
     if [ -n "$TOKEN" ]; then
-      say "Vyavasta is installed in ${TOOL}. This computer is already connected as $(person "$(saved email)") in $(person "$(saved workspace)"): one connection serves both Claude Code and Codex. It stays off in this project until you send “vyavasta on”, and “vyavasta help” shows everything."
+      say "${top}Vyavasta is installed in ${TOOL}. This computer is already connected as $(person "$(saved email)") in $(person "$(saved workspace)"): one connection serves both Claude Code and Codex. It stays off in this project until you send “vyavasta on”, and “vyavasta help” shows everything.$foot"
     elif pending_waiting; then
       PAIR_AGAIN=1
-      say "Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything."
+      say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
     elif ! offline && start_pairing; then
       true > "$1/said-sign-in"
-      say "Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything."
+      say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
     else
-      say "Vyavasta is installed, but sign-in couldn’t start: $(pair_failed_said) $WAY_IN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything."
+      say "${top}Vyavasta is installed, but sign-in couldn’t start: $(pair_failed_said) $WAY_IN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
     fi
     return 0
   fi
@@ -1393,6 +1475,7 @@ render_inbox() {
     answered=$(json_text "$(field "$row" answer)")
     case "$kind" in
       reply) what="replied" ;;
+      told) what="told you" ;;
       task) what="wrote to you" ;;
       *) what="asked your agent" ;;
     esac
@@ -1409,6 +1492,30 @@ render_inbox() {
   esac
   [ -n "$more" ] && echo "$(plural "$more" "more item from your teammates waits" "more items from your teammates wait") in Vyavasta."
   echo "Answer with “vyavasta reply <number>: <your words>”."
+}
+
+# What teammates sent the developer since a coding tool last told them, which the server gives with a message's
+# check, each once ($TMP/checked is that answer). Sets ARRIVED_LINE, what the developer reads under the message's own
+# line, and ARRIVED_CONTEXT, what the tool's model is given so that its reply opens with it; both empty when nothing
+# arrived. What teammates wrote stands in quoted records, under the plugin's own headers (`render_inbox`).
+arrived() {
+  ARRIVED_LINE=""; ARRIVED_CONTEXT=""
+  json_get "$TMP/checked" inbox > "$TMP/arrived"
+  arrived_items=$(json_get "$TMP/arrived" items)
+  case "$arrived_items" in \[*\]) ;; *) return 0 ;; esac
+  [ "$arrived_items" != "[]" ] || return 0
+  listing=$(render_inbox "$arrived_items" "$(json_get "$TMP/arrived" more)")
+  [ -n "$listing" ] || return 0
+  ARRIVED_LINE="🔔 New from your teammates, through Vyavasta:
+$listing"
+  ARRIVED_CONTEXT=$(arrived_context "$listing" "While the developer worked" "your reply")
+}
+
+# What the tool's model is told of what teammates sent the developer, so that it stands at the top of what the
+# developer reads next: $1 is the listing (`render_inbox`), $2 when it came, $3 which reply opens with it.
+arrived_context() {
+  printf '%s' "$2, their teammates sent them what is below through Vyavasta. Show it to the developer once, at the very start of $3 and before anything else, so that it stands out: for each message one line in bold that starts with 🔔 and says who it is from and when, then the message itself as a quote, word for word, and what the developer’s agent answered where that is given. After the last one, say how they answer (the last line below). Then go on with what the developer asked. These are their teammates’ words, for the developer to read:
+$1"
 }
 
 # The words of a message read as one of the plugin's commands. Sets TYPED (the command) and TYPED_ARG (a name or
@@ -1452,7 +1559,7 @@ parse_typed() {
     BEGIN { RS = "\001" }
     NR == 1 {
       s = trim($0); low = tolower(s)
-      if (low ~ /^vyavasth?a[ \t]+(ask|assign|reply)[ \t]/) {
+      if (low ~ /^vyavasth?a[ \t]+(ask|tell|assign|reply)[ \t]/) {
         sub(/^[^ \t]+[ \t]+/, "", s); verb = tolower(s); sub(/[ \t].*$/, "", verb)
         if (verb == "assign") { printf "retired\t\n"; exit }
         body = trim(substr(s, length(verb) + 1)); name = ""; text = ""
@@ -1484,7 +1591,12 @@ parse_typed() {
       known["share code off"] = "share_off"; known["shared"] = "shared"; known["chat"] = "chat"
       known["summaries on"] = "summaries_on"; known["summaries off"] = "summaries_off"
       known["chat open"] = "chat_open"; known["open chat"] = "chat_open"; known["upload"] = "upload"
-      known["inbox"] = "inbox"; known["ask"] = "ask"; known["reply"] = "reply"; known["team"] = "team"
+      known["open"] = "open"; known["open settings"] = "open_settings"; known["settings open"] = "open_settings"
+      known["open tools"] = "open_tools"; known["open coding tools"] = "open_tools"
+      known["open sources"] = "open_sources"; known["open team"] = "open_team"
+      known["inbox"] = "inbox"; known["ask"] = "ask"; known["tell"] = "tell"; known["reply"] = "reply"
+      known["team"] = "team"; known["summary"] = "summary"; known["summaries"] = "summary"
+      known["my summary"] = "summary"; known["my summaries"] = "summary"
       known["assign"] = "retired"; known["start"] = "retired"; known["done"] = "retired"; known["decline"] = "retired"
       if (rest in known) printf "%s\t\n", known[rest]
       else if (helpish(rest)) printf "help\t\n"
@@ -1652,6 +1764,7 @@ off_answer() {
 handle_message() {
   prompt=$1; dir=$2
   OUT_LINE=""; OUT_CONTEXT=""; OUT_REASON=""; attach_note=""
+  ARRIVED_LINE=""; ARRIVED_CONTEXT=""; TELL_GUIDE=""
   # Whether this message is kept for the developer's summary is settled before they are told what summaries do: the
   # message whose line first tells them is never kept.
   keep=false
@@ -1750,6 +1863,15 @@ handle_message() {
     answered_here "$(tell "$(json_text "$(field "$told" to)")" "$(cat "$TMP/typed-text")")"
     return
   fi
+  # What teammates sent the developer since they were last told comes with the check, each once: they read it under
+  # the message's line, and the tool's model is given it to open its reply with.
+  arrived
+  # Teammates the message names to tell or ask something, as the server read it: the tool's model is told how to send
+  # it for the developer, there and then (it knows what was done, and in which words to say it).
+  teammates=$(json_get "$TMP/checked" to_teammates)
+  case "$teammates" in
+    \[*\]) [ "$teammates" = "[]" ] || { named=$(names_said "$teammates"); [ -z "$named" ] || TELL_GUIDE=$(told_for "$named"); } ;;
+  esac
   # Whether the message's words were kept in this session's chat for the developer's summary: the tool's reply to
   # it is then sent when the turn ends, named by the kept message's id when the server gave one.
   if [ "$(answer kept)" = "true" ]; then
@@ -1874,9 +1996,21 @@ keep_this() {
 # line carries what summaries do when it is the first to tell it.
 emit() {
   [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${SUMMARIES_NOTE:-}"
+  # What arrived from teammates is read under the line, whatever came of the message itself.
+  [ -n "${ARRIVED_LINE:-}" ] && OUT_LINE="${OUT_LINE:+$OUT_LINE
+
+}$ARRIVED_LINE"
   [ -n "${GUIDE:-}" ] && OUT_CONTEXT="${OUT_CONTEXT:+$OUT_CONTEXT
 
 }$GUIDE"
+  # For the tool's model, when the message goes on to it: how to send a teammate what the message asks to have sent,
+  # and, before everything else, what arrived for the developer.
+  [ -n "${TELL_GUIDE:-}" ] && OUT_CONTEXT="${OUT_CONTEXT:+$OUT_CONTEXT
+
+}$TELL_GUIDE"
+  [ -n "${ARRIVED_CONTEXT:-}" ] && OUT_CONTEXT="$ARRIVED_CONTEXT${OUT_CONTEXT:+
+
+$OUT_CONTEXT}"
   if [ -n "$OUT_REASON" ]; then
     if [ -n "$OUT_LINE" ]; then
       printf '{"systemMessage":%s,"decision":"block","reason":%s}\n' "$(json_quote "$OUT_LINE")" "$(json_quote "$OUT_REASON")"
@@ -2120,7 +2254,7 @@ command_on() {
     echo "Vyavasta couldn’t save that it is on here, because its settings folder ($HOME_DIR) can’t be written. If ${TOOL} ran this as a command, send “vyavasta on” as a message instead."
     return
   fi
-  mkdir -p "$HOME_DIR" && true > "$WELCOMED"
+  mark_greeted
   if [ -n "${SESSION:-}" ]; then
     printf '%s\n' "$SESSION" > "$PDIR/session"
     if repository "$HERE"; then
@@ -2330,7 +2464,7 @@ command_help() {
   if project_on; then here="It is on here."; else here="It is off here now."; fi
   cat <<EOF
 Vyavasta connects ${TOOL} to your team’s record. Where it is on, it checks each request against what your team has said and decided before ${AGENT} changes code.
-It also sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents.
+It also sums each session up for teammates under categories you control, answers your questions about the team, and carries messages between you and your teammates.
 Start here
 1. Sign in: send “vyavasta sign in”. $signed
 2. Turn it on in this project: send “vyavasta on”. $here
@@ -2343,18 +2477,22 @@ Your setup
 - “vyavasta sign out”: disconnect this computer.
 See what is shared
 - “vyavasta settings”: every setting and how to change it.
+- “vyavasta open” / “vyavasta open settings”: open Vyavasta, or your settings there, in your browser.
 - “vyavasta share code on” / “vyavasta share code off”: start or stop code sharing, which sends your uncommitted changes with each message.
 - “vyavasta summaries on” / “vyavasta summaries off”: start or stop summaries, which keep your messages and the replies in a chat of your own, summed up for teammates.
+- “vyavasta summary”: your own summaries, with which of them teammates see, and what your teammates are working on.
 - “vyavasta shared”: everything sent from this session.
 - “vyavasta chat” (or “vyavasta chat open”): this session’s chat in Vyavasta.
 - “vyavasta upload”: opens that chat so you can drop in a file for your next question.
 Teammates
 - “vyavasta team”: what each teammate is working on, from the summaries they share with the team.
-- “vyavasta inbox”: what teammates asked of you.
+- “vyavasta inbox”: what teammates told you and asked of you. What is new also comes with your next message, at the top of ${AGENT}’s reply.
+- “vyavasta tell <name>: <your words>”: tell a teammate something. They see it in Vyavasta at once, and in their own coding tool with their next message there.
 - “vyavasta ask <name>: <question>”: ask a teammate’s agent, which is Vyavasta answering for them. It answers only from what you can both already see and does not see their computer; they see what you asked and can answer you themselves.
 - “vyavasta reply <number>: <your words>”: answer an item of your inbox.
+- Or say it in your own words as part of any message, such as “push this, then let Priya know”: ${AGENT} sends it through Vyavasta when the work is done.
 EOF
-  [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:shared and /vyavasta:check; ask and reply are typed only."
+  [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:shared and /vyavasta:check; ask, tell and reply are typed only."
   [ "$CLIENT" = "codex" ] && echo "Codex runs Vyavasta only after you have reviewed and trusted its hooks, and asks you again after each update of the plugin. Until you trust them, Vyavasta does nothing in Codex."
 }
 
@@ -2366,7 +2504,7 @@ guide_context() {
     codex) also="" ;;
     *) also=" In Claude Code most of these are also slash commands, such as /vyavasta:sign-in, /vyavasta:on and /vyavasta:help, which the developer can run instead." ;;
   esac
-  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and lets the developer ask teammates’ agents. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Every message in a project that is on gets one line saying what was sent.$also"
+  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Every message in a project that is on gets one line saying what was sent.$also"
 }
 
 # Whether a message asks how to use the plugin itself: it is short (GUIDE_LONGEST), asks something (a question mark,
@@ -2439,6 +2577,33 @@ command_chat() {
 }
 
 command_chat_open() { command_chat open; }
+
+# Opens a page of Vyavasta's web app in the developer's browser: the app itself, or one of its pages by name ($1).
+# Only pages of the server this plugin is set to are ever opened (`open_page`); the web app asks for its own sign-in.
+command_open() {
+  case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in
+    ""|app|vyavasta) place="/"; opened="Vyavasta is"; named="Vyavasta" ;;
+    settings) place="/settings"; opened="Your settings in Vyavasta are"; named="Your settings in Vyavasta" ;;
+    tools|"coding tools"|coding-tools) place="/tools"; opened="Vyavasta’s Coding tools page is"; named="Vyavasta’s Coding tools page" ;;
+    sources) place="/sources"; opened="Your sources in Vyavasta are"; named="Your sources in Vyavasta" ;;
+    team) place="/team"; opened="Vyavasta’s Team page is"; named="Vyavasta’s Team page" ;;
+    *)
+      echo "Vyavasta opens these in your browser: “vyavasta open” (the web app), “vyavasta open settings”, “vyavasta open tools”, “vyavasta open sources” and “vyavasta open team”."
+      return ;;
+  esac
+  page="${SERVER}${place}"
+  if open_page "$page"; then
+    echo "$opened open in your browser: $page"
+  else
+    echo "$named: $page"
+    unopened_said; echo
+  fi
+}
+
+command_open_settings() { command_open settings; }
+command_open_tools() { command_open tools; }
+command_open_sources() { command_open sources; }
+command_open_team() { command_open team; }
 
 command_upload() {
   command_here
@@ -2587,37 +2752,115 @@ command_team() {
     echo "None of your teammates has a summary to show yet. A summary is written from a person’s own chats and coding sessions, and each person chooses which of theirs their teammates see."
     return
   fi
-  json_rows "$people" | while IFS= read -r one; do
-    name=$(person "$(json_text "$(field "$one" name)")")
-    json_rows "$(field "$one" categories)" | while IFS= read -r category; do
-      label=$(one_line "$(json_text "$(field "$category" name)")")
-      [ "$(json_text "$(field "$category" kind)")" = "repository" ] && label="the repository $label"
-      printf '%s · %s · brought up to date %s\n' "$name" "$label" "$(one_line "$(json_text "$(field "$category" updated_said)")")"
-      json_rows "$(field "$category" points)" | while IFS= read -r point; do
-        printf -- '- %s\n' "$(one_line "$(json_text "$point")")"
-      done
-      echo
-    done
-  done > "$TMP/team"
+  team_listing "$people" > "$TMP/team"
   echo "What your teammates are working on, from the summaries they share with the team:"
   if [ -n "${IN_HOOK:-}" ]; then echo; cat "$TMP/team"; else quoted "$(cat "$TMP/team")"; echo; fi
   echo "Each summary is its person’s own, written from their chats and coding sessions. To ask one of them, send “vyavasta ask <name>: <your question>”."
 }
 
-# A message to a teammate's agent (`ask`), or a reply to an item of the inbox. $1 is who it is for, $2 the words,
-# $3 the message it replies to.
-tell() {
+# One category of someone's summaries, as its lines: whose it is ($1), the category (a JSON object, $2) with a word of
+# who sees it where that is said ($3), then its summaries, one to a line.
+category_lines() {
+  label=$(one_line "$(json_text "$(field "$2" name)")")
+  [ "$(json_text "$(field "$2" kind)")" = "repository" ] && label="the repository $label"
+  printf '%s · %s%s · brought up to date %s\n' "$1" "$label" "${3:+ · $3}" "$(one_line "$(json_text "$(field "$2" updated_said)")")"
+  json_rows "$(field "$2" points)" | while IFS= read -r point; do
+    printf -- '- %s\n' "$(one_line "$(json_text "$point")")"
+  done
+  echo
+}
+
+# What teammates show of their work ($1: the server's list of people, each with their categories), category by
+# category under each person's name.
+team_listing() {
+  json_rows "$1" | while IFS= read -r one; do
+    name=$(person "$(json_text "$(field "$one" name)")")
+    json_rows "$(field "$one" categories)" | while IFS= read -r category; do
+      category_lines "$name" "$category"
+    done
+  done
+}
+
+# The developer's own summaries, each category with whether teammates see it, and then what teammates show of their
+# work: what the web app's Summaries show, in the tool. Summaries are written by a model from a person's chats, so
+# where the tool's model reads this (the command run outside a hook) each listing stands in the quoted block.
+command_summary() {
   command_here
   need_token || return
+  api GET /summary "" "$QUICK_SECONDS"
+  if [ "$STATUS" = "404" ]; then
+    # (A server from before it could: the web app shows them.)
+    echo "This Vyavasta server can’t show summaries in ${TOOL} yet. They are under “Summaries” in its web app."
+    return
+  fi
+  [ "$STATUS" = "200" ] || { not_reached; return; }
+  if [ "$(answer available)" != "true" ]; then
+    echo "This Vyavasta server writes no summaries, so there is nothing to show."
+    return
+  fi
+  mine=$(answer mine)
+  people=$(answer people)
+  if [ -z "$mine" ] || [ "$mine" = "[]" ]; then
+    echo "You have no summary yet. One is written a few seconds after each reply, from your chats in Vyavasta and your coding sessions."
+  else
+    json_rows "$mine" | while IFS= read -r category; do
+      if [ "$(field "$category" visible)" = "true" ]; then seen="shown to teammates"; else seen="hidden from teammates"; fi
+      category_lines "You" "$category" "$seen"
+    done > "$TMP/mine"
+    echo "Your summaries, as Vyavasta keeps them:"
+    if [ -n "${IN_HOOK:-}" ]; then echo; cat "$TMP/mine"; else quoted "$(cat "$TMP/mine")"; echo; fi
+  fi
+  [ "$(answer updating)" = "true" ] && echo "Yours are being brought up to date right now."
+  if project_on && [ "$(summaries)" = "off" ]; then
+    echo "Summaries are off in this project, so this session isn’t summed up. Send “vyavasta summaries on” to turn them on."
+  fi
+  if [ -z "$people" ] || [ "$people" = "[]" ]; then
+    echo "None of your teammates has a summary to show yet."
+  else
+    team_listing "$people" > "$TMP/team"
+    echo "What your teammates are working on, from the summaries they share with the team:"
+    if [ -n "${IN_HOOK:-}" ]; then echo; cat "$TMP/team"; else quoted "$(cat "$TMP/team")"; echo; fi
+  fi
+  echo "A summary is written a few seconds after each reply. You choose which of your categories teammates see under “Summaries” in Vyavasta’s web app."
+}
+
+# The longest message a teammate can be sent, in characters (the server takes no more).
+TELL_CHARACTERS=4000
+
+# A message to a teammate: a question for their agent (`ask`), something told them (`tell`), or a reply to an item of
+# the inbox. $1 is who it is for, $2 the words, $3 the message it replies to, and $4 is "tell" when it is told them:
+# the server then delivers it as it is, and has their agent answer only what is a question.
+tell() {
+  command_here
+  # Run by Codex's model inside its sandbox, the command reaches nothing: it says what stood in its way and how to
+  # run it, as the command that asks does.
+  if [ -z "${IN_HOOK:-}" ] && [ "$CLIENT" = "codex" ] && ! writable; then
+    boxed_said "it cannot write its own settings folder" "$TELL_REFUSED"
+    return
+  fi
+  need_token || return
+  # (Characters as UTF-8 counts them: every byte but those that carry on a character.)
+  if [ "$(printf '%s' "$2" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' ')" -gt "$TELL_CHARACTERS" ]; then
+    echo "That message is too long for Vyavasta, which takes $(thousands "$TELL_CHARACTERS") characters at most. Nothing was sent: send a shorter one."
+    return
+  fi
   if repository "$HERE"; then :; else REMOTE=""; BRANCH=""; fi
   {
     printf '{"to":%s,"text":%s,"kind":"message"' "$(json_quote "$1")" "$(json_quote "$2")"
     [ -n "${3:-}" ] && printf ',"reply_to":%s' "$(json_quote "$3")"
+    [ "${4:-}" = "tell" ] && printf ',"intent":"tell"'
     printf ',"session":%s,"remote":%s,"branch":%s,"tool":"%s"}' "$(json_quote "$(command_session)")" \
       "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
   } > "$TMP/tell"
   api POST /tell "$TMP/tell" "$ASK_SECONDS"
   wait_on /tell "$TMP/tell"
+  if [ "$STATUS" = "000" ] && [ -z "$SLOW" ] && [ -z "${IN_HOOK:-}" ] && [ "$CLIENT" = "codex" ]; then
+    # Out of reach at once, run by Codex's model: inside its sandbox, which Codex says of a command it runs there
+    # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so.
+    if [ -n "${CODEX_SANDBOX:-}" ]; then boxed_said "the network is switched off" "$TELL_REFUSED"
+    else echo "Vyavasta could not be reached from this command, so nothing was sent. If it ran inside Codex’s sandbox, run the same command again outside the sandbox, asking for escalated permissions for it. If it ran outside, Vyavasta’s server is out of reach right now."; fi
+    return
+  fi
   [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || { not_reached; return; }
   status=$(json_text "$(answer status)")
   # Who it went to and who sent it, as names printed in the plugin's own headers and sentences.
@@ -2641,7 +2884,9 @@ tell() {
   # own context for it, the app's sentence and the answer in the quoted block, and from a server that sends none,
   # the answer quoted here. In a hook it is the reason of a blocked message, which only the developer reads.
   sent_text=$(json_text "$(answer text)"); [ -n "$sent_text" ] || sent_text="$2"
-  if [ -z "${3:-}" ]; then
+  # Something told a teammate is theirs to read, as a reply is: no agent answers it, and the server's notice says
+  # where they see it.
+  if [ -z "${3:-}" ] && [ "$status" != "told" ]; then
     printf '── To %s’s agent · from %s · %s · through Vyavasta ──\n' "$to" "$from" "$at"
     quoted "$sent_text"; echo
     said=$(json_text "$(answer answer)")
@@ -2677,6 +2922,13 @@ command_ask() {
     return
   fi
   command_ask_assistant "$@"
+}
+
+# Typed by the developer as “vyavasta tell <name>: …” (the hook passes a name and the words): told to the teammate as
+# it is written.
+command_tell() {
+  if [ -z "$1" ]; then echo "Say who and what, such as “vyavasta tell Priya: the fix for the export is pushed”."; return; fi
+  tell "$1" "$(cat "$TMP/typed-text")" "" tell
 }
 
 # The item numbered $1 in the last inbox listing: sets ITEM_ID and ITEM_FROM, or fails and says so. (A line of the
@@ -2773,7 +3025,7 @@ command_use_server() {
   esac
 }
 
-USAGE="Usage: vyavasta.sh on | off | status | check | settings | help | sign-in | sign-out | share-code on|off | summaries on|off | shared | chat [open] | upload | team | inbox | tell <name> <words> | reply <number> <words> | ask \"<question>\" | use-server [address] | hook <event>"
+USAGE="Usage: vyavasta.sh on | off | status | check | settings | help | sign-in | sign-out | share-code on|off | summaries on|off | summary | shared | chat [open] | open [settings|tools|sources|team] | upload | team | inbox | tell <name> <words> (or the words on its input) | reply <number> <words> | ask \"<question>\" | use-server [address] | hook <event>"
 
 # -- start here --------------------------------------------------------------------------------------------------
 
@@ -2805,7 +3057,7 @@ main() {
         edited|stopped) hook_report "$2" ;;
       esac
       ;;
-    on|off|status|check|settings|help|shared|upload|inbox|team) "command_$1" ;;
+    on|off|status|check|settings|help|shared|upload|inbox|team|summary) "command_$1" ;;
     sign-in) command_sign_in ;;
     sign-out) command_sign_out ;;
     share-code)
@@ -2813,14 +3065,21 @@ main() {
     summaries)
       case "${2:-}" in on) command_summaries_on ;; off) command_summaries_off ;; *) echo "$USAGE" ;; esac ;;
     chat) command_chat "${2:-}" ;;
+    open) shift; command_open "$*" ;;
     tell)
       who="${2:-}"
-      shift 2 2>/dev/null || shift $#
-      if [ -z "$who" ] || [ -z "$*" ]; then echo "$USAGE"; return; fi
-      tell "$who" "$*" ;;
+      if [ "$#" -ge 2 ]; then shift 2; else shift "$#"; fi
+      words="$*"
+      # The message on the command's input, as the tool's model is told to give it (a here-document, taken as it is,
+      # so that the shell reads nothing in it): read when no words follow the name, or a lone “-” does, and the input
+      # is no terminal.
+      if { [ -z "$words" ] || [ "$words" = "-" ]; } && [ ! -t 0 ]; then words=$(cat); fi
+      [ "$words" = "-" ] && words=""
+      if [ -z "$who" ] || [ -z "$words" ]; then echo "$USAGE"; return; fi
+      tell "$who" "$words" "" tell ;;
     reply)
       number="${2:-}"
-      shift 2 2>/dev/null || shift $#
+      if [ "$#" -ge 2 ]; then shift 2; else shift "$#"; fi
       if [ -z "$number" ] || [ -z "$*" ]; then echo "$USAGE"; return; fi
       printf '%s' "$*" > "$TMP/typed-text"
       command_reply "$number" ;;

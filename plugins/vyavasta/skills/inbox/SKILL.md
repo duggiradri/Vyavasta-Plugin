@@ -1,5 +1,5 @@
 ---
-description: "Show what teammates asked of you in Vyavasta."
+description: "Show what teammates told you and asked of you in Vyavasta."
 disable-model-invocation: true
 allowed-tools: Bash(sh:*)
 ---
