@@ -373,7 +373,7 @@ def main() -> int:
                "“vyavasta documents” lists the document Ganesh shares with the workspace, and not the one he keeps")
         found = plugin("documents", "search", "refund window", cwd=repo)
         print("  documents search printed: " + found.replace("\n", "\n  ")[:500])
-        expect("│ ── 1. refund-policy.md · from ganesh ──" in found and "within 30 days" in found
+        expect("\n── 1. refund-policy.md · from ganesh ──\n│ " in found and "│ A customer may ask for a refund within 30 days" in found
                and "Quoted from the team’s documents below" in found,
                "the tool’s model searches them and gets the passage in a quoted record, under its document's name")
         read = plugin("documents", "read", "1", cwd=repo)
