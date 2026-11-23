@@ -94,6 +94,24 @@ def connect(browser: Browser, provider: str) -> str:
     return started["source_id"]
 
 
+def upload(browser: Browser, name: str, data: bytes, audience: str) -> str:
+    """Upload a document as the web app's Sources page does, and wait until it is read. Returns its id."""
+    boundary = "vyavasta-loop-boundary"
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"audience\"\r\n\r\n{audience}\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n"
+            "Content-Type: application/octet-stream\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    request = urllib.request.Request(f"{browser.base}/api/v1/documents", data=body, method="POST", headers={
+        "X-Vyavasta": "1", "Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with browser.opener.open(request, timeout=30) as response:
+        document_id = json.loads(response.read())["document_id"]
+    for _ in range(60):
+        if next(row["status"] for row in browser.ok("GET", "/documents")
+                if row["document_id"] == document_id) in ("ready", "failed"):
+            break
+        time.sleep(0.5)
+    return document_id
+
+
 def step(title: str) -> None:
     print(f"\n== {title}")
 
@@ -343,6 +361,39 @@ def main() -> int:
         expect("You · the repository " in reason and ("· shown to teammates ·" in reason
                                                       or "· hidden from teammates ·" in reason),
                "and each category says whether teammates see it")
+        step("The team’s documents, read on demand: listed, searched and read, and only those Sam may read")
+        upload(ganesh, "refund-policy.md", b"# Refunds\n\nA customer may ask for a refund within 30 days of the "
+               b"charge.\n\nAfter that the refund window is closed, and support offers credit instead.", "workspace")
+        upload(ganesh, "ganesh-salaries.md", b"# Salaries\n\nThe kestrel band is 90.", "owner")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta documents")
+        reason = said.get("reason", "")
+        print("  vyavasta documents said: " + reason.replace("\n", "\n  ")[:500])
+        expect(said.get("decision") == "block" and "1. refund-policy.md · Markdown, 1 KB · from ganesh" in reason
+               and "ganesh-salaries" not in reason,
+               "“vyavasta documents” lists the document Ganesh shares with the workspace, and not the one he keeps")
+        found = plugin("documents", "search", "refund window", cwd=repo)
+        print("  documents search printed: " + found.replace("\n", "\n  ")[:500])
+        expect("│ ── 1. refund-policy.md · from ganesh ──" in found and "within 30 days" in found
+               and "Quoted from the team’s documents below" in found,
+               "the tool’s model searches them and gets the passage in a quoted record, under its document's name")
+        read = plugin("documents", "read", "1", cwd=repo)
+        print("  documents read printed: " + read.replace("\n", "\n  ")[:700])
+        expect("── 1. refund-policy.md · from ganesh · part 1 of 1 ──" in read and "part 1 of 1" in read
+               and "│ After that the refund window is closed" in read,
+               "and reads the whole document by its number")
+        expect(plugin("documents", "read", "ganesh-salaries.md", cwd=repo).startswith("No document you may read")
+               and "kestrel" not in plugin("documents", "search", "kestrel band", cwd=repo),
+               "the one Ganesh keeps is not found, by name or by a search, as if it were not there")
+        said = hook("prompt", "UserPromptSubmit", repo,
+                    prompt="Compare the refund window in our documents with what api/ does")
+        context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        expect(f'run sh "{SCRIPT}" documents to list them' in context and "read <number> [part]" in context and "1 document the developer may read"
+               in context, "a message about the team’s documents gives Claude the commands that read them")
+        shared = plugin("shared", cwd=repo)
+        print("  shared printed: " + "\n  ".join(line for line in shared.splitlines() if "given" in line or "30 days" in line))
+        expect("Part 1 of 1 of “refund-policy.md” was given." in shared and "within 30 days" not in shared,
+               "“vyavasta shared” names the document read, never its text")
+
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta summaries off")
         expect(said.get("decision") == "block" and said.get("reason", "").startswith("Summaries are off"),
                "“vyavasta summaries off” is answered by the plugin")
