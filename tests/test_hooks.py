@@ -998,18 +998,22 @@ def test_upload_opens_the_sessions_chat_to_drop_a_file_and_chat_gives_its_link(r
     assert run.opened()[-1] == "http://127.0.0.1/c/cnv_7"
 
 
-def test_an_image_in_the_message_opens_the_chat_with_sharing_on_and_asks_once_with_it_off(run, fake, repo):
+def test_an_image_marked_in_the_message_offers_nothing_and_opens_nothing(run, fake, repo):
+    """A message's words are never read for an attached image: “vyavasta upload” is the one way to give Vyavasta a
+    file, and nothing opens by itself, with code sharing off or on."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    said = prompt(run, repo, "[Image #1] Make the button look like this")["systemMessage"]
-    # With code sharing off, the way to give Vyavasta the image is the upload page, not sharing code.
-    assert said.endswith(" Your image stays in Claude Code. To give it to Vyavasta, send “vyavasta upload” and drop "
-                         "it on the page that opens.") and run.opened() == []
-    assert "share code on" not in said
-    sharing_on(run, fake, repo)
-    said = prompt(run, repo, "[Image #2] And this one")["systemMessage"]
-    assert "this session’s chat is open in your browser" in said
-    assert run.opened() == ["http://127.0.0.1/c/cnv_7?attach=1"]
+    # (The mark Claude Code writes in a message's text for a pasted picture.)
+    pasted = "[" + "Image " + "#1] Make the button look like this"
+    for _ in range(2):
+        prompt(run, repo, "Make the button blue")
+        before = sorted(path.name for path in run.home.rglob("*"))
+        said = prompt(run, repo, pasted)["systemMessage"]
+        assert "image" not in said.casefold() and "vyavasta upload" not in said
+        # Nothing is kept to say that the developer was told of it.
+        assert sorted(path.name for path in run.home.rglob("*")) == before
+        sharing_on(run, fake, repo)
+    assert run.opened() == [] and fake.calls("/chat") == []
 
 
 def test_shared_lists_what_this_session_sent_oldest_first_with_what_is_kept(run, fake, repo):
@@ -3966,33 +3970,32 @@ def test_vyavasta_documents_typed_lists_searches_and_reads_in_both_tools_and_the
     assert not fake.calls("/check") or fake.calls("/check")[-1]["body"]["request"].startswith("vyavasta documents are")
 
 
-def test_a_message_that_has_to_do_with_documents_gives_the_model_the_commands_that_read_them(run, fake, repo):
+def test_an_answer_that_drew_on_a_document_gives_the_model_the_commands_that_read_them(run, fake, repo):
+    """A message's words never decide it: a check is read for no ``documents``, and only Vyavasta's own answer that drew
+    on a document, and a session's start, tell the model how to read them."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    fake.check = {"verdict": "not_a_change", "hold": False, "notice": "", "context": "", "statements": [],
-                  "documents": {"readable": 3}}
+    # Whatever a check might carry, nothing is added for documents.
+    fake.check = {"verdict": "clear", "hold": False, "notice": "Checked.", "statements": [],
+                  "context": "Vyavasta checked this request: nothing stands against it.", "documents": {"readable": 3}}
     for tool in (None, "codex"):
         said = prompt(run, repo, "Compare the refund window in our documents with what api/ does", tool=tool)
-        guide = said["hookSpecificOutput"]["additionalContext"]
-        assert guide == ("This may need the team’s documents in Vyavasta (3 documents the developer may read). To look "
-                         "at them yourself, " + documents_said(tool))
-        assert said["systemMessage"].startswith("Vyavasta · sent: your message.")
-    fake.check["documents"] = {"readable": 1}
-    assert "(1 document the developer may read)" in prompt(run, repo, "Read the PDF")["hookSpecificOutput"][
+        assert said["hookSpecificOutput"]["additionalContext"] == fake.check["context"]
+    for tool in (None, "codex"):
+        fake.check = dict(QUESTION)
+        fake.asked = {**fake.asked, "documents": {"readable": 3}}
+        guide = prompt(run, repo, "What did the team decide about refunds?", tool=tool)["hookSpecificOutput"][
+            "additionalContext"]
+        assert guide == fake.asked["context"] + "\n\nVyavasta’s answer drew on the team’s documents in Vyavasta (3 " \
+            "documents the developer may read). To look at them yourself, " + documents_said(tool)
+    fake.asked = {**fake.asked, "documents": {"readable": 1}}
+    assert "(1 document the developer may read)" in prompt(run, repo, "And Sam?")["hookSpecificOutput"][
         "additionalContext"]
-    # With what the check found, and a teammate to tell, the guidance comes after both.
-    fake.check = {"verdict": "clear", "hold": False, "notice": "Checked.", "statements": [],
-                  "context": "Vyavasta checked this request: nothing stands against it.",
-                  "to_teammates": [{"name": "Rohan Mehta"}], "documents": {"readable": 2}}
-    guide = prompt(run, repo, "Fix the refunds as the policy says and tell Rohan")["hookSpecificOutput"][
-        "additionalContext"]
-    assert guide.index("Vyavasta checked") < guide.index("The developer’s message names Rohan") < guide.index(
-        "This may need the team’s documents")
-    # Nothing said of documents, in any of the ways a server may say it: nothing is added.
+    # An answer that says nothing of documents, in any of the ways a server may say it: nothing is added.
     for none in (None, {}, {"readable": 0}, {"readable": "x"}, "x"):
-        fake.check = {"verdict": "clear", "hold": False, "notice": "Checked.", "statements": [],
-                      "context": "Vyavasta checked this request: nothing stands against it.", "documents": none}
-        assert prompt(run, repo, "Fix the rounding")["hookSpecificOutput"]["additionalContext"] == fake.check["context"]
+        fake.asked = {**fake.asked, "documents": none}
+        assert prompt(run, repo, "What is Priya doing?")["hookSpecificOutput"]["additionalContext"] == \
+            fake.asked["context"]
     # An answer of Vyavasta's that drew on a document: the same, after the answer.
     fake.check = dict(QUESTION)
     fake.asked = {**fake.asked, "documents": {"readable": 4}}

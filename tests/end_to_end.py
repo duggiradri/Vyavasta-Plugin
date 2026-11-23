@@ -384,11 +384,15 @@ def main() -> int:
         expect(plugin("documents", "read", "ganesh-salaries.md", cwd=repo).startswith("No document you may read")
                and "kestrel" not in plugin("documents", "search", "kestrel band", cwd=repo),
                "the one Ganesh keeps is not found, by name or by a search, as if it were not there")
-        said = hook("prompt", "UserPromptSubmit", repo,
-                    prompt="Compare the refund window in our documents with what api/ does")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Rename the refund helper in serializers.py")
         context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
-        expect(f'run sh "{SCRIPT}" documents to list them' in context and "read <number> [part]" in context and "1 document the developer may read"
-               in context, "a message about the team’s documents gives Claude the commands that read them")
+        expect("documents to list them" not in context, "a message's words never decide that documents are told of")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Vyavasta, what is the refund window?")
+        context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        print("  the answer's context ends: " + context[-300:].replace("\n", " "))
+        expect(f'run sh "{SCRIPT}" documents to list them' in context and "read <number> [part]" in context
+               and "drew on the team’s documents" in context,
+               "an answer of Vyavasta’s that drew on a document gives Claude the commands that read them")
         shared = plugin("shared", cwd=repo)
         print("  shared printed: " + "\n  ".join(line for line in shared.splitlines() if "given" in line or "30 days" in line))
         expect("Part 1 of 1 of “refund-policy.md” was given." in shared and "within 30 days" not in shared,
