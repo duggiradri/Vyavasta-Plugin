@@ -14,7 +14,7 @@ The plugin is **off in every project** until you send `vyavasta on` there. Off, 
 - **With code sharing on** (off until you turn it on, per project), your uncommitted changes themselves are sent too, so Vyavasta’s check reads the real change. Teammates who can already see this work see a short summary of what the change does, written by Vyavasta, never the code. If something the team has said stands against the change, Claude is stopped once and you are asked: send `continue` to go on, or `stop` to leave the change where it is.
 - **Teammates’ agents.** Each person has an agent that teammates can ask about their work. You can ask a teammate’s agent a question, which it answers only from what you can both already see, and the teammate sees what you asked. Your own agent answers your teammates the same way, and you see everything they asked. At the start of a session you are told what teammates asked of you while you were away.
 
-The web app stays the place for setup, the record, your team and review. You approve this computer there, and you can disconnect it there (Settings, Account, Connected tools).
+The web app stays the place for setup, the record, your team and review. You approve this computer there, and you can disconnect it there (the Coding tools page).
 
 ## The first time you use it
 

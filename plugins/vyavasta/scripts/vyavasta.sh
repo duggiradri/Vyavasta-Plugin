@@ -597,7 +597,7 @@ api() {
     *) rm -f "$HOME_DIR/offline" ;;
   esac
   if [ "$STATUS" = "401" ] && [ -n "${TOKEN:-}" ]; then
-    # The connection ended (disconnected in Settings, or run out): this computer is signed out.
+    # The connection ended (disconnected on the web app’s Coding tools page, or run out): this computer is signed out.
     rm -f "$CREDENTIALS"
     forget_told
     TOKEN=""
