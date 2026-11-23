@@ -317,7 +317,7 @@ def signed_in(run, fake: Fake) -> None:
 # script words them; and what its file of who greeted last holds once this copy of the plugin has greeted.
 VERSION = re.search(r'^VERSION="([^"]+)"', SCRIPT.read_text(), re.M).group(1)
 RULE = re.search(r'^RULE="(━+)"', SCRIPT.read_text(), re.M).group(1)
-TRY = ("\nTry: “What is my team working on?” · “Push this, then let Priya know” · “vyavasta documents” · “vyavasta "
+TRY = ("\nTry: “What is my team working on?” · “Push this, then tell @priya” · “vyavasta documents” · “vyavasta "
        "summary”")
 AGENTS = {"Claude Code": "Claude", "Codex": "Codex"}
 
@@ -3257,34 +3257,39 @@ def test_the_welcome_on_a_connected_computer_is_the_plugins_own_words_with_the_k
 
 # -- 0.5.4: a message for a teammate in plain words, what teammates work on, and Codex when its hooks do not run -----
 
-def test_a_message_for_a_teammate_in_plain_words_is_sent_on_and_answered_by_the_plugin(run, fake, repo):
-    """“Ask Priya what’s up”: the server says whom it is for and with which words, and the plugin sends it on as
-    “vyavasta ask Priya: …” is sent. The tool's model is not asked, and nothing of it waits for the tool's reply."""
+def test_a_message_that_starts_with_a_mention_is_told_the_teammate_by_the_plugin(run, fake, repo):
+    """“@priya what’s up?”: the server says whom it is for and with which words, and the plugin sends it on as
+    “vyavasta tell Priya: …” is sent: told her, a question too, and answered by no agent. The tool's model is not
+    asked, and nothing of it waits for the tool's reply."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    fake.check = {"verdict": "teammate", "hold": False, "tell": {"to": "Priya", "text": "what’s up?"},
+    fake.check = {"verdict": "teammate", "hold": False, "tell": {"to": "priya", "text": "what’s up?", "intent": "tell"},
                   "repository": "acme/api", "notice": "", "context": "", "statements": [], "kept": False}
+    fake.tell = {"status": "told", "to": {"name": "Priya Raman", "first": "Priya"}, "from": {"name": "Sam Rivera"},
+                 "at_said": "18 November 2026, 10:42", "text": "what’s up?", "answer": "", "context": "",
+                 "notice": "Delivered. Priya sees it in Vyavasta now.", "url": ""}
     for tool in (None, "codex"):
-        said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Ask Priya what’s up?"),
+        said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="@priya what’s up?"),
                           tool=tool))
         assert said["decision"] == "block"
         # Claude Code is told not to pass the message on; Codex blocks it by the decision alone.
         assert ("hookSpecificOutput" in said) == (tool is None)
         sent = fake.calls("/tell")[-1]["body"]
-        assert (sent["to"], sent["text"], sent["kind"], sent["tool"]) == ("Priya", "what’s up?", "message",
-                                                                          tool or "claude-code")
+        assert (sent["to"], sent["text"], sent["kind"], sent["intent"], sent["tool"]) == (
+            "priya", "what’s up?", "message", "tell", tool or "claude-code")
         lines = said["reason"].splitlines()
-        assert lines[0].startswith("── To Priya Raman’s agent · from Sam Rivera · ")
-        assert "│ what’s up?" in lines and "│ Priya is moving the export to v2." in lines
+        assert lines[0] == "── To Priya Raman · from Sam Rivera · 18 November 2026, 10:42 · through Vyavasta ──"
+        assert "│ what’s up?" in lines and "Delivered. Priya sees it in Vyavasta now." in lines
+        assert "agent" not in said["reason"]
     assert len(fake.calls("/check")) == 2 and fake.calls("/ask") == []
     # No reply of the tool's is sent for it when the turn ends.
     run("hook", "stopped", stdin=event("Stop", repo, last_assistant_message="Done."))
     assert fake.calls("/turn") == []
     # What the server could not send is said as it says it.
-    fake.check = {**fake.check, "tell": {"to": "Pri", "text": "what’s up?"}}
-    fake.tell = {**fake.tell, "status": "unknown_person", "people": ["Priya Raman", "Helen Ortiz"]}
-    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Ask Pri what’s up?")))
-    assert said["reason"] == "Vyavasta doesn’t know a teammate called “Pri”. Your teammates: Priya Raman, Helen Ortiz."
+    fake.check = {**fake.check, "tell": {"to": "Sam", "text": "what’s up?", "intent": "tell"}}
+    fake.tell = {**fake.tell, "status": "unknown_person", "people": ["Sam Lee", "Sam Ortiz"]}
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="@Sam what’s up?")))
+    assert said["reason"] == "Vyavasta doesn’t know a teammate called “Sam”. Your teammates: Sam Lee, Sam Ortiz."
 
 
 def test_vyavasta_team_lists_what_each_teammate_shares_of_their_work(run, fake, repo):
@@ -3433,22 +3438,24 @@ def test_what_teammates_sent_comes_with_the_next_message_under_its_line_and_at_t
         assert prompt(run, repo, "Fix the rounding") == plain
 
 
-def test_a_message_that_names_a_teammate_to_tell_gives_the_model_the_command_that_sends_it(run, fake, repo):
-    """“Push the changes. Let Rohan know that they are pushed.”: the work is the tool's, and so is the telling, once
-    the work is done and in words that say what was done. The server says whom the message names; the plugin tells the
+def test_a_message_that_mentions_a_teammate_gives_the_model_the_command_that_sends_it(run, fake, repo):
+    """“Push the changes, then tell @rohan they are pushed”: the work is the tool's, and so is the telling, once the
+    work is done and in words that say what was done. The server says whom the message mentions; the plugin tells the
     tool's model how to send it, by this script's own path, with the message on the command's input."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.check = {"verdict": "not_a_change", "hold": False, "notice": "", "context": "", "statements": [],
                   "to_teammates": [{"name": "Rohan Mehta"}]}
     for tool in (None, "codex"):
-        said = prompt(run, repo, "Push the changes. Let rohan know that the changes have been pushed.", tool=tool)
+        said = prompt(run, repo, "Push the changes, then tell @rohan they are pushed.", tool=tool)
         guide = said["hookSpecificOutput"]["additionalContext"]
-        assert guide.startswith("The developer’s message names Rohan Mehta with words for telling or asking them "
-                                "something. Vyavasta carries messages between teammates: if the message asks for "
-                                "that, send it with this command, after any work it depends on is done, the message "
-                                "on the lines between (written as it is, with nothing escaped):\n" + tell_command(tool))
+        assert guide.startswith("The developer’s message mentions Rohan Mehta with “@”. Vyavasta carries messages "
+                                "between teammates: if the message asks for something to be sent to them, send it "
+                                "with this command, after any work it depends on is done, the message on the lines "
+                                "between (written as it is, with nothing escaped):\n" + tell_command(tool))
         assert "A teammate and their agent are one address." in guide
+        # Nothing says an agent answers what is told.
+        assert "answered" not in guide and "their next message there, and answer it themselves." in guide
         assert "send only what is true by then" in guide
         assert "before any chat tool, email or browser, unless the developer names one" in guide
         # Codex's model is told to run it outside the sandbox, and what the developer can do when that is refused.
@@ -3460,19 +3467,19 @@ def test_a_message_that_names_a_teammate_to_tell_gives_the_model_the_command_tha
     assert fake.calls("/tell") == []
     # Two and three names read as a sentence names them; a name is cut to a short one, as everywhere.
     fake.check["to_teammates"] = [{"name": "Rohan Mehta"}, {"name": "Priya Raman"}]
-    two = prompt(run, repo, "Tell Rohan and Priya once it is merged")["hookSpecificOutput"]["additionalContext"]
-    assert two.startswith("The developer’s message names Rohan Mehta and Priya Raman with words")
+    two = prompt(run, repo, "Tell @rohan and @priya once it is merged")["hookSpecificOutput"]["additionalContext"]
+    assert two.startswith("The developer’s message mentions Rohan Mehta and Priya Raman with “@”.")
     fake.check["to_teammates"] = [{"name": "Rohan Mehta"}, {"name": "Priya Raman"}, {"name": "Helen Ortiz " + "x" * 80}]
     three = prompt(run, repo, "Tell them all")["hookSpecificOutput"]["additionalContext"]
-    assert three.startswith("The developer’s message names Rohan Mehta, Priya Raman, and Helen Ortiz xxxxxxxxxxxxxxxxxxxxxxxxxxx… with")
+    assert three.startswith("The developer’s message mentions Rohan Mehta, Priya Raman, and Helen Ortiz xxxxxxxxxxxxxxxxxxxxxxxxxxx… with")
     # With what the check found, the guidance follows it; with what arrived, that still comes first.
     fake.check = {"verdict": "clear", "hold": False, "notice": "Checked.", "statements": [],
                   "context": "Vyavasta checked this request: nothing stands against it.",
                   "to_teammates": [{"name": "Rohan Mehta"}]}
     fake.extra["/check"] = {"inbox": {"items": ARRIVED[:1], "count": 1, "more": 0}}
-    both = prompt(run, repo, "Fix the rounding and tell Rohan")["hookSpecificOutput"]["additionalContext"]
+    both = prompt(run, repo, "Fix the rounding and tell @rohan")["hookSpecificOutput"]["additionalContext"]
     assert both.startswith(OPENS_WITH)
-    assert both.index("Vyavasta checked this request") < both.index("The developer’s message names Rohan Mehta")
+    assert both.index("Vyavasta checked this request") < both.index("The developer’s message mentions Rohan Mehta")
     # No teammate named, in any of the ways a server may say it: nothing is added.
     fake.extra["/check"] = {}
     for none in ([], None, "x"):
@@ -3482,9 +3489,12 @@ def test_a_message_that_names_a_teammate_to_tell_gives_the_model_the_command_tha
     for tool in (None, "codex"):
         started = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool=tool))
         told = started["hookSpecificOutput"]["additionalContext"]
-        assert ("Vyavasta also carries messages between teammates: when the developer wants a teammate told or asked "
-                "something (“let Priya know the fix is pushed”, “ask Sam whether the importer is done”), send it with "
-                "this command") in told
+        assert ("Vyavasta also carries messages between teammates. The developer reaches a teammate with “@” and the "
+                "teammate’s name. A message that starts with one (“@priya the fix is pushed”) is sent to that teammate "
+                "by the plugin itself, as it is written, before it reaches you. When a message mentions a teammate "
+                "anywhere else (“push this, then tell @priya”), or the developer otherwise wants a teammate told "
+                "something, send it with this command") in told
+        assert "let Priya know" not in told and "answered at once" not in told
         assert tell_command(tool) in told
         assert told.count("Run it outside Codex’s sandbox") == (2 if tool == "codex" else 0)
 
@@ -3564,10 +3574,13 @@ def test_vyavasta_tell_typed_by_the_developer_is_told_the_teammate_as_written(ru
     # Asking stays asking: nothing says it is only told.
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta ask Priya: is it done?"))
     assert "intent" not in fake.calls("/tell")[-1]["body"]
-    # Help names it, and that the same can be said in one's own words as part of any message.
+    # Help names "@" first, the typed command beside it, and a mention anywhere else in a message.
     text = run("help", cwd=repo).stdout
-    assert "- “vyavasta tell <name>: <your words>”: tell a teammate something." in text
-    assert "such as “push this, then let Priya know”: Claude sends it through Vyavasta when the work is done." in text
+    assert ("- “@<name> <your words>” (a message that starts with “@” and their name), or “vyavasta tell <name>: <your "
+            "words>”: tell a teammate something, as you wrote it.") in text
+    assert "- Mention a teammate anywhere else in a message, such as “push this, then tell @priya”: Claude sends it " \
+        "through Vyavasta when the work is done." in text
+    assert "let Priya know" not in text
 
 
 def test_under_codex_a_sandboxed_tell_says_what_stood_in_its_way_and_how_the_developer_can_send_it(run, fake, repo):

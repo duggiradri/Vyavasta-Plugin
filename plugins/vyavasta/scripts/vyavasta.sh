@@ -115,7 +115,7 @@ mark_greeted() { mkdir -p "$HOME_DIR" && printf '%s\n' "$GREETED" > "$WELCOMED";
 # of the plugin greeted here before).
 RULE="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 banner() { printf '%s\n  V Y A V A S T A  ·  your team’s record, in %s\n%s\n' "$RULE" "$TOOL" "$RULE"; }
-TRY_SAID="Try: “What is my team working on?” · “Push this, then let Priya know” · “vyavasta documents” · “vyavasta summary”"
+TRY_SAID="Try: “What is my team working on?” · “Push this, then tell @priya” · “vyavasta documents” · “vyavasta summary”"
 WHATS_NEW="New in $VERSION: “vyavasta documents” lists the team’s documents you may read in Vyavasta, and “vyavasta documents search <words>” and “vyavasta documents read <number>” search and read them; ${AGENT} reads them the same way when your work needs them. The plugin keeps no copy of them on this computer; what ${AGENT} reads stays in its own conversation, as anything it reads does."
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
@@ -1233,18 +1233,19 @@ tell_with_said() {
 $TELL_WITH \"<the teammate’s name>\" <<'MESSAGE'
 <the message>
 MESSAGE
-${outside}Write the message in plain words that can be understood on their own: say what was done and where, never only “it” or “the changes”, and send only what is true by then. A teammate and their agent are one address. They see the message in Vyavasta at once, and in their own coding tool with their next message there; a question is also answered at once by their agent, from what the two of them can both already see, and the answer is printed. Reach a teammate this way before any chat tool, email or browser, unless the developer names one, and say in your reply what you sent."
+${outside}Write the message in plain words that can be understood on their own: say what was done and where, never only “it” or “the changes”, and send only what is true by then. A teammate and their agent are one address. They see the message in Vyavasta at once, and in their own coding tool with their next message there, and answer it themselves. Reach a teammate this way before any chat tool, email or browser, unless the developer names one, and say in your reply what you sent."
 }
 
-# Said when a session starts: that Vyavasta carries messages between teammates at all, and how.
+# Said when a session starts: that Vyavasta carries messages between teammates at all, that the developer reaches a
+# teammate with “@” and their name, and how the tool's model sends one.
 tell_how() {
-  printf '%s' "Vyavasta also carries messages between teammates: when the developer wants a teammate told or asked something (“let Priya know the fix is pushed”, “ask Sam whether the importer is done”), $(tell_with_said)"
+  printf '%s' "Vyavasta also carries messages between teammates. The developer reaches a teammate with “@” and the teammate’s name. A message that starts with one (“@priya the fix is pushed”) is sent to that teammate by the plugin itself, as it is written, before it reaches you. When a message mentions a teammate anywhere else (“push this, then tell @priya”), or the developer otherwise wants a teammate told something, $(tell_with_said)"
 }
 
-# Said with a message that the server read as naming teammates to tell or ask something ($1: their names, each cut
-# to a short one and joined): the same, there and then, for whom.
+# Said with a message that the server found to mention teammates with “@” ($1: their names, each cut to a short one
+# and joined): the same, there and then, for whom.
 told_for() {
-  printf '%s' "The developer’s message names $1 with words for telling or asking them something. Vyavasta carries messages between teammates: if the message asks for that, $(tell_with_said)"
+  printf '%s' "The developer’s message mentions $1 with “@”. Vyavasta carries messages between teammates: if the message asks for something to be sent to them, $(tell_with_said)"
 }
 
 # How the tool's model lists, searches and reads the team's documents: the three commands, by this script's full path
@@ -1907,12 +1908,13 @@ handle_message() {
   esac
   cp "$TMP/answer" "$TMP/checked"
   if [ "$(json_text "$(answer verdict)")" = "teammate" ]; then
-    # A message for a teammate, in so many words (“ask Priya what’s up”, “tell Sam’s agent I’m changing the billing
-    # page”): the server says for whom and with which words, and it is sent on as “vyavasta ask <name>: …” is.
-    # Answered here: the tool's model isn't asked, and nothing of it is kept for the developer's summary.
+    # A message that is, whole, for one teammate: it starts with “@” and their name (“@priya the fix is pushed”). The
+    # server says for whom and with which words, and it is told them as “vyavasta tell <name>: …” is, as it is
+    # written, with no agent's answer. Answered here: the tool's model isn't asked, and nothing of it is kept for the
+    # developer's summary.
     told=$(answer tell)
     json_text "$(field "$told" text)" > "$TMP/typed-text"
-    answered_here "$(tell "$(json_text "$(field "$told" to)")" "$(cat "$TMP/typed-text")")"
+    answered_here "$(tell "$(json_text "$(field "$told" to)")" "$(cat "$TMP/typed-text")" "" tell)"
     return
   fi
   # What teammates sent the developer since they were last told comes with the check, each once: they read it under
@@ -2530,10 +2532,10 @@ See what is shared
 Teammates
 - “vyavasta team”: what each teammate is working on, from the summaries they share with the team.
 - “vyavasta inbox”: what teammates told you and asked of you. What is new also comes with your next message, at the top of ${AGENT}’s reply.
-- “vyavasta tell <name>: <your words>”: tell a teammate something. They see it in Vyavasta at once, and in their own coding tool with their next message there.
+- “@<name> <your words>” (a message that starts with “@” and their name), or “vyavasta tell <name>: <your words>”: tell a teammate something, as you wrote it. They see it in Vyavasta at once, and in their own coding tool with their next message there, and answer it themselves.
 - “vyavasta ask <name>: <question>”: ask a teammate’s agent, which is Vyavasta answering for them. It answers only from what you can both already see and does not see their computer; they see what you asked and can answer you themselves.
 - “vyavasta reply <number>: <your words>”: answer an item of your inbox.
-- Or say it in your own words as part of any message, such as “push this, then let Priya know”: ${AGENT} sends it through Vyavasta when the work is done.
+- Mention a teammate anywhere else in a message, such as “push this, then tell @priya”: ${AGENT} sends it through Vyavasta when the work is done.
 - “vyavasta documents”: the team’s documents you may read in Vyavasta, numbered. “vyavasta documents search <words>” finds passages in them, and “vyavasta documents read <number>” reads one, part by part. ${AGENT} reads them the same way when your work needs them. The plugin keeps no copy of them on this computer; what ${AGENT} reads stays in its own conversation.
 EOF
   [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:documents and /vyavasta:check; ask, tell, reply, and searching and reading documents are typed only."
@@ -2548,7 +2550,7 @@ guide_context() {
     codex) also="" ;;
     *) also=" In Claude Code most of these are also slash commands, such as /vyavasta:sign-in, /vyavasta:on and /vyavasta:help, which the developer can run instead." ;;
   esac
-  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
+  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. To tell a teammate something, the developer starts a message with “@” and the teammate’s name, then the words (“@priya the fix is pushed”), and the plugin sends it as written; “vyavasta ask <name>: <question>” asks a teammate’s agent. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
 }
 
 # Whether a message asks how to use the plugin itself: it is short (GUIDE_LONGEST), asks something (a question mark,
@@ -3071,7 +3073,7 @@ TELL_CHARACTERS=4000
 
 # A message to a teammate: a question for their agent (`ask`), something told them (`tell`), or a reply to an item of
 # the inbox. $1 is who it is for, $2 the words, $3 the message it replies to, and $4 is "tell" when it is told them:
-# the server then delivers it as it is, and has their agent answer only what is a question.
+# the server then delivers it as it is, and no agent answers it.
 tell() {
   command_here
   # Run by Codex's model inside its sandbox, the command reaches nothing: it says what stood in its way and how to

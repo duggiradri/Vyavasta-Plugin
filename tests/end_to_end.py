@@ -419,11 +419,17 @@ def main() -> int:
         hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta on")
 
         step("Teammates: Sam asks Ganesh’s agent, and Ganesh writes to Sam through Sam’s agent chat")
-        asked = plugin("tell", "Ganesh", "What are you working on this week?", cwd=repo)
-        print("  tell printed: " + asked.strip().replace("\n", "\n  ")[:800])
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta ask Ganesh: What are you working on this week?")
+        asked = said.get("reason", "")
+        print("  vyavasta ask printed: " + asked.strip().replace("\n", "\n  ")[:800])
         expect("── To " in asked and "’s agent · from " in asked, "the message opens with its header")
         expect("── From " in asked or "still" in asked, "and the agent’s answer follows under its own, or is on its way")
         expect(asked.count("/?agent-chat=") == 1, "the link to the conversation is printed once")
+        # What the tool's model sends with the script's own command is told him, a question too: no agent answers it.
+        told = plugin("tell", "Ganesh", "Are you around this afternoon?", cwd=repo)
+        print("  tell printed: " + told.strip().replace("\n", "\n  ")[:600])
+        expect(told.startswith("── To ") and "’s agent" not in told and "── From " not in told and "Delivered. " in told,
+               "what the tool’s model sends him is told him, and no agent answers it, a question though it is")
         sam_id = sam.ok("GET", "/session")["user"]["user_id"]
         ganesh.ok("POST", f"/agent-chats/{sam_id}/messages", {"text": "Is customer_plan still in the API?",
                                                                "kind": "message", "client_request_id": "e2e-1"})
@@ -434,14 +440,24 @@ def main() -> int:
                and "Is customer_plan still in the API?" in start_line,
                "the next session starts with Ganesh’s message, under its header")
 
-        step("Teammates in plain words: “Ask Ganesh …” is sent on by the plugin, and “vyavasta team” lists their work")
-        said = hook("prompt", "UserPromptSubmit", repo, prompt="Ask Ganesh whether customer_plan can go this week")
+        step("Teammates with “@”: “@ganesh …” is told him by the plugin, and “vyavasta team” lists their work")
+        unread = ganesh.ok("GET", "/agent-chats")["unread"]
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="@ganesh hello?")
         reason = said.get("reason", "")
         print("  the hook answered: " + reason.replace("\n", "\n  ")[:700])
-        expect(said.get("decision") == "block" and "── To " in reason and "’s agent · from " in reason,
-               "a message that begins by naming a teammate is answered by the plugin, under the same header")
-        expect("whether customer_plan can go this week" in reason and "Ask Ganesh" not in reason,
-               "and only the words for the teammate are sent")
+        expect(said.get("decision") == "block" and reason.startswith("── To ") and "’s agent" not in reason
+               and "Delivered. " in reason,
+               "a message that starts with “@” and a teammate’s name is told him by the plugin, under a header that "
+               "names him")
+        expect("│ hello?" in reason and "@ganesh" not in reason and "── From " not in reason,
+               "only the words for him are sent, as written, and no agent answers them, a question though it is")
+        expect(ganesh.ok("GET", "/agent-chats")["unread"] == unread + 1, "it waits for Ganesh in the web app, unread")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="tell ganesh hello")
+        print("  “tell ganesh hello” came back as: " + json.dumps(said, ensure_ascii=False)[:700])
+        expect("Delivered" not in json.dumps(said, ensure_ascii=False) and "── To " not in json.dumps(said)
+               and "mentions ganesh" not in json.dumps(said, ensure_ascii=False),
+               "without “@”, “tell ganesh hello” is no message for him: it is read as any other message")
+        expect(ganesh.ok("GET", "/agent-chats")["unread"] == unread + 1, "and nothing more reached Ganesh")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta team")
         reason = said.get("reason", "")
         print("  vyavasta team said: " + reason.replace("\n", "\n  ")[:500])
@@ -456,10 +472,10 @@ def main() -> int:
 
         step("Telling a teammate as part of the work: Claude is told how, sends it, and each is told with their next answer")
         said = hook("prompt", "UserPromptSubmit", repo,
-                    prompt="Push the changes. Let Ganesh know that the changes have been pushed.")
+                    prompt="Push the changes, then tell @ganesh that the changes have been pushed.")
         context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
         # (Ganesh joined by invitation and gave no name: he is named as the rest of the app names him.)
-        expect("decision" not in said and "The developer’s message names ganesh with words for telling" in context
+        expect("decision" not in said and "The developer’s message mentions ganesh with “@”." in context
                and f'sh "{SCRIPT}" tell "<the teammate’s name>" <<\'MESSAGE\'' in context,
                "a message that asks for work and for a teammate to be told goes on to Claude, with the command that "
                "sends a teammate a message")
