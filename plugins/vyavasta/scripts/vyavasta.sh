@@ -7,9 +7,9 @@
 #
 # The plugin is off in every project until the developer sends “vyavasta on” there; off, a hook sends nothing: only
 # the plugin's own commands are answered, a message that asks how to use Vyavasta gives the tool's model the phrases
-# to tell the developer, and the first session on a computer that isn't signed in starts signing in. While that
-# sign-in waits for approval, each message asks the server once whether it was approved, sending only the sign-in's
-# own reference, never the message.
+# to tell the developer, and each tool's first session on a computer that isn't signed in starts signing in. While
+# that sign-in waits for approval, each message asks the server once whether it was approved, sending only the
+# sign-in's own reference, never the message.
 #
 # What it sends from a project that is on: the words of each message to the check, the repository's GitHub remote
 # (without any credentials in it), the branch, the tool's session id, and for each changed file its path, git's
@@ -77,6 +77,11 @@ CREDENTIALS="$HOME_DIR/credentials"
 PENDING="$HOME_DIR/pairing"
 SESSIONS="$HOME_DIR/sessions"
 PROJECTS="$HOME_DIR/projects"
+# A file that is there once this tool has welcomed the developer on this computer. The sign-in and the settings are
+# one for both tools; the welcome is each tool's own, so the first session of each says it, whatever the other did
+# before. (A version before 0.5.3 kept one file for the computer, `welcomed`, which doesn't say which tool wrote it:
+# it counts for neither, so each tool welcomes once more after the update, and none that never did stays silent.)
+WELCOMED="$HOME_DIR/welcomed-$CLIENT"
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
 # How long one call for the answer to a question may take, and for how long in all calls go on waiting for an
@@ -1216,7 +1221,7 @@ hook_session_start() {
     welcome "$dir"
     return
   fi
-  mkdir -p "$HOME_DIR" && true > "$HOME_DIR/welcomed"
+  mkdir -p "$HOME_DIR" && true > "$WELCOMED"
   basename "$dir" > "$PDIR/session"
   # A new session has no message of its own waiting for its reply.
   rm -f "$dir/turn-waiting"
@@ -1280,16 +1285,18 @@ $(render_inbox "$items" "$(answer more)")"
   esac
 }
 
-# A session in a project that is off. The first one on this computer welcomes the developer in one message, and
-# when nobody is signed in it starts signing in there and then (the Connect page opens and the message gives its
-# code); the project stays off and nothing else is sent. Later sessions say nothing, unless a sign-in is waiting: it
-# is finished when it was approved, and told again with its code when it still waits. $1 is the session folder.
+# A session in a project that is off. This tool's first one on this computer welcomes the developer in one message,
+# whatever the other tool did before. On a computer that is connected already (a sign-in is kept, and one serves both
+# tools) it says so and as whom, from what this computer keeps, and starts no sign-in; when nobody is signed in it
+# starts signing in there and then (the Connect page opens and the message gives its code). The project stays off
+# and nothing else is sent. Later sessions say nothing, unless a sign-in is waiting: it is finished when it was
+# approved, and told again with its code when it still waits. $1 is the session folder.
 welcome() {
-  if [ ! -f "$HOME_DIR/welcomed" ]; then
-    mkdir -p "$HOME_DIR" && true > "$HOME_DIR/welcomed" || return 0
+  if [ ! -f "$WELCOMED" ]; then
+    mkdir -p "$HOME_DIR" && true > "$WELCOMED" || return 0
     offline || finish_pairing
     if [ -n "$TOKEN" ]; then
-      say "Vyavasta is installed and off in this project. Send “vyavasta on” to use it here, and “vyavasta help” to see everything it does."
+      say "Vyavasta is installed in ${TOOL}. This computer is already connected as $(person "$(saved email)") in $(person "$(saved workspace)"): one connection serves both Claude Code and Codex. It stays off in this project until you send “vyavasta on”, and “vyavasta help” shows everything."
     elif pending_waiting; then
       PAIR_AGAIN=1
       say "Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything."
@@ -2088,7 +2095,7 @@ command_on() {
     echo "Vyavasta couldn’t save that it is on here, because its settings folder ($HOME_DIR) can’t be written. If ${TOOL} ran this as a command, send “vyavasta on” as a message instead."
     return
   fi
-  mkdir -p "$HOME_DIR" && true > "$HOME_DIR/welcomed"
+  mkdir -p "$HOME_DIR" && true > "$WELCOMED"
   if [ -n "${SESSION:-}" ]; then
     printf '%s\n' "$SESSION" > "$PDIR/session"
     if repository "$HERE"; then

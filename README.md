@@ -19,6 +19,7 @@ The web app stays the place for setup, the record, your team and review. You app
 ## The first time you use it
 
 - **Sign-in opens by itself.** In the first session after you install the plugin, if this computer isn’t signed in yet, Vyavasta’s Connect page opens in your browser and the session’s first line gives you its code and address. Sign in there if asked, type the code, check the computer’s name, and press **Connect**. Once you approve, your next message finishes connecting, in any project, and says so in one line. The project stays off, and nothing else is sent.
+- **One connection serves both tools.** A computer connected through Claude Code is connected for Codex too, and the other way round, so the second tool asks for no code: its first session says who this computer is connected as.
 - **Then send `vyavasta on`** in each project you want it in. If you start a session in a project that is on while signed out, sign-in starts by itself there too, once.
 - **A sign-in that waits is never started twice.** Until you approve it, every line about it repeats the same code and address and no second page opens. A code lasts 10 minutes, and asking to sign in again says how many are left. Once it has run out, the next sign-in starts afresh with a new code.
 - **To find out how to use it,** send `vyavasta` or `vyavasta help`, or ask in your own words, such as `vyavasta how do I sign in` or `vyavasta what can you do`. Help opens with the three steps to start and whether each is done. A question to your team that starts with Vyavasta’s name, such as “Vyavasta, what is Priya working on?”, still goes to your team’s record.
@@ -37,7 +38,7 @@ You need Claude Code, git, and access to this repository.
 
    For a copy on your disk, give its folder instead: `/plugin marketplace add /path/to/vyavasta-plugin`. From a terminal, the same two steps are `claude plugin marketplace add duggiradri/Vyavasta-Plugin` and `claude plugin install vyavasta@vyavasta`.
 
-2. Start a new session (or run `/reload-plugins`). The first session opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
+2. Start a new session (or run `/reload-plugins`). On a computer that isn’t connected yet, the first session opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
 
 3. In your project, send:
 
@@ -51,10 +52,10 @@ You need Claude Code, git, and access to this repository.
 
 You need Codex, git, and access to this repository. The same script runs under both tools; Codex gets its own hooks file (`plugins/vyavasta/hooks/codex.json`) and description (`plugins/vyavasta/.codex-plugin/plugin.json`).
 
-1. From a terminal, add the marketplace: `codex plugin marketplace add duggiradri/Vyavasta-Plugin`.
+1. From a terminal, add the marketplace: `codex plugin marketplace add duggiradri/Vyavasta-Plugin`. If the terminal answers that `codex` is not found, Codex may be on your Mac only inside the ChatGPT app. Try the same command through the app’s own copy: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex plugin marketplace add duggiradri/Vyavasta-Plugin`.
 2. Install the plugin named Vyavasta from that marketplace in Codex’s plugin list, and restart Codex.
 3. Approve the plugin’s hooks once: Codex runs no hook until you have reviewed and trusted it. In the terminal, open `/hooks`; in the desktop app, choose **Review hooks**. Codex asks again after each update of the plugin.
-4. Start a new session. The first one opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
+4. Start a new session. On a computer that isn’t connected yet, the first one opens Vyavasta’s Connect page in your browser and shows a code: enter it there and press **Connect**.
 5. In your project, send `vyavasta on` as a message of its own.
 
 Codex has no plugin slash commands, so every command is a message. Under Codex the report of changed files also follows shell commands, because Codex often edits files that way. Codex tasks that run in the cloud don’t run a plugin’s hooks, so nothing is checked there. Codex runs the commands its own model starts in a closed-off space that can’t write the plugin’s settings folder or reach the internet. When that keeps a command from Vyavasta, the plugin says so; send the same thing as a message instead (a question as a message that starts with “Vyavasta,”), because messages aren’t closed off.
@@ -104,7 +105,7 @@ The words under each header, what teammates wrote in your inbox and the answers 
 
 ## What it sends, and what it keeps
 
-From a project that is off: nothing, except that the first session on a computer that isn’t signed in starts sign-in, which sends the computer’s name and which tool it is. While that sign-in waits for your approval, each message asks Vyavasta’s server once whether you have approved it, sending only the sign-in’s own reference and never the message; this stops once you are connected or the code has run out.
+From a project that is off: nothing, except that each tool’s first session on a computer that isn’t signed in starts sign-in, which sends the computer’s name and which tool it is. While that sign-in waits for your approval, each message asks Vyavasta’s server once whether you have approved it, sending only the sign-in’s own reference and never the message; this stops once you are connected or the code has run out.
 
 From a project that is on:
 

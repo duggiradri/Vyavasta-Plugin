@@ -14,7 +14,7 @@ developer which phrase to send, as a message of its own.
 `vyavasta help` shows what Vyavasta does, the three steps to start with whether each is done, and every command.
 
 Start here
-1. Sign in: `vyavasta sign in` opens the sign-in page in the browser with a code to enter there, and once the developer approves, the next message finishes connecting, in any project.
+1. Sign in: `vyavasta sign in` opens the sign-in page in the browser with a code to enter there, and once the developer approves, the next message finishes connecting, in any project. A computer already connected through Claude Code needs no sign-in here, because one connection serves both tools.
 2. Turn it on in this project: `vyavasta on`, in each project the developer wants it in.
 3. Then just work: every message gets one line saying what was sent to Vyavasta and what came of it.
 
