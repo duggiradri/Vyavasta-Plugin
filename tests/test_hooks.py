@@ -5500,8 +5500,9 @@ def test_an_answer_that_is_not_vyavastas_is_never_told_as_checked(run, fake, rep
 
 
 @pytest.mark.parametrize("status, said", [
-    (429, "Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for "
-          "a moment. Claude works as usual."),
+    # (A 429 whose code says neither whose the requests were: test_too_many_requests_says_whose_they_were_by_the_…)
+    (429, "Vyavasta: the server had too many requests just now, so requests aren’t checked for a moment. Claude works "
+          "as usual."),
     (503, "Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. Claude works as "
           "usual.")])
 def test_a_session_start_says_what_came_of_the_server_as_it_is(run, fake, repo, status, said):

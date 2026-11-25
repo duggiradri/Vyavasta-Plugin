@@ -103,7 +103,7 @@ Start here
 3. Then just work. Every message gets one line from Vyavasta saying what was sent, and what came of it: the whole account first, then a few words.
 
 Your setup
-- `vyavasta status`: whether you’re signed in, and whether this project, code sharing and summaries are on.
+- `vyavasta status`: whether you’re signed in, and whether this project, code sharing and summaries are on. In the minute after Vyavasta’s server was out of reach or didn’t answer, it says so, and that `vyavasta check` tries it at once.
 - `vyavasta check`: tests that git, curl and awk are there, that the settings folder can be written, the server address, that the server answers, sign-in, that this folder is a repository on GitHub that Vyavasta reads for you, that the project, code sharing and summaries are on, and the plugin’s version. Each line says “ok” or the problem and how to fix it.
 - `vyavasta off`: stop using Vyavasta in this project. Off keeps your code-sharing and summaries choices.
 - `vyavasta sign out`: disconnect this computer. Nothing signs in again by itself until you send `vyavasta sign in`.
