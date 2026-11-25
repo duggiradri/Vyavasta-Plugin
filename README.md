@@ -78,6 +78,10 @@ Codex has no plugin slash commands, so every command is a message. Under Codex t
 
 In Codex’s terminal a name at the very end of a message (“… then tell @priya”) opens Codex’s file picker, and Enter then puts a file in its place: type a space or press Esc before Enter, or put words after the name. Codex shows the answer to one of the plugin’s commands under its heading “Blocked by hook”, with a first line saying that Vyavasta answered it itself and Codex wasn’t sent your message: Codex has no other way to show a hook’s answer to a message, and nothing was refused. `codex exec`, Codex’s run without its terminal, shows nothing a hook says: send the plugin’s commands in Codex’s terminal or app.
 
+To run Codex once without Vyavasta, start it with `codex --disable plugins`. A `-c` override that sets the plugin’s `enabled` to false does not stop its hooks. To stop Vyavasta in one project, send `vyavasta off` there.
+
+When Codex updates the plugin while a session is open, it removes the version that session runs, and that session’s hooks stop without a word: its messages go to Codex as they are, nothing is checked, and a `vyavasta` command reaches Codex’s model unanswered. The questions and messages Codex’s model sends for you keep working, through the copy of the script in the settings folder. Start a new session, and approve Vyavasta’s hooks again when Codex asks.
+
 ## Moving from Vyavastha, the plugin's earlier name
 
 Until version 0.5.0 the plugin was called Vyavastha, installed as `vyavastha@vyavastha`. Its marketplace has a new name too, so install it afresh rather than updating:
