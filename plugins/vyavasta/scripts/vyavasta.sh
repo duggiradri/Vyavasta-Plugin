@@ -2532,18 +2532,32 @@ parse_typed() {
       if (rest ~ /^open [a-z]+$/) { printf "open\t%s\n", substr(rest, 6); exit }
       if (helpish(rest)) { printf "help\t\n"; exit }
       if (!asked && rest ~ /^[a-z][a-z0-9]*$/ && length(rest) <= 24) {
-        # The nearest command, by its own spelling: one slip of typing away for a word of four letters or fewer, two
-        # for a longer one. A command that has an opposite (on and off, sign in and sign out) is named with it only
-        # when the opposite is exactly as near: so a slip never points to the command that does the reverse alone, and
-        # never names it first when it is the farther of the two.
+        # The nearest command, by its own spelling or one of its other words above, written as one word (“login”
+        # and “turnon” are slips of sign in and on): one slip of typing away for a word of four letters or fewer, two
+        # for a longer one, and none for a word of two letters or fewer (“no” and “ok” are words, not slips of
+        # “on”). A command that has an opposite (on and off, sign in and sign out) is named with it only when the
+        # opposite is exactly as near: so a slip never points to the command that does the reverse alone, and never
+        # names it first when it is the farther of the two.
         split("on off status check settings help inbox team summary documents shared chat upload open ask tell " \
-              "reply signin signout", word, " ")
+              "reply signin signout login connect logout disconnect enable turnon switchon start disable turnoff " \
+              "switchoff docs summaries", word, " ")
+        means["login"] = "signin"; means["connect"] = "signin"; means["logout"] = "signout"
+        means["disconnect"] = "signout"; means["enable"] = "on"; means["turnon"] = "on"; means["switchon"] = "on"
+        means["start"] = "on"; means["disable"] = "off"; means["turnoff"] = "off"; means["switchoff"] = "off"
+        means["docs"] = "documents"; means["summaries"] = "summary"
         opposite["on"] = "off"; opposite["off"] = "on"; opposite["signin"] = "signout"; opposite["signout"] = "signin"
         most = (length(rest) <= 4) ? 1 : 2
         best = ""; least = most + 1
-        for (i = 1; i in word; i++) { d = slips(rest, word[i]); if (d < least && d < length(rest)) { least = d; best = word[i] } }
+        # (How near each command is: by the nearest of its spellings.)
+        if (length(rest) > 2) {
+          for (i = 1; i in word; i++) {
+            d = slips(rest, word[i]); which = (word[i] in means) ? means[word[i]] : word[i]
+            if (!(which in near) || d < near[which]) near[which] = d
+            if (d < least && d < length(rest)) { least = d; best = which }
+          }
+        }
         other = ""
-        if (best in opposite && slips(rest, opposite[best]) == least) other = opposite[best]
+        if (best in opposite && near[opposite[best]] == least) other = opposite[best]
         # (Named in the order of the list: on before off, sign in before sign out.)
         if (other != "" && (best == "off" || best == "signout")) { swap = best; best = other; other = swap }
         printf "unknown\t%s\n", rest

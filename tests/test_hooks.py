@@ -4841,11 +4841,18 @@ def test_other_ways_of_typing_a_command_are_the_same_command(run, fake, repo, ty
                                             # A short word is a slip only one letter away; a command is never named
                                             # alone where the one that does the reverse is as near, and the one that
                                             # does the reverse is named only when it is exactly as near.
-                                            ("vyavasta of", ("on", "off")), ("vyavasta onf", ("on", "off")),
-                                            ("vyavasta signo", ("sign in", "sign out")),
+                                            ("vyavasta onf", ("on", "off")), ("vyavasta signo", ("sign in", "sign out")),
                                             ("vyavasta signot", "sign out"), ("vyavasta signou", "sign out"),
                                             ("vyavasta sigin", "sign in"), ("vyavasta foo", None),
-                                            ("vyavasta log", None), ("vyavasta sign", None)])
+                                            ("vyavasta log", None), ("vyavasta sign", None),
+                                            # A word of two letters is a word, never a slip.
+                                            ("vyavasta of", None), ("vyavasta no", None), ("vyavasta ok", None),
+                                            # A slip of another word for a command offers the command it stands for.
+                                            ("vyavasta logni", "sign in"), ("vyavasta conect", "sign in"),
+                                            ("vyavasta logot", "sign out"), ("vyavasta disconect", "sign out"),
+                                            ("vyavasta enabel", "on"), ("vyavasta turnon", "on"),
+                                            ("vyavasta disabel", "off"), ("vyavasta turnof", ("on", "off")),
+                                            ("vyavasta dcos", "documents"), ("vyavasta summaires", "summary")])
 def test_vyavasta_and_a_word_that_is_no_command_says_so_and_names_the_nearest(run, fake, repo, typed, nearest):
     signed_in(run, fake)
     for on in (False, True):
