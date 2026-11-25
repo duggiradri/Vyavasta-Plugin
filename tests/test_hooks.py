@@ -4853,6 +4853,8 @@ def test_other_ways_of_typing_a_command_are_the_same_command(run, fake, repo, ty
                                             ("vyavasta log", None), ("vyavasta sign", None),
                                             # A word of two letters is a word, never a slip.
                                             ("vyavasta of", None), ("vyavasta no", None), ("vyavasta ok", None),
+                                            # “start” stands for on, but a slip of it is no offer: “stat” is meant for status.
+                                            ("vyavasta stat", None),
                                             # A slip of another word for a command offers the command it stands for.
                                             ("vyavasta logni", "sign in"), ("vyavasta conect", "sign in"),
                                             ("vyavasta logot", "sign out"), ("vyavasta disconect", "sign out"),

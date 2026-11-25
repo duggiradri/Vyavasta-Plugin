@@ -969,7 +969,7 @@ config_path() {
 # call for a minute (`offline`, `held_off`). A server that took a call and answered nothing in time is asked a quick
 # question first, on the same connection, before each call after it that may take longer than that question
 # (`slow_lately`): one that is only slow, as a busy server can be, answers it at once and is still called each time.
-# When the quick question itself goes unanswered (the server answers it at once, under any load), no hook makes a call
+# When the quick question itself goes unanswered (the server answers it at once, even when it is busy), no hook makes a call
 # for a minute either (`unanswered`). Once one of these is found, no more calls are made in the same run (HELD, the
 # reason: “offline” or “unanswered”). A server that answers with an error is answered with its error each time:
 # one failing call never silences the calls after it. Inside Codex's sandbox, where the network is off by design, a
@@ -2545,12 +2545,14 @@ parse_typed() {
         # “on”). A command that has an opposite (on and off, sign in and sign out) is named with it only when the
         # opposite is exactly as near: so a slip never points to the command that does the reverse alone, and never
         # names it first when it is the farther of the two.
+        # (“start”, another word for on, is left out of the list: a word one slip from it, such as “stat”, is far more
+        # often meant for status.)
         split("on off status check settings help inbox team summary documents shared chat upload open ask tell " \
-              "reply signin signout login connect logout disconnect enable turnon switchon start disable turnoff " \
-              "switchoff docs summaries", word, " ")
+              "reply signin signout login connect logout disconnect enable turnon switchon disable turnoff switchoff " \
+              "docs summaries", word, " ")
         means["login"] = "signin"; means["connect"] = "signin"; means["logout"] = "signout"
         means["disconnect"] = "signout"; means["enable"] = "on"; means["turnon"] = "on"; means["switchon"] = "on"
-        means["start"] = "on"; means["disable"] = "off"; means["turnoff"] = "off"; means["switchoff"] = "off"
+        means["disable"] = "off"; means["turnoff"] = "off"; means["switchoff"] = "off"
         means["docs"] = "documents"; means["summaries"] = "summary"
         opposite["on"] = "off"; opposite["off"] = "on"; opposite["signin"] = "signout"; opposite["signout"] = "signin"
         most = (length(rest) <= 4) ? 1 : 2
