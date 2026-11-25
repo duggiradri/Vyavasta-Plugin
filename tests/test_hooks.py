@@ -4833,3 +4833,40 @@ def test_help_the_readme_and_the_skills_say_what_codex_users_need_and_the_other_
     for text in (codex_help, claude_help, readme, codex_skill, guide):
         assert "vyavasta login" in text and "vyavasta turn on" in text
     assert "answered at once with no turn of Claude" in claude_help and "answers at once, with no turn of Claude" in readme
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_the_plugins_guidance_given_late_still_fits_with_a_full_inbox_and_a_long_check(run, fake, repo, tool):
+    """The heaviest answer a message gets: the session began with the project off, so the plugin's guidance comes with
+    the first message after “vyavasta on”, beside what the check found and a full inbox. It fits what the tool passes
+    on, and the guidance comes first."""
+    signed_in(run, fake)
+    run("off", cwd=repo)
+    start(run, repo, tool, "s-late")
+    prompt(run, repo, "vyavasta on", session="s-late", tool=tool)
+    many = [{"n": n, "message_id": f"pm_{n}", "from": {"name": "Priya Raman"}, "kind": "message",
+             "text": LONG_WORDS * 40, "answer": LONG_WORDS * 40, "at": "x", "at_said": "23 Nov, 09:00"}
+            for n in range(1, 51)]
+    fake.extra["/check"] = {"inbox": {"items": many, "count": 62, "more": 12}}
+    said = prompt(run, repo, "Fix the rounding", session="s-late", tool=tool)
+    told = said["hookSpecificOutput"]["additionalContext"]
+    print(f"[sizes] {tool}: line {len(said['systemMessage'])}, context {len(told)} characters, {len(told.encode())} bytes")
+    if tool is None:
+        assert told.startswith("Vyavasta is connected for this developer.")
+    fits(said, tool)
+    assert told.count("\n── ") >= 2 and told.endswith("Answer with “vyavasta reply <number>: <your words>”.")
+    # With a check that found much more, what arrived no longer fits beside it: the developer still reads it under
+    # the line, and the tool's model is told only that it came.
+    fake.check = {**fake.check, "context": "Vyavasta checked this request against the team’s record. " * 120}
+    prompt(run, repo, "vyavasta off", session="s-late2", tool=tool)
+    start(run, repo, tool, "s-late2")
+    prompt(run, repo, "vyavasta on", session="s-late2", tool=tool)
+    said = prompt(run, repo, "Fix the rounding", session="s-late2", tool=tool)
+    fits(said, tool)
+    told = said["hookSpecificOutput"]["additionalContext"]
+    assert "There is no room for them here: when the developer asks about them, tell them to send “vyavasta inbox”." \
+        in told or told.endswith("[Cut here: the rest of what Vyavasta found is longer than "
+                                 f"{NAMED[tool]} takes from a plugin at once.]")
+    assert "── 1. From" not in told and "── 1. From Priya Raman" in said["systemMessage"]
+    if tool is None:
+        assert told.startswith("Vyavasta is connected for this developer.")

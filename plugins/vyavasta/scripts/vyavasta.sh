@@ -2520,7 +2520,12 @@ keep_this() {
 }
 
 # Prints what a message's hook answers: a block with its reason, or the one line and what the model is given. The
-# line carries what summaries do when it is the first to tell it.
+# line carries what summaries do when it is the first to tell it. What the model is given stays within CONTEXT_BYTES
+# where the plugin can see to it: Claude Code passes on 10,000 characters of a field whole, and Codex about 10,000
+# bytes of context (2,500 of its tokens); past that each gives a short preview. (Bytes, as the whole script counts
+# them: never fewer than characters.)
+CONTEXT_BYTES=9000
+CONTEXT_CUT="[Cut here: the rest of what Vyavasta found is longer than ${TOOL} takes from a plugin at once.]"
 emit() {
   [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${CUT_NOTE:-}${SUMMARIES_NOTE:-}"
   # (A line after a check gave the session's whole account: its later lines are short.)
@@ -2542,9 +2547,21 @@ emit() {
   [ -n "$plugin_said" ] && OUT_CONTEXT="$plugin_said${OUT_CONTEXT:+
 
 $OUT_CONTEXT}"
+  # (What arrived goes in whole only while all of it stays within CONTEXT_BYTES; past that, the tool's model is told
+  # only that messages came, which the developer reads under the line in any case.)
+  if [ -n "${ARRIVED_CONTEXT:-}" ] && [ $(( ${#OUT_CONTEXT} + ${#ARRIVED_CONTEXT} )) -gt "$CONTEXT_BYTES" ]; then
+    ARRIVED_CONTEXT="While the developer worked, their teammates sent them messages through Vyavasta, which they read under their message’s line. There is no room for them here: when the developer asks about them, tell them to send “vyavasta inbox”."
+  fi
   [ -n "${ARRIVED_CONTEXT:-}" ] && OUT_CONTEXT="${OUT_CONTEXT:+$OUT_CONTEXT
 
 }$ARRIVED_CONTEXT"
+  # (And should what Vyavasta found be longer still, it is cut where a character ends, the plugin's own instructions
+  # first, so that the tool passes on all that is given rather than a preview of it.)
+  if [ "${#OUT_CONTEXT}" -gt "$CONTEXT_BYTES" ]; then
+    OUT_CONTEXT=$(printf '%s' "$OUT_CONTEXT" | LC_ALL=C awk -v MOST="$CONTEXT_BYTES" -v NOTE="$CONTEXT_CUT" "$WORDS_AWK"'
+      BEGIN { RS = "\001" }
+      NR == 1 { printf "%s\n%s", headpart($0, MOST - length(NOTE) - 1), NOTE }')
+  fi
   if [ -n "$OUT_REASON" ]; then
     if [ -n "$OUT_LINE" ]; then
       printf '{"systemMessage":%s,"decision":"block","reason":%s}\n' "$(json_quote "$OUT_LINE")" "$(json_quote "$OUT_REASON")"
