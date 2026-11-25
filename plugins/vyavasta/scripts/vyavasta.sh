@@ -2021,7 +2021,7 @@ $WHATS_NEW
   [ -n "$again" ] && [ -z "$CONNECTED" ] && quiet=1
   if [ -n "$quiet" ]; then
     STATUS=200
-    checks=$(sed -n "s#^$SERVER ##p" "$HOME_DIR/checks" | sed -n '1p')
+    checks=$(kept_checks)
   else
     # (A server that can sends what teammates sent the developer with this answer, as /inbox?told=1 would: one call
     # less. An older one sends none, and /inbox is asked below.)
@@ -2030,7 +2030,6 @@ $WHATS_NEW
     checks=$(answer checks)
     # (An answer that isn't Vyavasta's, such as a page in between, names nobody: it is no sign-in.)
     [ "$STATUS" != "200" ] || [ -n "$(answer email)" ] || STATUS=unread
-    [ "$STATUS" != "200" ] || { mkdir -p "$HOME_DIR" && printf '%s %s\n' "$SERVER" "$checks" > "$HOME_DIR/checks"; }
   fi
   case "$STATUS" in
     200)
@@ -2154,12 +2153,17 @@ reach_said() {
   fi
 }
 
-# What /me said that is kept: the limits on shared changes, and whether code sharing was turned off in the web app
-# for this project's repository (SHARING_ENDED). Leaves the workspace in $TMP/workspace.
+# Whether this server checks requests, as its last answer to /me said (`remember_me` keeps it by the server's address):
+# for the guidance the tool's model is given where no /me is asked, in a session that goes on and in one given it
+# after its start (`guidance_said`). Nothing when it isn't known, which is taken as checking.
+kept_checks() { [ -f "$HOME_DIR/checks" ] && awk -v at="$SERVER" '$1 == at { print $2; exit }' "$HOME_DIR/checks"; }
+
+# What /me said that is kept: the limits on shared changes, whether the server checks requests (`kept_checks`), and
+# whether code sharing was turned off in the web app for this project's repository (SHARING_ENDED). Leaves the
+# workspace in $TMP/workspace.
 remember_me() {
   json_get "$TMP/answer" workspace > "$TMP/workspace"
-  # (Whether the server checks requests, for the guidance a session is given after its start: `guidance_said`.)
-  mkdir -p "$HOME_DIR" && answer checks > "$HOME_DIR/checks"
+  mkdir -p "$HOME_DIR" && printf '%s %s\n' "$SERVER" "$(answer checks)" > "$HOME_DIR/checks"
   json_get "$TMP/answer" limits > "$TMP/limits"
   me_lines=$(json_get "$TMP/limits" change_lines); me_bytes=$(json_get "$TMP/limits" change_bytes)
   if [ -n "$me_lines" ] || [ -n "$me_bytes" ]; then
@@ -2803,8 +2807,7 @@ handle_message() {
   # A session that began without the plugin's guidance for the tool's model (the project was off then, or the computer
   # signed out) is given it with the first message that goes on to the model.
   if [ -f "$dir/unguided" ]; then
-    checks=""; [ -f "$HOME_DIR/checks" ] && checks=$(cat "$HOME_DIR/checks")
-    SESSION_GUIDE=$(guidance_said "$checks")
+    SESSION_GUIDE=$(guidance_said "$(kept_checks)")
   fi
   # What teammates sent the developer since they were last told comes with the check, each once: they read it under
   # the message's line, and the tool's model is given it to open its reply with.

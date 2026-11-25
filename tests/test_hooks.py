@@ -5379,6 +5379,25 @@ def test_a_session_that_goes_on_keeps_its_turn_and_tells_the_model_again_without
     assert turn["body"]["reply"] == "Done, after the compaction."
 
 
+def test_guidance_given_without_asking_the_server_says_what_it_last_said_of_its_checks(run, fake, repo):
+    """A session that goes on is told again, and one that began while the project was off is told after “vyavasta on”,
+    what the server's last answer said of its checks: a server that checks no request is never said to check one."""
+    unchecked = "this Vyavasta server checks no request"
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/me"] = {"checks": False}
+    first = output(run("hook", "session-start", stdin=event("SessionStart", repo, source="startup"), cwd=repo))
+    assert unchecked in first["hookSpecificOutput"]["additionalContext"]
+    again = output(run("hook", "session-start", stdin=event("SessionStart", repo, source="resume"), cwd=repo))
+    assert again["hookSpecificOutput"] == first["hookSpecificOutput"]
+    run("off", cwd=repo)
+    start(run, repo, None, "s-late")
+    prompt(run, repo, "vyavasta on", session="s-late")
+    told = prompt(run, repo, "Fix the rounding", session="s-late")["hookSpecificOutput"]["additionalContext"]
+    assert told.startswith("Vyavasta is connected for this developer.") and unchecked in told
+    assert "checked against the record before it reaches you" not in told
+
+
 def test_a_newer_server_takes_the_report_the_question_the_inbox_and_the_reply_in_fewer_calls(run, fake, repo):
     signed_in(run, fake)
     switched_on(run, fake, repo)
