@@ -45,7 +45,7 @@ git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # plain sentence instead.
 [ -n "${VYAVASTA_DEBUG:-}" ] || exec 2>/dev/null
 
-VERSION="0.5.6"
+VERSION="0.6.0"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTA_TOOL=codex). The tool's own name,

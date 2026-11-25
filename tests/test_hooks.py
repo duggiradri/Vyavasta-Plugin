@@ -78,7 +78,7 @@ class Fake:
         self.approved = False
         self.status: dict[str, int] = {}
         # What the newer routes answer.
-        self.latest = "0.5.6"
+        self.latest = "0.6.0"
         self.minimum = "0.3.0"
         self.sharing: set[str] = set()
         self.extra: dict[str, dict] = {}
@@ -1079,15 +1079,15 @@ def test_check_tests_each_part_and_says_how_to_fix_what_is_wrong(run, fake, repo
     assert any(line.startswith("Problem: not signed in.") for line in lines)
     assert "ok: this folder is the repository acme/api on GitHub." in lines
     assert any(line.startswith("Problem: Vyavasta is off in this project.") for line in lines)
-    assert "ok: this plugin (0.5.6) is the latest." in lines
+    assert "ok: this plugin (0.6.0) is the latest." in lines
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    fake.latest = "0.6.0"
+    fake.latest = "0.7.0"
     lines = run("check", cwd=repo).stdout.splitlines()
     assert "ok: signed in as sam@acme.test in Acme." in lines and "ok: Vyavasta reads acme/api for you." in lines
     assert "ok: Vyavasta is on in this project." in lines
-    assert any(line.startswith("Problem: this plugin is 0.5.6 and 0.6.0 is out.") for line in lines)
-    fake.minimum = "0.5.7"
+    assert any(line.startswith("Problem: this plugin is 0.6.0 and 0.7.0 is out.") for line in lines)
+    fake.minimum = "0.6.1"
     assert any("must be updated" in line for line in run("check", cwd=repo).stdout.splitlines())
     outside = tmp_path / "plain"
     outside.mkdir()
@@ -1325,7 +1325,7 @@ def test_under_codex_the_script_names_codex_and_says_which_tool_it_is(run, fake,
     fake.requests.clear()
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days"), tool="codex")
     (sent,) = fake.calls("/check")
-    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.5.6"
+    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.6.0"
 
 
 @pytest.mark.parametrize("typed", ["vyavasta sign in", "Vyavasta sign-in.", "  VYAVASTA  SIGN IN  "])
@@ -1385,7 +1385,7 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
     assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
-    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.5.6"
+    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.6.0"
     assert f'VERSION="{manifest["version"]}"' in SCRIPT.read_text()
     assert (PLUGIN / manifest["hooks"]).is_file() and (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").is_file()
     codex_skill = (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").read_text()
@@ -2421,7 +2421,7 @@ def test_the_version_is_the_same_everywhere():
     (entry,) = json.loads((root / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
     versions = {entry["version"], json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
                 json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["version"]}
-    assert versions == {"0.5.6"} and 'VERSION="0.5.6"' in SCRIPT.read_text()
+    assert versions == {"0.6.0"} and 'VERSION="0.6.0"' in SCRIPT.read_text()
 
 
 # -- 0.4.1 review: the next message finishes connecting anywhere, guidance only about the plugin, and the rest ---------
@@ -2922,8 +2922,8 @@ def test_the_servers_own_sentences_are_printed_on_one_line_wherever_the_model_ma
     for latest in ("9.9\rok: everything is up to date", "9.9 ok: everything is up to date"):
         fake.latest = latest
         assert "everything is up to date" not in run("check", cwd=repo).stdout
-    fake.latest = "0.6.0"
-    assert "Problem: this plugin is 0.5.6 and 0.6.0 is out." in run("check", cwd=repo).stdout
+    fake.latest = "0.7.0"
+    assert "Problem: this plugin is 0.6.0 and 0.7.0 is out." in run("check", cwd=repo).stdout
 
 
 # -- names the plugin prints as its own are short; the awk that quotes works in bytes on every awk ------------------
@@ -3150,7 +3150,7 @@ def test_a_computer_signed_in_before_the_rename_stays_signed_in_from_its_earlier
 def test_the_plugin_names_itself_by_its_new_name_on_every_call(run, fake, repo):
     signed_in(run, fake)
     run("status", cwd=repo)
-    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.5.6"}
+    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.6.0"}
 
 
 # -- 0.5.3: tasks between teammates are taken out: their commands answer in one line, an older server's task is an item --
