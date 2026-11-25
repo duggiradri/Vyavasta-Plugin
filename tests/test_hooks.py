@@ -718,7 +718,11 @@ def test_a_repository_with_no_github_copy_and_one_not_read_each_say_so(run, fake
     git(local, "init", "-q")
     switched_on(run, fake, local)
     fake.check = {"verdict": "not_connected", "hold": False, "notice": "", "context": ""}
-    assert "has no copy on GitHub" in prompt(run, local, "Change it", cwd=local)["systemMessage"]
+    # (A session's start and a message's line call it the same: a repository.)
+    started = output(run("hook", "session-start", stdin=event("SessionStart", local), cwd=local))["systemMessage"]
+    assert "This repository has no copy on GitHub, so requests here aren’t checked" in started
+    assert "This repository has no copy on GitHub, so nothing was checked." in prompt(run, local, "Change it",
+                                                                                     cwd=local)["systemMessage"]
     git(local, "remote", "add", "origin", "https://github.com/acme/other.git")
     fake.check = {"verdict": "not_connected", "hold": False, "context": "",
                   "notice": "Not checked: Vyavasta doesn’t read acme/other for you, so nothing was checked or shared."}
@@ -5354,6 +5358,11 @@ def test_a_long_message_of_which_nothing_was_sent_is_never_said_to_be_sent_in_pa
     (run.home / "offline").unlink(missing_ok=True)
     said = prompt(run, repo, pasted, session="s-in")["systemMessage"]
     assert said.endswith(" Only the first 40,000 characters of your message were sent: Vyavasta takes no more.")
+    # On a session's later, short line too, after a part closed with a full stop of its own.
+    fake.check = {"verdict": "not_a_change", "hold": False, "notice": "", "context": ""}
+    said = prompt(run, repo, pasted, session="s-in")["systemMessage"]
+    assert said.endswith(" · nothing to check. Only the first 40,000 characters of your message were sent: Vyavasta "
+                         "takes no more.")
 
 
 def test_inside_codexs_sandbox_nothing_is_learnt_of_the_server(run, fake, repo):

@@ -2992,7 +2992,7 @@ handle_message() {
       not_connected)
         if [ -n "$NOGIT" ]; then outcome="Vyavasta needs git, which isn’t installed here, so nothing was checked. Questions about your team are still answered here."
         elif [ -z "$ROOT" ]; then outcome="This folder isn’t a git repository, so nothing was checked. Questions about your team are still answered here."
-        elif [ -z "$REMOTE" ]; then outcome="This folder has no copy on GitHub, so nothing was checked. Questions about your team are still answered here."
+        elif [ -z "$REMOTE" ]; then outcome="This repository has no copy on GitHub, so nothing was checked. Questions about your team are still answered here."
         else outcome="${notice:-Vyavasta doesn’t read this repository for you, so nothing was checked.}"; fi ;;
       *) outcome="${notice:-Checked against your team’s record.}" ;;
     esac
@@ -3045,6 +3045,12 @@ keep_this() {
   return 0
 }
 
+# A line and a sentence after it ($2, which starts with a space): the line's last part closed with a full stop first
+# where it has no closing mark of its own (a short line's “nothing to check”).
+then_said() {
+  case "$1" in *[.!?]|*[.!?]”) printf '%s%s' "$1" "$2" ;; *) printf '%s.%s' "$1" "$2" ;; esac
+}
+
 # Prints what a message's hook answers: a block with its reason, or the one line and what the model is given. The
 # line carries what summaries do when it is the first to tell it. What the model is given stays within CONTEXT_BYTES
 # where the plugin can see to it: Claude Code passes on 10,000 characters of a field whole, and Codex about 10,000
@@ -3054,8 +3060,8 @@ CONTEXT_BYTES=9000
 CONTEXT_CUT="[Cut here: the rest of what Vyavasta found is longer than ${TOOL} takes from a plugin at once.]"
 emit() {
   # (That a message was cut to what Vyavasta takes is said where it was sent, never on a line that says nothing was.)
-  case "$OUT_LINE" in ""|"$NOTHING_SENT ("*) ;; *) OUT_LINE="$OUT_LINE${CUT_NOTE:-}" ;; esac
-  [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${SUMMARIES_NOTE:-}"
+  case "$OUT_LINE" in ""|"$NOTHING_SENT ("*) ;; *) [ -z "${CUT_NOTE:-}" ] || OUT_LINE=$(then_said "$OUT_LINE" "$CUT_NOTE") ;; esac
+  [ -n "$OUT_LINE" ] && [ -n "${SUMMARIES_NOTE:-}" ] && OUT_LINE=$(then_said "$OUT_LINE" "$SUMMARIES_NOTE")
   # (A line after a check gave the session's whole account: its later lines are short.)
   [ -n "$OUT_LINE" ] && [ -n "${LINE_MARK:-}" ] && true > "$LINE_MARK"
   # What arrived from teammates is read under the line, whatever came of the message itself.
