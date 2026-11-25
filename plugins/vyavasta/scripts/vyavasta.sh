@@ -1761,7 +1761,8 @@ line() {
 }
 
 # The same line when nothing at all was sent: why, in a few words, and what came of it.
-nothing_line() { printf 'Vyavasta · nothing sent (%s) · %s' "$1" "$2"; }
+NOTHING_SENT="Vyavasta · nothing sent"
+nothing_line() { printf '%s (%s) · %s' "$NOTHING_SENT" "$1" "$2"; }
 
 # How the tool's model sends a teammate a message for the developer: the command (this script, by its full path, as
 # it is now), when to run it, in which words, and what comes of it. The message stands on lines of its own, taken as
@@ -2972,7 +2973,9 @@ keep_this() {
 CONTEXT_BYTES=9000
 CONTEXT_CUT="[Cut here: the rest of what Vyavasta found is longer than ${TOOL} takes from a plugin at once.]"
 emit() {
-  [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${CUT_NOTE:-}${SUMMARIES_NOTE:-}"
+  # (That a message was cut to what Vyavasta takes is said where it was sent, never on a line that says nothing was.)
+  case "$OUT_LINE" in ""|"$NOTHING_SENT ("*) ;; *) OUT_LINE="$OUT_LINE${CUT_NOTE:-}" ;; esac
+  [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${SUMMARIES_NOTE:-}"
   # (A line after a check gave the session's whole account: its later lines are short.)
   [ -n "$OUT_LINE" ] && [ -n "${LINE_MARK:-}" ] && true > "$LINE_MARK"
   # What arrived from teammates is read under the line, whatever came of the message itself.

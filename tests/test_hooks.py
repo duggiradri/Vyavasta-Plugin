@@ -5192,6 +5192,27 @@ def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_w
     assert output(second) == output(first) and second.seconds < 2
 
 
+def test_a_long_message_of_which_nothing_was_sent_is_never_said_to_be_sent_in_part(run, fake, repo):
+    """A message cut to what Vyavasta takes says so only on a line that says what was sent: out of reach, or signed
+    out, nothing of it was."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    pasted = "a pasted log line\n" * 2500
+    closed = closed_port()
+    (run.home / "credentials").write_text(f"server=http://127.0.0.1:{closed}\ntoken={TOKEN}\n")
+    said = prompt(run, repo, pasted, server=f"http://127.0.0.1:{closed}")["systemMessage"]
+    assert said == ("Vyavasta · nothing sent (Vyavasta’s server can’t be reached) · Claude works as usual, and "
+                    "Vyavasta is tried again in a minute.")
+    (run.home / "credentials").unlink()
+    said = prompt(run, repo, pasted, session="s-out")["systemMessage"]
+    assert said.startswith("Vyavasta · nothing sent (you aren’t signed in) · ") and "were sent" not in said
+    # Sent, it says so.
+    signed_in(run, fake)
+    (run.home / "offline").unlink(missing_ok=True)
+    said = prompt(run, repo, pasted, session="s-in")["systemMessage"]
+    assert said.endswith(" Only the first 40,000 characters of your message were sent: Vyavasta takes no more.")
+
+
 def test_inside_codexs_sandbox_nothing_is_learnt_of_the_server(run, fake, repo):
     """The network is off there by design: a command the model runs inside it never makes the next messages skip
     Vyavasta."""
