@@ -2182,7 +2182,10 @@ $(arrived_context "$listing" "While the developer was away" "your first reply in
     held) say "${BANNER}Vyavasta: $(away_now_said), so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     401) say "${BANNER}Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
     429) say "${BANNER}Vyavasta: $(busy_said "the server"), so requests aren’t checked for a moment. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
-    5*) say "${BANNER}Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
+    # (A server that is restarting, as during a deploy, says so in its code: it is back within seconds.)
+    5*)
+      if [ "$(refusal_code)" = "restarting" ]; then say "${BANNER}Vyavasta: the server is restarting just now. ${AGENT} works as usual, and Vyavasta is tried again with your next message.$SUMMARIES_NOTE"
+      else say "${BANNER}Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE"; fi ;;
     unread) say "${BANNER}Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     *)
       # (A server that took the call and answered too late is still asked with the next message, the quick question
@@ -2897,9 +2900,13 @@ handle_message() {
       fi
       emit; return ;;
     5*)
-      # (It reached the server, which failed. An error from a server that answers is no reason to stop trying: the next
-      # message tries again.)
-      OUT_LINE=$(line "your message" "" "Vyavasta’s server isn’t working right now, so it wasn’t checked. ${AGENT} works as usual, and Vyavasta is tried again with your next message.")
+      # (It reached the server, which failed, or is restarting, as during a deploy, which its code says. An error from
+      # a server that answers is no reason to stop trying: the next message tries again.)
+      if [ "$(refusal_code)" = "restarting" ]; then
+        OUT_LINE=$(line "your message" "" "Vyavasta is restarting, so it wasn’t checked. ${AGENT} works as usual, and Vyavasta is tried again with your next message.")
+      else
+        OUT_LINE=$(line "your message" "" "Vyavasta’s server isn’t working right now, so it wasn’t checked. ${AGENT} works as usual, and Vyavasta is tried again with your next message.")
+      fi
       emit; return ;;
     # (Refused for what was sent, such as a branch name longer than the server takes: it would be refused again.)
     4*)
@@ -3454,7 +3461,9 @@ not_reached() {
       elif [ -n "$SLOW" ]; then echo "Vyavasta took too long to answer. Try again in a moment."
       elif [ "$CLIENT" = "codex" ] && [ -z "${IN_HOOK:-}" ]; then echo "Vyavasta can’t be reached from here. Codex runs the commands its model starts in a closed-off space that can’t reach the internet: send it as a message instead, such as “vyavasta status”."
       else echo "Vyavasta’s server can’t be reached right now. Check your internet connection, or try again in a minute."; fi ;;
-    5*) echo "Vyavasta’s server isn’t working right now. Try again in a minute." ;;
+    5*)
+      if [ "$(refusal_code)" = "restarting" ]; then echo "Vyavasta is restarting. Try again in a moment."
+      else echo "Vyavasta’s server isn’t working right now. Try again in a minute."; fi ;;
     # (A refusal of what was sent, in the server's words for a program, such as “Check words: …”: never shown.)
     422) echo "Vyavasta couldn’t take that as it was sent, so nothing was done. Something in it is longer than Vyavasta takes." ;;
     *) said=$(refusal); echo "${said:-Vyavasta couldn’t do that just now. Try again in a minute.}" ;;
@@ -4544,14 +4553,24 @@ command_ask_assistant() {
       # Out of reach at once, under Codex: inside its sandbox, which Codex says of a command it runs there
       # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so, and both
       # are said. (That the session's network is off, CODEX_SANDBOX_NETWORK_DISABLED, Codex says of every command,
-      # of one it runs outside the sandbox too: seen in Codex 0.171. It is never taken for the sandbox.)
+      # of one it runs outside the sandbox too: seen in Codex 0.171. It is never taken for the sandbox.) A question
+      # that went out and got no answer in time is told as that. One that was never sent, because the quick question
+      # asked first went unanswered, is told as nothing asked.
       if [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ] && [ -n "${CODEX_SANDBOX:-}" ]; then
         boxed_said "the network is switched off"
       elif [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ]; then
         echo "Vyavasta could not be reached from this command, so nothing was asked. If it ran inside Codex’s sandbox, run the same command again outside the sandbox, asking for escalated permissions for it. If it ran outside, Vyavasta’s server is out of reach right now."
+      elif [ -n "$SLOW" ] && [ -n "$WENT" ]; then
+        echo "Vyavasta didn’t answer in time, so there is no answer this time."
+      elif [ -n "$SLOW" ]; then
+        echo "Vyavasta’s server isn’t answering right now, so nothing was asked."
       else
         echo "Vyavasta can’t be reached right now, so nothing was asked."
       fi ;;
+    # (It reached the server, which failed, or is restarting, as during a deploy, which its code says.)
+    5*)
+      if [ "$(refusal_code)" = "restarting" ]; then echo "Vyavasta is restarting, so nothing was asked. Ask again in a moment."
+      else echo "Vyavasta’s server isn’t working right now, so nothing was asked."; fi ;;
     *) echo "Vyavasta can’t be reached right now, so nothing was asked." ;;
   esac
 }

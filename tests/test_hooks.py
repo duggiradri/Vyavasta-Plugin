@@ -5431,6 +5431,64 @@ def test_a_kept_reply_a_slow_server_does_not_take_in_time_holds_up_no_message_af
     assert turns[2]["body"]["reply"] == "Priya is on billing." and unsent(run) == []
 
 
+def test_a_server_restarting_for_a_deploy_says_so_everywhere_and_is_tried_again(run, fake, repo):
+    """During a deploy the server answers 503 with the code `restarting`: each place says Vyavasta is restarting, never
+    that it isn't working or can't be reached, and nothing stops trying it. Any other failure of a server that answers
+    is said to be that, never out of reach."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.refused = "Vyavasta is restarting. Send it again in a moment."
+    fake.code = {route: "restarting" for route in ("/me", "/check", "/inbox", "/ask", "/tell")}
+    fake.status = {"/me": 503}
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert started == ("Vyavasta: the server is restarting just now. Claude works as usual, and Vyavasta is tried "
+                       "again with your next message.")
+    fake.status = {"/check": 503}
+    for tool, agent in ((None, "Claude"), ("codex", "Codex")):
+        assert prompt(run, repo, "Change calc.py", tool=tool)["systemMessage"].endswith(
+            f" · Vyavasta is restarting, so it wasn’t checked. {agent} works as usual, and Vyavasta is tried again with "
+            "your next message.")
+    fake.status = {"/inbox": 503}
+    assert run("inbox", cwd=repo).stdout == "Vyavasta is restarting. Try again in a moment.\n"
+    fake.status = {"/tell": 503}
+    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == "Vyavasta is restarting. Try again in a moment.\n"
+    fake.status = {"/ask": 503}
+    for tool in (None, "codex"):
+        assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
+            "Vyavasta is restarting, so nothing was asked. Ask again in a moment.\n")
+    assert not any((run.home / marker).exists() for marker in ("slow", "unanswered", "offline"))
+    # Any other failure: the server isn't working, and was reached.
+    fake.code = {}
+    for tool in (None, "codex"):
+        assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
+            "Vyavasta’s server isn’t working right now, so nothing was asked.\n")
+    fake.status = {"/check": 503}
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
+        " · Vyavasta’s server isn’t working right now, so it wasn’t checked. Claude works as usual, and Vyavasta is "
+        "tried again with your next message.")
+    # Back: the next message is checked.
+    fake.status = {}
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
+
+
+def test_a_question_the_server_answers_too_late_is_said_to_be_that_never_out_of_reach(run, fake, repo, tmp_path):
+    """The model's question went out and no answer came in time: it is told that Vyavasta didn't answer in time. Held
+    back because the quick question asked first went unanswered, it is told that nothing was asked."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    # (The question's 55 seconds run out in 2 here.)
+    path, _ = curl_runs(tmp_path, {55: 2})
+    fake.delay["/ask"] = 5
+    for tool in (None, "codex"):
+        done = run("ask", "Who owns billing?", cwd=repo, tool=tool, extra={"PATH": path})
+        assert done.stdout == "Vyavasta didn’t answer in time, so there is no answer this time.\n"
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    fake.delay["/hello"] = 6
+    done = run("ask", "Who owns billing?", cwd=repo, extra={"PATH": path})
+    assert done.stdout == "Vyavasta’s server isn’t answering right now, so nothing was asked.\n"
+    assert (run.home / "unanswered").exists()
+
+
 def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
     """Packets dropped on the way (a captive portal, a firewall, a VPN that isn't up): the connection times out with
     nothing sent. The next minute's messages don't wait for it again."""
