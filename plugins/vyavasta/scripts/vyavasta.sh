@@ -215,10 +215,13 @@ OFFLINE_FOR=60
 SLOW_FOR=600
 PROBE_SECONDS=4
 # A reply or a work report that couldn't be sent is kept for this long at most (the server knows a request_id for an
-# hour), at most this many at once, and goes along with a later call, which waits this long for it at most.
+# hour), at most this many at once, and goes along with a later call, which waits this long for it at most. One that
+# went along and was answered nothing in time holds every kept call back for RIDE_AFTER seconds, so that a server slow
+# to take them never holds up one message after another.
 UNSENT_FOR=3000
 UNSENT_MOST=10
 RIDE_SECONDS=4
+RIDE_AFTER=60
 # How much of the uncommitted changes is sent at most, unless the server says otherwise, and the longest line.
 CHANGE_LINES=5000
 CHANGE_BYTES=600000
@@ -1018,7 +1021,10 @@ api() {
       # (Answered on this connection a moment before: this call went out on it.)
       went=1
     fi
-    [ -z "$ride_status" ] || code=0
+    # (When the call that went along was made, curl's code is that call's, and is kept for it: this call's own line
+    # says how this one went.)
+    ride_code=""
+    [ -z "$ride_status" ] || { ride_code=$code; code=0; }
     # Whether the request went out: curl got as far as sending it (its time to that moment is above zero).
     case "$went" in *[1-9]*) went=1 ;; *) went="" ;; esac
     # The connection broke after the request went out: a call the server takes only once (it carries a request_id,
@@ -1053,7 +1059,7 @@ api() {
       *) rm -f "$HOME_DIR/offline" "$HOME_DIR/slow" "$HOME_DIR/unanswered" ;;
     esac
   fi
-  [ -z "$ride" ] || [ -z "$ride_status" ] || ride_settled "$ride_status"
+  [ -z "$ride" ] || [ -z "$ride_status" ] || ride_settled "$ride_status" "$ride_code"
   if [ "$STATUS" = "401" ] && [ -n "${TOKEN:-}" ]; then
     if from_vyavasta; then
       # The connection ended (disconnected on the web app’s Coding tools page, or run out): this computer is signed
@@ -1128,11 +1134,14 @@ keep_unsent() {
 
 # Picks the oldest kept call that may go along with the next one (RIDE, its body's file, and RIDE_PATH, its route),
 # once in a hook; a session's work report never goes with a report of that same session ($1), which is newer. Calls
-# kept too long, for a project that is off, or for a reply where summaries are off now, are given up.
+# kept too long, for a project that is off, or for a reply where summaries are off now, are given up. None is picked
+# before the time in `after`, when a kept call that went along was answered nothing in time (`ride_settled`).
 pick_ride() {
   RIDE=""; RIDE_PATH=""; RIDE_KEPT=""
   [ -z "${RODE:-}" ] && [ -d "$UNSENT" ] || return 0
   RODE=1
+  after=$(cat "$UNSENT/after" 2>/dev/null)
+  case "$after" in ''|*[!0-9]*) ;; *) [ "$(now)" -ge "$after" ] || return 0 ;; esac
   for about in "$UNSENT"/*.about; do
     [ -f "$about" ] || continue
     kept=${about%.about}
@@ -1152,11 +1161,15 @@ pick_ride() {
   done
 }
 
-# What came of a kept call that went along ($1, its status): taken, or refused for good (it could never be taken), it
-# is done; otherwise it waits for the next.
+# What came of a kept call that went along ($1, its status, and $2, curl's code for it): taken, or refused for good (it
+# could never be taken), it is done; otherwise it waits for a later call. One answered nothing in time (the server may
+# be slow to take it just now, such as a turn's end under load) holds every kept call back for RIDE_AFTER seconds
+# (`after`): the messages in that time go without one, and are never held up by it. It goes along again after that,
+# and a reply the server took already is known by its request_id and kept once.
 ride_settled() {
   case "$1" in
     2*|400|401|403|404|409|410|413|422) rm -f "$RIDE_KEPT.json" "$RIDE_KEPT.about" ;;
+    000) [ "${2:-}" != "28" ] || echo $(( $(now) + RIDE_AFTER )) > "$UNSENT/after" ;;
   esac
 }
 

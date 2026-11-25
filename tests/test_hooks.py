@@ -5375,6 +5375,35 @@ def test_vyavasta_check_whose_own_quick_question_goes_unanswered_starts_the_minu
     assert prompt(run, repo, "Change calc.py")["systemMessage"] == HELD_LINE and fake.requests == []
 
 
+def test_a_kept_reply_a_slow_server_does_not_take_in_time_holds_up_no_message_after_it(run, fake, repo):
+    """A reply kept from a turn's end the server answered too late goes along with the next message. When the server
+    is slow to take it again, no kept call goes along for a minute: the messages in that minute go without it and are
+    never held up by it. After the minute it goes again, by the same request_id, so the server keeps it once."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "What is Priya working on?")
+    fake.delay["/turn"] = 6
+    assert stop(run, repo, last_assistant_message="Priya is on billing.").stdout == ""
+    (kept,) = unsent(run)
+    # The next message is checked, and the reply that goes along after it runs out, after 4 seconds at most.
+    first = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change number 2"), cwd=repo)
+    assert output(first)["systemMessage"].endswith(fake.check["notice"]) and first.seconds < 6.5
+    assert len(fake.calls("/turn")) == 2 and unsent(run) == [kept]
+    assert int((run.home / "unsent" / "after").read_text()) >= time.time() + 50
+    # The minute after it: each message goes alone, checked, and waits for nothing.
+    for text in ("Change number 3", "Change number 4"):
+        done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt=text), cwd=repo)
+        assert output(done)["systemMessage"].endswith(fake.check["notice"]) and done.seconds < 2
+    assert len(fake.calls("/turn")) == 2 and unsent(run) == [kept]
+    # After the minute it goes along again, by the same request_id, and is taken.
+    del fake.delay["/turn"]
+    (run.home / "unsent" / "after").write_text(f"{int(time.time()) - 1}\n")
+    prompt(run, repo, "Change number 5")
+    turns = fake.calls("/turn")
+    assert len(turns) == 3 and len({turn["body"]["request_id"] for turn in turns}) == 1
+    assert turns[2]["body"]["reply"] == "Priya is on billing." and unsent(run) == []
+
+
 def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
     """Packets dropped on the way (a captive portal, a firewall, a VPN that isn't up): the connection times out with
     nothing sent. The next minute's messages don't wait for it again."""
