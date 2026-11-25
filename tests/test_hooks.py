@@ -100,6 +100,12 @@ class Fake:
         self.refused = "Refused."
         # Seconds a route takes to answer.
         self.delay: dict[str, float] = {}
+        # Routes whose next calls are taken and dropped with no answer at all, and routes that answer with a page that
+        # isn't Vyavasta's (status, bytes).
+        self.drop: dict[str, int] = {}
+        self.page: dict[str, tuple[int, bytes]] = {}
+        # Routes that answer with a redirect to another address.
+        self.redirect: dict[str, str] = {}
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -126,6 +132,25 @@ class Fake:
                                       "headers": dict(self.headers), "raw": raw, "body": body})
                 if path in fake.delay:
                     time.sleep(fake.delay[path])
+                if fake.drop.get(path):
+                    # Taken and dropped: the connection closes with no answer.
+                    fake.drop[path] -= 1
+                    self.close_connection = True
+                    return
+                if path in fake.redirect:
+                    self.send_response(307)
+                    self.send_header("Location", fake.redirect[path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if path in fake.page:
+                    status, page = fake.page[path]
+                    self.send_response(status)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(page)))
+                    self.end_headers()
+                    self.wfile.write(page)
+                    return
                 if path in fake.status:
                     return self._answer(fake.status[path], {"detail": {"code": "x", "message": fake.refused}})
                 signed = self.headers.get("Authorization") == f"Bearer {TOKEN}"
@@ -574,7 +599,11 @@ def test_a_server_that_fails_or_is_busy_is_said_in_one_plain_line(run, fake, rep
     fake.status["/check"] = 503
     said = prompt(run, repo, "Change calc.py")["systemMessage"]
     assert "isn’t working right now" in said and "503" not in said
-    (run.home / "offline").unlink()
+    assert said.endswith("Claude works as usual, and Vyavasta is tried again with your next message.")
+    # A server that answers with an error is no server out of reach: the next message tries again, and is checked.
+    assert not (run.home / "offline").exists()
+    del fake.status["/check"]
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
 
 
 def test_a_connection_ended_in_settings_signs_this_computer_out(run, fake, repo):
@@ -2409,16 +2438,27 @@ def test_a_waiting_sign_in_never_slows_or_changes_a_message_in_a_project_that_is
     assert done.stdout == "" and done.seconds < 4
     assert (run.home / "pairing").exists()
     del fake.delay["/token"]
-    # A server that fails is not asked again for a minute.
+    # A server that answers with an error is asked again with the next message (it answers at once); one out of reach
+    # is not asked again for a minute.
     fake.status["/token"] = 503
     assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
-    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 3
+    assert not (run.home / "offline").exists()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+    pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
+    (run.home / "pairing").write_text((run.home / "pairing").read_text().replace(fake.url, f"http://127.0.0.1:{closed}"))
+    for _ in range(2):
+        assert prompt(run, repo, "Change calc.py", server=f"http://127.0.0.1:{closed}") == {}
+    assert (run.home / "offline").exists()
     # A code that ran out is never asked about.
     (run.home / "offline").unlink()
     del fake.status["/token"]
+    fake.requests.clear()
     pending(run, "OLDC-ODEX", time.time() - 700, time.time() - 100)
     fake.approved = True
-    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 0
     # A command still finishes it the way it always did.
     pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
     assert "connected as sam@acme.test in Acme." in run("status", cwd=repo).stdout
@@ -4280,3 +4320,204 @@ def test_the_sign_in_says_the_guide_was_emailed_only_when_it_was(run, fake, repo
     # Signing out forgets it.
     run("sign-out", cwd=repo)
     assert not (run.home / "guide-emailed").exists()
+
+
+# -- the plugin's network, sign-in and sessions ------------------------------------------------------------------------
+
+def closed_port() -> int:
+    """A port on this computer that nothing listens on."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_curl_reads_none_of_the_developers_settings_and_follows_no_redirect(run, fake, repo, tmp_path):
+    """A ~/.curlrc with “location” would send the message on to wherever a redirect points, and its 401 would sign the
+    developer out; with “dump-header” every answer would be unreadable. None of it applies."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (tmp_path / ".curlrc").write_text("location\ndump-header = -\nverbose\n")
+    other = Fake()
+    try:
+        fake.redirect["/check"] = f"{other.url}/api/v1/plugin/check"
+        said = prompt(run, repo, "Make add subtract")["systemMessage"]
+        assert "couldn’t check it just now" in said
+        assert other.requests == [] and (run.home / "credentials").exists()
+        del fake.redirect["/check"]
+        assert prompt(run, repo, "Make add subtract")["systemMessage"].endswith(fake.check["notice"])
+    finally:
+        other.server.shutdown()
+
+
+def curl_runs(tmp_path: Path, faster: dict[int, int] | None = None) -> tuple[str, Path]:
+    """A PATH whose curl writes down, one run to a line, the routes each run of it calls, then runs the real curl with
+    each limit in ``faster`` (seconds: seconds) made shorter, as if that much time had passed. The routes only: what
+    curl is told on its input holds the token."""
+    folder = tmp_path / "curl-runs"
+    folder.mkdir(exist_ok=True)
+    runs = tmp_path / "curl-runs.txt"
+    edits = " ".join(f"-e 's/^max-time = {was}$/max-time = {now}/'" for was, now in (faster or {}).items()) or "-e ''"
+    shim = folder / "curl"
+    shim.write_text(f"""#!/bin/sh
+told=$(cat)
+printf '%s\\n' "$told" | sed -n 's#^url = "[^"]*/api/v1/plugin\\([^"?]*\\).*#\\1#p' | tr '\\n' ' ' >> "{runs}"
+echo >> "{runs}"
+printf '%s\\n' "$told" | sed {edits} | exec "{shutil.which('curl')}" "$@"
+""")
+    shim.chmod(0o755)
+    return f"{folder}{os.pathsep}{os.environ['PATH']}", runs
+
+
+def test_a_server_that_takes_requests_and_never_answers_is_asked_a_quick_question_first(run, fake, repo, tmp_path):
+    """A read timeout: the request went out and no answer came. Each long call after it is made only once the server
+    answers a quick question at once (PROBE_SECONDS), in the same run of curl; while it doesn't, nothing more is sent.
+    A short call that runs out (a session's start, a turn's end) says nothing of it: under load it is only slow."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    # (The check's 75 seconds run out in 2 here.)
+    path, runs = curl_runs(tmp_path, {75: 2})
+    fake.delay["/me"] = 6
+    done = run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, extra={"PATH": path})
+    assert done.seconds < 6 and not (run.home / "slow").exists() and not (run.home / "offline").exists()
+    assert output(done)["systemMessage"].startswith("Vyavasta: the server took too long to answer just now")
+    del fake.delay["/me"]
+    fake.delay["/check"] = 5
+    said = prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"]
+    assert said == ("Vyavasta · sent: your message. · Vyavasta took too long to answer, so it wasn’t checked this time. "
+                    "Claude works as usual.")
+    assert (run.home / "slow").exists() and not (run.home / "offline").exists()
+    # Still nothing from it, not even to the quick question: nothing more is sent, after 4 seconds at most.
+    fake.delay["/hello"] = 6
+    fake.requests.clear()
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
+               extra={"PATH": path})
+    assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
+    assert output(done)["systemMessage"] == ("Vyavasta · nothing sent (Vyavasta’s server isn’t answering right now) · "
+                                             "Claude works as usual, and Vyavasta is tried again with your next message.")
+    assert (run.home / "slow").exists()
+    # It answers again: the quick question and the check go in one run of curl, and the calls after it are as usual.
+    del fake.delay["/hello"], fake.delay["/check"]
+    fake.requests.clear()
+    runs.write_text("")
+    assert prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"].endswith(fake.check["notice"])
+    assert [call["path"] for call in fake.requests] == ["/hello", "/check"] and runs.read_text() == "/hello /check \n"
+    assert not (run.home / "slow").exists()
+    fake.requests.clear()
+    prompt(run, repo, "Change calc.py")
+    assert [call["path"] for call in fake.requests] == ["/check"]
+
+
+def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
+    """Packets dropped on the way (a captive portal, a firewall, a VPN that isn't up): the connection times out with
+    nothing sent. The next minute's messages don't wait for it again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (run.home / "credentials").write_text(f"server=https://192.0.2.1\ntoken={TOKEN}\n")
+    first = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
+                server="https://192.0.2.1")
+    assert output(first)["systemMessage"] == ("Vyavasta · nothing sent (Vyavasta’s server can’t be reached) · Claude "
+                                              "works as usual, and Vyavasta is tried again in a minute.")
+    assert first.seconds < 8 and (run.home / "offline").exists() and not (run.home / "slow").exists()
+    second = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
+                 server="https://192.0.2.1")
+    assert output(second) == output(first) and second.seconds < 2
+
+
+def test_inside_codexs_sandbox_nothing_is_learnt_of_the_server(run, fake, repo):
+    """The network is off there by design: a command the model runs inside it never makes the next messages skip
+    Vyavasta."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    closed = closed_port()
+    (run.home / "credentials").write_text(f"server=http://127.0.0.1:{closed}\ntoken={TOKEN}\n")
+    for command in (("status",), ("check",), ("ask", "Who owns billing?")):
+        run(*command, cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}", extra={"CODEX_SANDBOX": "seatbelt"})
+    assert not (run.home / "offline").exists() and not (run.home / "slow").exists()
+    run("status", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}")
+    assert (run.home / "offline").exists()
+
+
+def test_a_hook_told_to_stop_stops_at_once_and_takes_its_scratch_files_with_it(request, run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    sharing_on(run, fake, repo)
+    (repo / "calc.py").write_text(f"# {SECRET}\n")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    fake.delay["/check"] = 30
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "VYAVASTA_HOME": str(run.home),
+           "VYAVASTA_SERVER": fake.url, "TMPDIR": str(scratch)}
+    shell = request.node.callspec.params["run"]
+    hook = subprocess.Popen([shell, str(SCRIPT), "hook", "prompt"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env, cwd=repo)
+    hook.stdin.write(json.dumps(event("UserPromptSubmit", repo, prompt="Change calc.py")).encode())
+    hook.stdin.close()
+    for _ in range(100):
+        if fake.calls("/check"):
+            break
+        time.sleep(0.05)
+    folders = list(scratch.glob("vyavasta.*"))
+    assert len(folders) == 1 and folders[0].is_dir()
+    told = time.monotonic()
+    hook.terminate()
+    hook.wait(timeout=10)
+    assert time.monotonic() - told < 2 and not list(scratch.iterdir())
+    hook.stdout.close()
+    hook.stderr.close()
+
+
+def test_scratch_folders_a_killed_hook_left_are_removed_when_a_session_starts(run, fake, repo, tmp_path):
+    scratch = tmp_path / "scratch"
+    (scratch / "vyavasta.abc123").mkdir(parents=True)
+    (scratch / "vyavasta.abc123" / "check").write_text("the developer's words")
+    (scratch / "vyavasta.def456").mkdir()
+    (scratch / "someone-else.ghi789").mkdir()
+    old = time.time() - 2 * 3600
+    for name in ("vyavasta.abc123", "someone-else.ghi789"):
+        os.utime(scratch / name, (old, old))
+    run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, extra={"TMPDIR": str(scratch)})
+    assert sorted(path.name for path in scratch.iterdir()) == ["someone-else.ghi789", "vyavasta.def456"]
+
+
+@pytest.mark.parametrize("status, said", [
+    (429, "Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for "
+          "a moment. Claude works as usual."),
+    (503, "Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. Claude works as "
+          "usual.")])
+def test_a_session_start_says_what_came_of_the_server_as_it_is(run, fake, repo, status, said):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/me"] = status
+    assert output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"] == said
+    assert not (run.home / "offline").exists()
+
+
+def tools_without(tmp_path: Path, *missing: str) -> str:
+    """A PATH with every program this computer has but those named."""
+    folder = tmp_path / ("bin-without-" + "-".join(missing))
+    folder.mkdir()
+    for place in os.environ["PATH"].split(os.pathsep):
+        if not os.path.isdir(place):
+            continue
+        for name in os.listdir(place):
+            target = os.path.join(place, name)
+            if name not in missing and not (folder / name).exists() and os.access(target, os.X_OK):
+                (folder / name).symlink_to(target)
+    return str(folder)
+
+
+def test_without_git_or_curl_the_plugin_says_so(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    nogit = tools_without(tmp_path, "git")
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo,
+                      extra={"PATH": nogit}))["systemMessage"]
+    assert "Vyavasta needs git, which isn’t installed here, so requests aren’t checked" in said
+    assert "isn’t a git repository" not in said
+    nocurl = tools_without(tmp_path, "curl")
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo,
+                      extra={"PATH": nocurl}))["systemMessage"]
+    assert said == "Vyavasta needs curl, which isn’t installed here, so nothing is checked. Claude works as usual."
+    assert prompt(run, repo, "Change calc.py", extra={"PATH": nocurl})["systemMessage"] == (
+        "Vyavasta · nothing sent (Vyavasta needs curl, which isn’t installed here) · Claude works as usual.")
+    assert not (run.home / "offline").exists()
