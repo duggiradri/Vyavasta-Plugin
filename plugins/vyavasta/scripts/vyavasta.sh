@@ -198,20 +198,24 @@ ASK_AGAIN=5
 WAIT_FOR=60
 REPORT_SECONDS=8
 QUICK_SECONDS=8
-# A session's start may take 15 seconds in all, so each call it makes is shorter than that.
+# A session's start may take 15 seconds in all, so each call it makes is short: the quick question when it is asked
+# first (PROBE_SECONDS), /me, and an older server's /inbox take 12 seconds at most together.
 START_SECONDS=4
 # How long a sign-in's code lasts, unless the server says it lasts less.
 PAIR_LASTS=600
-# Sending the turn's reply at its end never holds the tool up for longer than this.
+# Sending the turn's reply at its end never holds the tool up for longer than this, and PROBE_SECONDS more when the
+# quick question is asked first.
 TURN_SECONDS=4
 # A report after an edit waits this long after the last one; once the server can't be reached, nothing is tried
 # again for this long.
 REPORT_EVERY=10
 OFFLINE_FOR=60
-# A call that the server took and answered nothing to in time makes every call after it that may take longer than
-# PROBE_SECONDS wait for a quick answer first (PROBE_SECONDS at most), until the server answers one or SLOW_FOR seconds
-# have passed: a server that answers, if late, is still called each time. Only when the quick question itself goes
-# unanswered is nothing tried by the hooks for OFFLINE_FOR seconds (`held_off`).
+# A call that the server took and answered nothing to in time makes every call after it that may take PROBE_SECONDS or
+# longer wait for a quick answer first (PROBE_SECONDS at most), until the server answers one or SLOW_FOR seconds have
+# passed: a server that answers, if late, is still called each time. Only when the quick question itself goes
+# unanswered is nothing tried by the hooks for OFFLINE_FOR seconds (`held_off`). (A session's start and a turn's end
+# make calls no longer than the question, and ask it too: on a server that takes calls and never answers, its wait
+# stands in for theirs, and starts that pause.)
 SLOW_FOR=600
 PROBE_SECONDS=4
 # A reply or a work report that couldn't be sent is kept for this long at most (the server knows a request_id for an
@@ -825,9 +829,9 @@ offline() {
   [ $(( $(now) - since )) -lt "$OFFLINE_FOR" ]
 }
 
-# Whether a call went unanswered a short while ago (SLOW_FOR): each call after it that may take longer than a quick
-# question waits for a quick answer first (`api`), so a server that takes calls and never answers costs seconds, not
-# minutes, and one that answers late is still called.
+# Whether a call went unanswered a short while ago (SLOW_FOR): each call after it that may take as long as a quick
+# question or longer waits for a quick answer first (`api`), so a server that takes calls and never answers costs one
+# short wait before nothing is tried for a minute, not a wait at every hook, and one that answers late is still called.
 slow_lately() {
   [ -f "$HOME_DIR/slow" ] || return 1
   since=$(cat "$HOME_DIR/slow")
@@ -967,10 +971,11 @@ config_path() {
 # wherever a redirect points), follows no redirect, and speaks https only (or http to this computer, as server_url
 # allows). Out of reach (nothing could be sent: no connection, no address, no secure connection), no hook makes a
 # call for a minute (`offline`, `held_off`). A server that took a call and answered nothing in time is asked a quick
-# question first, on the same connection, before each call after it that may take longer than that question
-# (`slow_lately`): one that is only slow, as a busy server can be, answers it at once and is still called each time.
-# When the quick question itself goes unanswered (the server answers it at once, even when it is busy), no hook makes a call
-# for a minute either (`unanswered`). Once one of these is found, no more calls are made in the same run (HELD, the
+# question first, on the same connection, before each call after it that may take as long as that question or longer
+# (`slow_lately`): one that is only slow, as a busy server can be, answers it at once and is still called each time,
+# and on one that answers nothing, the question's wait stands in for the call's, a short call's too. When the quick
+# question itself goes unanswered (the server answers it at once, even when it is busy), no hook makes a call for a
+# minute either (`unanswered`). Once one of these is found, no more calls are made in the same run (HELD, the
 # reason: “offline” or “unanswered”). A server that answers with an error is answered with its error each time:
 # one failing call never silences the calls after it. Inside Codex's sandbox, where the network is off by design, a
 # failure says nothing of the server, and nothing is kept of it. A call kept from earlier goes along after this one,
@@ -993,7 +998,7 @@ api() {
   fi
   most=$4
   probe=""
-  if [ "$most" -gt "$PROBE_SECONDS" ] && [ -z "${HOLDING:-}" ] && slow_lately; then probe=1; fi
+  if [ "$most" -ge "$PROBE_SECONDS" ] && [ -z "${HOLDING:-}" ] && slow_lately; then probe=1; fi
   # (Connecting never takes longer than the whole call may.)
   connect=5
   [ "$most" -lt "$connect" ] && connect=$most
@@ -1208,8 +1213,9 @@ refusal() {
 
 # Waits for an answer that was not ready, for as long as WAIT_FOR allows from the hook's start: each call names the
 # answer the one before was waiting for, and none runs past that time. An answer still not ready by then is left as
-# the last call gave it (still being worked on, and where it will be), and the tool goes on. $1 is the path, $2 the
-# body file to send again with "waiting" in it (less its request_id: a wait asks again on purpose).
+# the last call gave it (still being worked on, and where it will be), and the tool goes on. So is one whose wait
+# failed, for any reason: the question was asked by the first call, and stays asked. $1 is the path, $2 the body file
+# to send again with "waiting" in it (less its request_id: a wait asks again on purpose).
 wait_on() {
   tries=0
   while [ "$STATUS" = "200" ] && [ "$(json_text "$(answer status)")" = "pending" ] && [ "$tries" -lt "$ASK_AGAIN" ]; do
@@ -1232,10 +1238,11 @@ wait_on() {
     api POST "$1" "$TMP/waiting" "$left"
     HOLDING=""
     tries=$((tries + 1))
-    if [ "$STATUS" = "000" ] && [ -n "$SLOW" ]; then
-      cp "$TMP/pending" "$TMP/answer"; STATUS=200; SLOW=""
-      break
-    fi
+    # (A wait that got no answer in time, found the server out of reach as a restart leaves it, was refused, or got
+    # an answer that isn't Vyavasta's, leaves the last answer standing.)
+    case "$STATUS" in 2??) [ -z "$(json_text "$(answer status)")" ] || continue ;; esac
+    cp "$TMP/pending" "$TMP/answer"; STATUS=200; SLOW=""
+    break
   done
 }
 
@@ -2197,9 +2204,10 @@ $(arrived_context "$listing" "While the developer was away" "your first reply in
     unread) say "${BANNER}Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     *)
       # (A server that took the call and answered too late is still asked with the next message, the quick question
-      # first: it may only be busy.)
+      # first: it may only be busy. One that left the quick question asked first unanswered isn't asked for a minute.)
       if [ -n "$NOCURL" ]; then say "${BANNER}Vyavasta needs curl, which isn’t installed here, so nothing is checked. ${AGENT} works as usual.$SUMMARIES_NOTE"
-      elif [ -n "$SLOW" ]; then say "${BANNER}Vyavasta: the server didn’t answer in time just now. ${AGENT} works as usual, and Vyavasta is tried again with your next message.$SUMMARIES_NOTE"
+      elif [ -n "$SLOW" ] && [ -n "$WENT" ]; then say "${BANNER}Vyavasta: the server didn’t answer in time just now. ${AGENT} works as usual, and Vyavasta is tried again with your next message.$SUMMARIES_NOTE"
+      elif [ -n "$SLOW" ]; then say "${BANNER}Vyavasta: the server isn’t answering right now, so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE"
       else say "${BANNER}Vyavasta: the server can’t be reached right now, so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE"; fi ;;
   esac
 }
@@ -3447,16 +3455,18 @@ command_here() {
 
 # The session a command belongs to: in a hook, the hook's own; run outside one, the one its tool says it runs in.
 # Codex gives its model's commands their thread's id (CODEX_SESSION_ID, else CODEX_THREAD_ID), the session id its
-# hooks are given, and VYAVASTA_SESSION, when it is set, goes first there. Claude Code gives every command its
-# session's id itself (CLAUDE_CODE_SESSION_ID), the id its message and turn's-end hooks are given, and that is taken
-# first: a session forked from another is given its own id there, while the id a session's start leaves for the
-# commands that follow (VYAVASTA_SESSION, in CLAUDE_ENV_FILE) names the session it was forked from. That one is taken
-# where Claude Code gives none (a version from before it did). Never another window's or another project's: where
-# nothing says which, none is sent, and the server keeps it apart from every session's chat. Named as the hooks name a
-# session's folder, so both speak of one.
+# hooks are given, and that is taken first: the plugin never sets VYAVASTA_SESSION in Codex, so one that is set there
+# came with the environment Codex was started from, such as a Claude Code session's (which leaves its own id there
+# for its commands), and is taken only where Codex gives none. Claude Code gives every command its session's id
+# itself (CLAUDE_CODE_SESSION_ID), the id its message and turn's-end hooks are given, and that is taken first: a
+# session forked from another is given its own id there, while the id a session's start leaves for the commands that
+# follow (VYAVASTA_SESSION, in CLAUDE_ENV_FILE) names the session it was forked from. That one is taken where Claude
+# Code gives none (a version from before it did). Never another window's or another project's: where nothing says
+# which, none is sent, and the server keeps it apart from every session's chat. Named as the hooks name a session's
+# folder, so both speak of one.
 command_session() {
   if [ -n "${SESSION:-}" ]; then printf '%s' "$SESSION"; return; fi
-  if [ "$CLIENT" = "codex" ]; then given="${VYAVASTA_SESSION:-${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-}}}"
+  if [ "$CLIENT" = "codex" ]; then given="${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-${VYAVASTA_SESSION:-}}}"
   else given="${CLAUDE_CODE_SESSION_ID:-${VYAVASTA_SESSION:-}}"; fi
   printf '%s' "$given" | tr -cd 'A-Za-z0-9_-' | cut -c1-80
 }
@@ -3494,6 +3504,29 @@ not_reached() {
     # (A refusal of what was sent, in the server's words for a program, such as “Check words: …”: never shown.)
     422) echo "Vyavasta couldn’t take that as it was sent, so nothing was done. Something in it is longer than Vyavasta takes." ;;
     *) said=$(refusal); echo "${said:-Vyavasta couldn’t do that just now. Try again in a minute.}" ;;
+  esac
+}
+
+# What a message for a teammate says when Vyavasta didn't take it (`tell`): what became of it first, then why, chosen
+# by the status and the refusal's code as `not_reached` chooses for the other commands. One turned away, met by a
+# server that failed, was restarting or couldn't be reached, or never sent at all, was not sent, and is to be sent
+# again. One that went out and got no answer in time, or whose answer was cut off, may have reached them or not: that
+# is said, with where to look before it is sent again.
+not_sent() {
+  case "$STATUS" in
+    401) echo "Not sent: this computer’s connection to Vyavasta has ended. $WAY_IN_AGAIN" ;;
+    429) echo "Not sent: $(busy_said Vyavasta). Send it again $(busy_again)." ;;
+    000)
+      if [ -n "$NOCURL" ]; then echo "Not sent: Vyavasta needs curl, which isn’t installed here. Install it, and on Windows use Git for Windows, which brings it."
+      elif [ -n "$SLOW" ] && [ -n "$WENT" ]; then echo "Not known whether it was sent: Vyavasta took too long to answer. Look for it in Vyavasta before you send it again."
+      elif [ -n "$WENT" ]; then echo "Not known whether it was sent: Vyavasta’s answer was cut off. Look for it in Vyavasta before you send it again."
+      elif [ -n "$SLOW" ]; then echo "Not sent: Vyavasta’s server isn’t answering right now. Send it again in a minute."
+      else echo "Not sent: Vyavasta’s server can’t be reached right now. Check your internet connection, or send it again in a minute."; fi ;;
+    5*)
+      if [ "$(refusal_code)" = "restarting" ]; then echo "Not sent: Vyavasta is restarting. Send it again in a moment."
+      else echo "Not sent: Vyavasta’s server isn’t working right now. Send it again in a minute."; fi ;;
+    422) echo "Not sent: Vyavasta couldn’t take it as it was sent. Something in it is longer than Vyavasta takes." ;;
+    *) said=$(refusal); echo "Not sent: ${said:-Vyavasta couldn’t take it just now. Send it again in a minute.}" ;;
   esac
 }
 
@@ -4409,14 +4442,16 @@ tell() {
   api POST /tell "$TMP/tell" "$ASK_SECONDS" keep
   wait_on /tell "$TMP/tell"
   rm -f "$TMP/tell"
-  if [ "$STATUS" = "000" ] && [ -z "$SLOW" ] && [ -z "${IN_HOOK:-}" ] && [ "$CLIENT" = "codex" ]; then
+  if [ "$STATUS" = "000" ] && [ -z "$SLOW" ] && [ -z "$WENT" ] && [ -z "$NOCURL" ] && [ -z "${IN_HOOK:-}" ] && \
+      [ "$CLIENT" = "codex" ]; then
     # Out of reach at once, run by Codex's model: inside its sandbox, which Codex says of a command it runs there
     # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so.
     if [ -n "${CODEX_SANDBOX:-}" ]; then boxed_said "the network is switched off" "$TELL_REFUSED"
     else echo "Vyavasta could not be reached from this command, so nothing was sent. If it ran inside Codex’s sandbox, run the same command again outside the sandbox, asking for escalated permissions for it. If it ran outside, Vyavasta’s server is out of reach right now."; fi
     return
   fi
-  [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || { not_reached; return; }
+  # (Not taken: what became of it is said first, `not_sent`.)
+  [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ] || { not_sent; return; }
   status=$(json_text "$(answer status)")
   # Who it went to and who sent it, as names printed in the plugin's own headers and sentences.
   to=$(person "$(json_text "$(field "$(answer to)" name)")"); [ -n "$to" ] || to=$(person "$1")

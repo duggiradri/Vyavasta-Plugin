@@ -690,8 +690,10 @@ def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, r
     fake.status = {"/inbox": 429}
     assert run("inbox", cwd=repo).stdout == f"{why[1]}. Try again {again}.\n"
     assert prompt(run, repo, "vyavasta inbox")["reason"] == f"{why[1]}. Try again {again}."
+    # (A message for a teammate says first that it was not sent.)
     fake.status = {"/tell": 429}
-    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == f"{why[1]}. Try again {again}.\n"
+    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == \
+        f"Not sent: {why[0].replace('the server', 'Vyavasta')}. Send it again {again}.\n"
     fake.status = {"/ask": 429}
     assert run("ask", "Who owns billing?", cwd=repo).stdout == f"{why[1]}. Ask again {again}.\n"
     assert run("ask", "Who owns billing?", cwd=repo, tool="codex").stdout == f"{why[1]}. Ask again {again}.\n"
@@ -714,6 +716,91 @@ def test_too_many_requests_is_told_by_the_code_alone_never_by_the_servers_senten
     fake.page["/ask"] = (429, b'{"code": "working", "message": "Slow down."}')
     assert run("ask", "Who owns billing?", cwd=repo).stdout == (
         "Vyavasta had too many requests just now. Ask again in a moment.\n")
+
+
+def test_a_message_for_a_teammate_that_vyavasta_doesnt_take_says_first_that_it_was_not_sent(run, fake, repo,
+                                                                                              tmp_path):
+    """“@rohan standup in five” is blocked by the hook, so once Vyavasta turns it away neither the tool's model nor
+    Rohan has it: what it says opens with what became of it, then why and when to send it again, chosen by the status
+    and the refusal's code, never by the server's sentence. The developer's typed command and the tool's model's
+    command say the same. One that went out and got no answer in time, or whose answer was cut off, may have arrived
+    or not: it says so, and to look for it before sending it again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = {"verdict": "teammate", "hold": False, "repository": "acme/api", "notice": "", "context": "",
+                  "statements": [], "kept": False, "tell": {"to": "rohan", "text": "standup in five", "intent": "tell"}}
+    # (A sentence that says otherwise: what is said is chosen by the status and the code alone.)
+    fake.refused = "Delivered."
+    refused = [
+        (429, "working", "Not sent: Vyavasta is still working on this computer’s earlier requests. Send it again in a "
+                         "few seconds."),
+        (429, "rate_limited", "Not sent: this computer sent Vyavasta too many requests in the last minute. Send it "
+                              "again in a minute."),
+        (429, "busy", "Not sent: Vyavasta is busy just now. Send it again in a moment."),
+        (429, "x", "Not sent: Vyavasta had too many requests just now. Send it again in a moment."),
+        (503, "restarting", "Not sent: Vyavasta is restarting. Send it again in a moment."),
+        (503, "x", "Not sent: Vyavasta’s server isn’t working right now. Send it again in a minute."),
+        (500, "x", "Not sent: Vyavasta’s server isn’t working right now. Send it again in a minute."),
+        (401, "signed_out", "Not sent: this computer’s connection to Vyavasta has ended. Send “vyavasta sign in” to "
+                            "connect again."),
+        (422, "x", "Not sent: Vyavasta couldn’t take it as it was sent. Something in it is longer than Vyavasta "
+                   "takes.")]
+    for status, code, said in refused:
+        fake.status, fake.code = {"/tell": status}, {"/tell": code}
+        for tool in (None, "codex"):
+            signed_in(run, fake)
+            blocked = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo,
+                                                               prompt="@rohan standup in five"), tool=tool))
+            assert blocked["decision"] == "block" and blocked["reason"] == said, (status, code, tool)
+        signed_in(run, fake)
+        assert run("tell", "rohan", "standup in five", cwd=repo).stdout == said + "\n"
+    fake.status = {"/tell": 429}
+    fake.code = {"/tell": "working"}
+    assert prompt(run, repo, "vyavasta tell rohan: standup in five")["reason"] == refused[0][2]
+    assert run("tell", "rohan", "standup in five", cwd=repo, tool="codex").stdout == refused[0][2] + "\n"
+    # Refused for another reason: the server's own sentence, after what became of it.
+    fake.refused = "Messages between teammates are switched off in this workspace."
+    fake.status, fake.code = {"/tell": 403}, {"/tell": "forbidden"}
+    assert prompt(run, repo, "@rohan standup in five")["reason"] == (
+        "Not sent: Messages between teammates are switched off in this workspace.")
+    fake.status, fake.code = {}, {}
+    (run.home / "signed-out").unlink(missing_ok=True)
+    # It went out and its answer was cut off, sent again with the same id and cut off again: it may have arrived.
+    cut = ("Not known whether it was sent: Vyavasta’s answer was cut off. Look for it in Vyavasta before you send it "
+           "again.")
+    for tool in (None, "codex"):
+        fake.drop["/tell"] = 2
+        assert prompt(run, repo, "@rohan standup in five", tool=tool)["reason"] == cut
+        fake.drop["/tell"] = 2
+        assert run("tell", "rohan", "standup in five", cwd=repo, tool=tool).stdout == cut + "\n"
+    # It went out, and no answer came in time: the same. (The 55 seconds a message may take run out in 2.)
+    path, _ = curl_runs(tmp_path, {55: 2})
+    fake.delay["/tell"] = 5
+    late = ("Not known whether it was sent: Vyavasta took too long to answer. Look for it in Vyavasta before you send "
+            "it again.")
+    assert prompt(run, repo, "@rohan standup in five", extra={"PATH": path})["reason"] == late
+    assert run("tell", "rohan", "standup in five", cwd=repo, extra={"PATH": path}).stdout == late + "\n"
+    del fake.delay["/tell"]
+    # The quick question asked first went unanswered: nothing was sent.
+    path, _ = curl_runs(tmp_path, {4: 2})
+    aged(run, "slow", 30)
+    fake.delay["/hello"] = 6
+    quiet = "Not sent: Vyavasta’s server isn’t answering right now. Send it again in a minute."
+    assert prompt(run, repo, "vyavasta tell rohan: standup in five", extra={"PATH": path})["reason"] == quiet
+    assert run("tell", "rohan", "standup in five", cwd=repo, extra={"PATH": path}).stdout == quiet + "\n"
+    del fake.delay["/hello"]
+    for marker in ("slow", "unanswered", "offline"):
+        (run.home / marker).unlink(missing_ok=True)
+    # The server out of reach once the check answered, as a restart leaves it: nothing was sent.
+    gone = ("Not sent: Vyavasta’s server can’t be reached right now. Check your internet connection, or send it again "
+            "in a minute.")
+    for tool in (None, "codex"):
+        (run.home / "offline").unlink(missing_ok=True)
+        assert prompt(run, repo, "@rohan standup in five", tool=tool,
+                      extra={"PATH": curl_closing(tmp_path, fake, 1)})["reason"] == gone
+    (run.home / "offline").unlink(missing_ok=True)
+    assert run("tell", "rohan", "standup in five", cwd=repo, extra={"PATH": curl_closing(tmp_path, fake, 0)}).stdout \
+        == gone + "\n"
 
 
 def test_a_connection_ended_in_settings_signs_this_computer_out(run, fake, repo):
@@ -822,6 +909,52 @@ def test_a_question_with_no_answer_goes_to_the_model_as_it_is_with_a_note(run, f
     said = prompt(run, repo, "What is Priya doing?")
     assert said == {"systemMessage": "Vyavasta · sent: your question · kept for your summary · Your question couldn’t "
                                      "be asked just now, so Claude answers by itself."}
+
+
+def test_a_question_that_was_asked_stays_asked_when_a_later_wait_for_its_answer_fails(run, fake, repo, tmp_path):
+    """The check asked the question, and its answer is still being made; then a wait for it finds the server out of
+    reach (a restart closes its listener), is refused, or gets a page that isn't Vyavasta's. The question is in the
+    session's chat in Vyavasta and is answered there: the line says it was asked and where its answer will be, as when
+    the wait runs out, and the tool's model has the message as it is and answers by itself meanwhile. It is never told
+    as a question that couldn't be asked. The model's own question, and one for a teammate's agent, say the same."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.combined = True
+    fake.check = QUESTION
+    fake.slow = 99
+    asked = ("Vyavasta · sent: your question. Kept in this session’s chat for your summary. · Vyavasta is still "
+             "working on the answer.")
+    # Out of reach after the check: the wait is the second run of curl.
+    said = prompt(run, repo, "What is Priya doing?", session="q-1", extra={"PATH": curl_closing(tmp_path, fake, 1)})
+    assert said == {"systemMessage": asked} and len(fake.calls("/check")) == 1
+    # (Nothing is tried for a minute after it, as after any server out of reach.)
+    assert (run.home / "offline").exists()
+    (run.home / "offline").unlink()
+    # Refused while the server restarts, or for too many at once, and a page in between that answers for it.
+    page = (200, b"<html><body>Welcome to the hotel network</body></html>")
+    for session, status, code, pages in (("q-2", 503, "restarting", {}), ("q-3", 429, "working", {}),
+                                         ("q-4", None, None, {"/ask": page})):
+        fake.status = {"/ask": status} if status else {}
+        fake.code = {"/ask": code} if code else {}
+        fake.page = pages
+        said = prompt(run, repo, "What is Priya doing?", session=session)
+        assert said == {"systemMessage": asked}, session
+        assert [call["path"] for call in fake.requests][-2:] == ["/check", "/ask"]
+    fake.status, fake.code, fake.page = {}, {}, {}
+    # The model's own question: asked by its first call, its wait out of reach.
+    for tool in (None, "codex"):
+        (run.home / "offline").unlink(missing_ok=True)
+        done = run("ask", "What is Priya doing?", cwd=repo, tool=tool, extra={"PATH": curl_closing(tmp_path, fake, 1)})
+        assert done.stdout == "Vyavasta gave no answer: Vyavasta is still working on the answer.\n"
+    # A question for a teammate's agent, sent, its answer still being written: said as sent, never as not sent.
+    (run.home / "offline").unlink(missing_ok=True)
+    fake.tell_slow = 99
+    fake.tell = {**fake.tell, "notice": "Priya’s agent is still working on the answer. It will be in your thread with "
+                                        "Priya in Vyavasta when it is done: http://127.0.0.1/?agent-chat=usr_p"}
+    said = prompt(run, repo, "vyavasta ask priya: what is the plan?",
+                  extra={"PATH": curl_closing(tmp_path, fake, 1)})["reason"]
+    assert said.startswith("── To Priya Raman’s agent · from Sam Rivera ·") and "│ what is the plan?" in said
+    assert said.count("still working on the answer") == 1 and "Not sent" not in said and "reached" not in said
 
 
 def test_the_model_can_ask_vyavasta_itself_in_its_own_session_and_never_in_another(run, fake, repo, tmp_path):
@@ -3949,8 +4082,8 @@ def test_under_codex_a_sandboxed_tell_says_what_stood_in_its_way_and_how_the_dev
         "Vyavasta’s server is out of reach right now.")
     # In Claude Code there is no such sandbox to speak of.
     done = run("tell", "Rohan", raw=b"The fix is pushed.", cwd=repo, server=f"http://127.0.0.1:{closed}")
-    assert done.stdout.strip() == ("Vyavasta’s server can’t be reached right now. Check your internet connection, or "
-                                   "try again in a minute.")
+    assert done.stdout.strip() == ("Not sent: Vyavasta’s server can’t be reached right now. Check your internet "
+                                   "connection, or send it again in a minute.")
     # The settings folder can't be written: said as that, and never as a shell's own error.
     run.home.chmod(0o500)
     try:
@@ -4767,7 +4900,7 @@ def test_the_models_own_commands_in_claude_code_take_the_session_claude_code_giv
     """Claude Code gives every command its session's id (CLAUDE_CODE_SESSION_ID), the id its hooks send: a question the
     model asks lands in that session's chat, in a session forked from another too, whose start left the id of the one
     it was forked from in VYAVASTA_SESSION. That one is taken only where Claude Code gives none. Codex never takes
-    Claude Code's, and keeps its own order."""
+    Claude Code's own id, and takes its own thread's first."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
@@ -4777,13 +4910,35 @@ def test_the_models_own_commands_in_claude_code_take_the_session_claude_code_giv
     run("ask", "Who owns billing?", cwd=repo, tool="codex", extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
     run("ask", "Who owns billing?", cwd=repo, tool="codex",
         extra={"CLAUDE_CODE_SESSION_ID": "cc-1", "VYAVASTA_SESSION": "cx-1", "CODEX_THREAD_ID": "cx-2"})
-    assert [call["body"]["session"] for call in fake.calls("/ask")] == ["cc-1", "cc-fork", "cc-2", "", "cx-1"]
+    assert [call["body"]["session"] for call in fake.calls("/ask")] == ["cc-1", "cc-fork", "cc-2", "", "cx-2"]
     # The model's message to a teammate and its documents are filed the same way.
     run("tell", "priya", "The fix is pushed.", cwd=repo,
         extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
     run("documents", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
     assert fake.calls("/tell")[-1]["body"]["session"] == "cc-fork"
     assert fake.calls("/documents")[-1]["body"]["session"] == "cc-fork"
+
+
+def test_a_codex_started_from_a_claude_code_session_files_its_models_commands_under_its_own_thread(run, fake, repo):
+    """Claude Code leaves its session's id in VYAVASTA_SESSION for its own commands, so a Codex started from one of
+    them inherits it. The plugin never sets it in Codex: there Codex's own thread id (CODEX_SESSION_ID, else
+    CODEX_THREAD_ID), the id Codex's hooks send, is taken first, and the inherited id only where Codex gives none. So
+    the model's question, message and documents are filed under the Codex session, never the Claude Code one."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    inherited = {"VYAVASTA_SESSION": "claude-session-1"}
+    run("ask", "Who owns billing?", cwd=repo, tool="codex", extra={**inherited, "CODEX_THREAD_ID": "codex-thread-1"})
+    run("ask", "Who owns billing?", cwd=repo, tool="codex",
+        extra={**inherited, "CODEX_SESSION_ID": "codex-session-2", "CODEX_THREAD_ID": "codex-thread-1"})
+    # (A Codex that names no thread: the inherited id is all there is.)
+    run("ask", "Who owns billing?", cwd=repo, tool="codex", extra=inherited)
+    assert [call["body"]["session"] for call in fake.calls("/ask")] == \
+        ["codex-thread-1", "codex-session-2", "claude-session-1"]
+    run("tell", "priya", "The fix is pushed.", cwd=repo, tool="codex",
+        extra={**inherited, "CODEX_THREAD_ID": "codex-thread-1"})
+    run("documents", cwd=repo, tool="codex", extra={**inherited, "CODEX_THREAD_ID": "codex-thread-1"})
+    assert fake.calls("/tell")[-1]["body"]["session"] == "codex-thread-1"
+    assert fake.calls("/documents")[-1]["body"]["session"] == "codex-thread-1"
 
 
 def test_characters_that_turn_the_text_around_never_reach_a_header_or_a_quoted_line(run, fake, repo):
@@ -5265,6 +5420,27 @@ printf '%s\\n' "$told" | sed {edits} | exec "{shutil.which('curl')}" "$@"
     return f"{folder}{os.pathsep}{os.environ['PATH']}", runs
 
 
+def curl_closing(tmp_path: Path, fake: Fake, after: int) -> str:
+    """A PATH whose curl makes its first ``after`` runs from now as usual, and sends each run after them to an address
+    nothing listens on: the server out of reach from then on, as a restart that closes its listener leaves it."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    folder = tmp_path / "curl-closing"
+    folder.mkdir(exist_ok=True)
+    count = tmp_path / "curl-closing.txt"
+    count.write_text("0\n")
+    shim = folder / "curl"
+    shim.write_text(f"""#!/bin/sh
+made=$(( $(cat "{count}") + 1 ))
+echo "$made" > "{count}"
+[ "$made" -gt {after} ] || exec "{shutil.which('curl')}" "$@"
+sed 's#{fake.url}#{closed}#' | exec "{shutil.which('curl')}" "$@"
+""")
+    shim.chmod(0o755)
+    return f"{folder}{os.pathsep}{os.environ['PATH']}"
+
+
 def aged(run, marker: str, seconds: int = 61) -> None:
     """A marker of the plugin's (``offline``, ``unanswered``, ``slow``) written that many seconds ago."""
     (run.home / marker).write_text(f"{int(time.time()) - seconds}\n")
@@ -5347,6 +5523,98 @@ def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(r
     fake.requests.clear()
     prompt(run, repo, "Change calc.py", session="s-b")
     assert [call["path"] for call in fake.requests][:1] == ["/check"]
+
+
+def test_a_silent_server_met_first_by_short_hooks_starts_the_minute_at_the_second_of_them(run, fake, repo, tmp_path):
+    """A session's start and a turn's end that sends only the reply make calls no longer than the quick question, and
+    ask it first all the same once a call went unanswered: on a server that takes calls and never answers, the
+    question's wait stands in for the call's. The first short hook's own call runs out and starts nothing, as it may
+    only have been slow; the second asks the question, which goes unanswered, and starts the minute in which no hook
+    makes a call, so every hook after it is quick. After the minute, the first hook to come asks it again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    # (The short calls' 4 seconds, the quick question's among them, run out in 2 here.)
+    path, _ = curl_runs(tmp_path, {4: 2})
+    # A message the server keeps, whose reply waits for the turn's end.
+    prompt(run, repo, "What is Priya working on?", session="s-a")
+    # The server takes every call and answers none, the quick question included.
+    fake.delay.update({"/me": 6, "/hello": 6, "/turn": 6, "/check": 6})
+    fake.requests.clear()
+
+    def short(hook: str, session: str):
+        if hook == "session-start":
+            return run("hook", "session-start", stdin=event("SessionStart", repo, session=session), cwd=repo,
+                       extra={"PATH": path})
+        return run("hook", "stopped", stdin=event("Stop", repo, session=session, stop_hook_active=False,
+                                                  last_assistant_message="Priya is on billing."),
+                   cwd=repo, extra={"PATH": path})
+
+    # The turn's end, the first to meet it: its own call runs out, which says only that the server may be slow.
+    done = short("stopped", "s-a")
+    assert done.stdout == "" and done.seconds < 3.5 and [call["path"] for call in fake.requests] == ["/turn"]
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    # A session's start next asks the quick question first, and sends nothing more when it goes unanswered: the
+    # minute starts, and it says so.
+    fake.requests.clear()
+    done = short("session-start", "s-b")
+    assert done.seconds < 3.5 and [call["path"] for call in fake.requests] == ["/hello"]
+    assert output(done)["systemMessage"] == ("Vyavasta: the server isn’t answering right now, so requests aren’t being "
+                                             "checked. It is tried again in a minute, and Claude works as usual.")
+    assert (run.home / "unanswered").exists()
+    # The minute after it: a session's start, a message and a turn's end make no call, and wait for nothing.
+    fake.requests.clear()
+    done = short("session-start", "s-c")
+    assert output(done)["systemMessage"] == ("Vyavasta: the server didn’t answer a moment ago, so requests aren’t "
+                                             "being checked. It is tried again in a minute, and Claude works as usual.")
+    assert done.seconds < 2
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-c", prompt="Change calc.py"),
+               cwd=repo, extra={"PATH": path})
+    assert output(done)["systemMessage"] == HELD_LINE and done.seconds < 2
+    (run.home / "sessions" / "s-c" / "turn-waiting").write_text("msg_9")
+    done = short("stopped", "s-c")
+    assert done.stdout == "" and done.seconds < 2 and fake.requests == []
+    # After the minute: the first hook asks the quick question again, and while it goes unanswered the minute starts
+    # again at once, with nothing more sent.
+    aged(run, "unanswered")
+    done = short("session-start", "s-d")
+    assert done.seconds < 3.5 and [call["path"] for call in fake.requests] == ["/hello"]
+    assert output(done)["systemMessage"].startswith("Vyavasta: the server isn’t answering right now")
+    done = short("session-start", "s-e")
+    assert done.seconds < 2 and len(fake.requests) == 1
+
+
+@pytest.mark.parametrize("route", ["/me", "/turn"])
+def test_a_short_call_after_an_unanswered_one_is_still_made_once_the_quick_question_is_answered(run, fake, repo,
+                                                                                               tmp_path, route):
+    """On a server that answers the quick question, asking it first costs a moment on the same connection, and the
+    short call goes on: a session's start or a turn's end that the server answers late is still sent, is said to be
+    late, never a server that isn't answering, and starts no minute without checks. The next message is checked."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "What is Priya working on?")
+    path, runs = curl_runs(tmp_path, {4: 2})
+    aged(run, "slow", 30)
+    fake.delay[route] = 5
+    fake.requests.clear()
+    if route == "/me":
+        done = run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo,
+                   extra={"PATH": path})
+        assert output(done)["systemMessage"] == ("Vyavasta: the server didn’t answer in time just now. Claude works as "
+                                                 "usual, and Vyavasta is tried again with your next message.")
+    else:
+        done = run("hook", "stopped", stdin=event("Stop", repo, stop_hook_active=False,
+                                                  last_assistant_message="Priya is on billing."),
+                   cwd=repo, extra={"PATH": path})
+        # (The reply waits to go along with a later call.)
+        assert done.stdout == "" and len(unsent(run)) == 1
+    # One run of curl: the quick question, answered at once, and the call after it on the same connection.
+    assert [call["path"] for call in fake.requests] == ["/hello", route]
+    assert runs.read_text().splitlines() == [f"/hello {route} "] and done.seconds < 3.5
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    del fake.delay[route]
+    fake.requests.clear()
+    said = prompt(run, repo, "Remove customer_plan from the API response")["systemMessage"]
+    assert said.endswith(fake.check["notice"]) and [call["path"] for call in fake.requests][:2] == ["/hello", "/check"]
 
 
 def test_status_in_the_minute_after_the_server_was_missed_says_so_and_check_tries_it(run, fake, repo):
@@ -5481,7 +5749,8 @@ def test_a_server_restarting_for_a_deploy_says_so_everywhere_and_is_tried_again(
     fake.status = {"/inbox": 503}
     assert run("inbox", cwd=repo).stdout == "Vyavasta is restarting. Try again in a moment.\n"
     fake.status = {"/tell": 503}
-    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == "Vyavasta is restarting. Try again in a moment.\n"
+    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == (
+        "Not sent: Vyavasta is restarting. Send it again in a moment.\n")
     fake.status = {"/ask": 503}
     for tool in (None, "codex"):
         assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
