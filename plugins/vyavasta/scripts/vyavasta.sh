@@ -2125,6 +2125,29 @@ The developer was told that something their team has said stands against the cha
   handle_message "$prompt" "$dir"
 }
 
+# One of the plugin's slash commands in Claude Code (“/vyavasta:status”), before Claude Code expands it: answered at
+# once with the command's own answer, as the same command typed is, so no turn of the model is spent passing it on.
+# Answered whether or not the plugin is on, and never sent to the model. The skill each command is stays for a Claude
+# Code that doesn't run this hook, and for any other: it shows the model the same lines to pass on. A command's words
+# after its name are not read, as a skill never reads them.
+hook_expansion() {
+  case "$(json_text "$(json_get "$TMP/input" command_name)")" in
+    vyavasta:on) TYPED=on ;; vyavasta:off) TYPED=off ;; vyavasta:status) TYPED=status ;;
+    vyavasta:check) TYPED=check ;; vyavasta:settings) TYPED=settings ;; vyavasta:help) TYPED=help ;;
+    vyavasta:sign-in) TYPED=sign_in ;; vyavasta:sign-out) TYPED=sign_out ;;
+    vyavasta:share-code-on) TYPED=share_on ;; vyavasta:share-code-off) TYPED=share_off ;;
+    vyavasta:summaries-on) TYPED=summaries_on ;; vyavasta:summaries-off) TYPED=summaries_off ;;
+    vyavasta:shared) TYPED=shared ;; vyavasta:chat) TYPED=chat ;; vyavasta:upload) TYPED=upload ;;
+    vyavasta:inbox) TYPED=inbox ;; vyavasta:team) TYPED=team ;; vyavasta:summary) TYPED=summary ;;
+    vyavasta:open) TYPED=open ;; vyavasta:open-settings) TYPED=open_settings ;; vyavasta:documents) TYPED=documents ;;
+    *) return ;;
+  esac
+  HERE=$(input_folder)
+  project_of "$HERE"
+  SESSION=$(basename "$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")")
+  printf '{"decision":"block","reason":%s}\n' "$(json_quote "$(command_"$TYPED" "")")"
+}
+
 # What a message in a project that is off gets: the line saying a waiting sign-in was finished, once it was approved
 # (a file test when none waits), and the guidance in GUIDE when the message asks how to use the plugin. The message
 # itself goes through as it is.
@@ -3663,7 +3686,7 @@ main() {
       IN_HOOK=1
       cat > "$TMP/full"
       case "${2:-}" in
-        prompt|session-start) mv "$TMP/full" "$TMP/input" ;;
+        prompt|session-start|expansion) mv "$TMP/full" "$TMP/input" ;;
         # The Stop hook's input carries the tool's last reply, which may be long: what is needed of it, and the
         # fields before it, come first.
         stopped) head -c 131072 "$TMP/full" > "$TMP/input" ;;
@@ -3673,6 +3696,7 @@ main() {
       case "${2:-}" in
         session-start) hook_session_start ;;
         prompt) hook_prompt ;;
+        expansion) hook_expansion ;;
         edited|stopped) hook_report "$2" ;;
       esac
       ;;

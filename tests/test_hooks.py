@@ -1391,10 +1391,16 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
 def test_every_hook_runs_this_script_with_a_command_it_knows():
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())["hooks"]
     commands = [hook["command"] for groups in hooks.values() for group in groups for hook in group["hooks"]]
-    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"}
+    assert {"SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "Stop"} <= set(hooks)
     for command in commands:
         assert command.startswith('sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
-        assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check"}
+        assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check", "expansion"}
+    # Claude Code shows a word while the hooks that may wait on Vyavasta run, and runs the slash-command hook only
+    # for the plugin's own commands.
+    assert hooks["SessionStart"][0]["hooks"][0]["statusMessage"] == "Connecting to Vyavasta"
+    assert hooks["UserPromptSubmit"][0]["hooks"][0]["statusMessage"] == "Waiting for Vyavasta"
+    (expansion,) = hooks["UserPromptExpansion"]
+    assert expansion["matcher"] == "^vyavasta:" and expansion["hooks"][0]["statusMessage"] == "Waiting for Vyavasta"
     # The check after an edit is the one that can stop the tool, so it runs in the foreground, quickly.
     (check,) = [hook for group in hooks["PostToolUse"] for hook in group["hooks"] if hook["command"].endswith("edit-check")]
     assert not check.get("async") and check["timeout"] <= 10
@@ -4540,3 +4546,46 @@ def test_after_vyavasta_on_in_a_session_the_model_is_given_the_plugins_guidance(
     start(run, repo, None, "s-started")
     assert prompt(run, repo, "Fix the rounding", session="s-started")["hookSpecificOutput"]["additionalContext"] == \
         fake.check["context"]
+
+
+# -- 0.6.0: a slash command is answered at once, with no turn of the model ------------------------------------------
+
+def expansion(run, repo: Path, command: str, args: str = "", session: str = "session-1", **kwargs) -> dict:
+    """What Claude Code sends the hook that runs before it expands a slash command, as it sends it."""
+    return output(run("hook", "expansion", stdin=event("UserPromptExpansion", repo, session=session,
+                                                      prompt_id="p-1", expansion_type="slash_command",
+                                                      command_name=command, command_args=args,
+                                                      command_source="plugin", prompt=f"/{command}"), **kwargs))
+
+
+def test_each_slash_command_is_answered_by_the_hook_with_what_the_command_says(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    skills = sorted(path.parent.name for path in (PLUGIN / "skills").glob("*/SKILL.md") if path.parent.name != "guide")
+    assert skills == sorted(COMMANDS)
+    for skill in skills:
+        if skill in ("sign-out", "on", "off", "share-code-on", "share-code-off", "summaries-on", "summaries-off"):
+            continue
+        said = expansion(run, repo, f"vyavasta:{skill}")
+        # Held back from the model, with the command's own answer as what the developer reads.
+        assert set(said) == {"decision", "reason"} and said["decision"] == "block", skill
+        words = skill.replace("share-code-", "share-code ").replace("summaries-", "summaries ").replace("open-", "open ")
+        assert said["reason"] == run(*words.split(), cwd=repo).stdout.rstrip("\n"), skill
+    assert fake.calls("/check") == []
+    # The ones that change something do it once, as the skill would.
+    assert expansion(run, repo, "vyavasta:off")["reason"].startswith("Vyavasta is off for api")
+    assert not list((run.home / "projects").glob("*/on"))
+    assert expansion(run, repo, "vyavasta:on")["reason"].startswith("Vyavasta is on for api")
+    assert len(list((run.home / "projects").glob("*/on"))) == 1
+    assert expansion(run, repo, "vyavasta:summaries-off")["reason"].startswith("Summaries are off for api")
+    # The command's session is the one the slash command was sent in.
+    expansion(run, repo, "vyavasta:shared", session="s-slash")
+    assert fake.calls("/shared")[-1]["query"]["session"] == ["s-slash"]
+
+
+def test_a_slash_command_that_is_not_one_of_the_plugins_own_is_left_to_claude_code(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    for command in ("vyavasta:guide", "vyavasta:nothing", "other:status", "compact"):
+        assert expansion(run, repo, command) == {}
+    assert fake.requests == []
