@@ -5408,7 +5408,11 @@ def test_a_newer_server_takes_the_report_the_question_the_inbox_and_the_reply_in
     fake.inbox = INBOX
     fake.requests.clear()
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))
-    assert [call["path"] for call in fake.requests] == ["/me"] and "While you were away:" in started["systemMessage"]
+    assert [call["path"] for call in fake.requests] == ["/me"]
+    # (The developer reads how many came; the tool's model is given them after its own instructions.)
+    assert "While you were away, 2 messages came from your teammates." in started["systemMessage"]
+    assert "While the developer was away, their teammates sent them" in \
+        started["hookSpecificOutput"]["additionalContext"]
     assert fake.calls("/me")[0]["query"] == {"inbox": ["1"]}
 
 
