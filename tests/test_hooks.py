@@ -2185,9 +2185,12 @@ def test_the_end_of_a_turn_is_never_held_up_twice_by_a_server_that_does_not_answ
     assert done.stdout == "" and done.seconds < 10.5
     assert [call["path"] for call in fake.requests if call["path"] in ("/turn", "/work")] == ["/turn", "/work"]
     assert fake.calls("/turn")[-1]["body"]["work"]["files"][0]["path"] == "calc.py"
+    # (A quick call left unanswered: no hook makes a call for a minute after it.)
+    assert (run.home / "unanswered").exists()
     # A reply that takes too long: the report is not sent after it.
     del fake.delay["/work"]
     (run.home / "slow").unlink(missing_ok=True)
+    (run.home / "unanswered").unlink(missing_ok=True)
     prompt(run, repo, "Change calc.py")
     fake.requests.clear()
     fake.delay["/turn"] = 12
@@ -2598,6 +2601,10 @@ def test_a_waiting_sign_in_never_slows_or_changes_a_message_in_a_project_that_is
     assert done.stdout == "" and done.seconds < 4
     assert (run.home / "pairing").exists()
     del fake.delay["/token"]
+    # (A quick question left unanswered: the next minute's messages ask nothing.)
+    assert (run.home / "unanswered").exists()
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 1
+    (run.home / "unanswered").unlink()
     # A server that answers with an error is asked again with the next message (it answers at once); one out of reach
     # is not asked again for a minute.
     fake.status["/token"] = 503
@@ -5139,43 +5146,115 @@ printf '%s\\n' "$told" | sed {edits} | exec "{shutil.which('curl')}" "$@"
     return f"{folder}{os.pathsep}{os.environ['PATH']}", runs
 
 
-def test_a_server_that_takes_requests_and_never_answers_is_asked_a_quick_question_first(run, fake, repo, tmp_path):
-    """A read timeout: the request went out and no answer came. Each long call after it is made only once the server
-    answers a quick question at once (PROBE_SECONDS), in the same run of curl; while it doesn't, nothing more is sent.
-    A short call that runs out (a session's start, a turn's end) says nothing of it: under load it is only slow."""
+def aged(run, marker: str, seconds: int = 61) -> None:
+    """A marker of the plugin's (``offline``, ``unanswered``, ``slow``) written that many seconds ago."""
+    (run.home / marker).write_text(f"{int(time.time()) - seconds}\n")
+
+
+HELD_LINE = ("Vyavasta · nothing sent (Vyavasta’s server isn’t answering right now) · Claude works as usual, and Vyavasta is "
+             "tried again in a minute.")
+
+
+def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(run, fake, repo, tmp_path):
+    """A read timeout: the request went out and no answer came. A quick call left unanswered (a session's start here)
+    starts the minute in which no hook makes a call, a turn's end and an edit included: what they would have sent is
+    kept to go along later. After it, each call that may take longer than the quick question is made only once the
+    server answers that question at once (PROBE_SECONDS), in the same run of curl, so no long call starts blind."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     # (The check's 75 seconds run out in 2 here.)
     path, runs = curl_runs(tmp_path, {75: 2})
+    # A message the server keeps, whose reply waits for the turn's end.
+    prompt(run, repo, "Change calc.py", session="s-a")
+    (repo / "calc.py").write_text("changed\n")
     fake.delay["/me"] = 6
-    done = run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, extra={"PATH": path})
-    assert done.seconds < 6 and not (run.home / "slow").exists() and not (run.home / "offline").exists()
-    assert output(done)["systemMessage"].startswith("Vyavasta: the server took too long to answer just now")
+    done = run("hook", "session-start", stdin=event("SessionStart", repo, session="s-b"), cwd=repo, extra={"PATH": path})
+    assert done.seconds < 6 and (run.home / "slow").exists() and (run.home / "unanswered").exists()
+    assert output(done)["systemMessage"] == ("Vyavasta: the server took too long to answer just now, so requests aren’t "
+                                             "being checked. It is tried again in a minute, and Claude works as usual.")
     del fake.delay["/me"]
+    # The minute after it: no call at all, and nothing waits.
+    fake.requests.clear()
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
+               cwd=repo, extra={"PATH": path})
+    assert output(done)["systemMessage"] == HELD_LINE and done.seconds < 2
+    done = run("hook", "session-start", stdin=event("SessionStart", repo, session="s-c"), cwd=repo, extra={"PATH": path})
+    assert output(done)["systemMessage"] == ("Vyavasta: the server didn’t answer a moment ago, so requests aren’t being "
+                                             "checked. It is tried again in a minute, and Claude works as usual.")
+    assert done.seconds < 2
+    done = stop(run, repo, session="s-a", last_assistant_message="Changed calc.py.")
+    assert done.stdout == "" and done.seconds < 2
+    done = run("hook", "edited", stdin=event("PostToolUse", repo, session="s-c", tool_name="Edit"), cwd=repo)
+    assert done.seconds < 2 and fake.requests == []
+    # The reply and the work as it stood are kept to go along with a later call.
+    kept = {path.name.split("-", 1)[1].split("-", 1)[0]: json.loads(path.read_text()) for path in unsent(run)}
+    assert kept["turn"]["reply"] == "Changed calc.py." and kept["turn"]["session"] == "s-a"
+    assert [entry["path"] for entry in kept["work"]["files"]] == ["calc.py"]
+    # After the minute: the quick question first, and while it goes unanswered nothing more is sent, after 4 seconds
+    # at most; the minute starts again. A turn's end does the same.
+    aged(run, "unanswered")
+    fake.delay["/hello"] = 6
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
+               cwd=repo, extra={"PATH": path})
+    assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
+    assert output(done)["systemMessage"] == HELD_LINE
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
+               cwd=repo, extra={"PATH": path})
+    assert output(done)["systemMessage"] == HELD_LINE and done.seconds < 2 and len(fake.requests) == 1
+    aged(run, "unanswered")
+    fake.requests.clear()
+    done = stop(run, repo, session="s-b", last_assistant_message="Done.")
+    assert done.stdout == "" and done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
+    # It answers again: the quick question and the check go in one run of curl, with a reply kept from earlier, and
+    # the calls after it are as usual.
+    del fake.delay["/hello"]
+    aged(run, "unanswered")
+    fake.requests.clear()
+    runs.write_text("")
+    assert prompt(run, repo, "Change calc.py", session="s-b", extra={"PATH": path})["systemMessage"].endswith(
+        fake.check["notice"])
+    assert [call["path"] for call in fake.requests][:3] == ["/hello", "/check", "/turn"]
+    assert runs.read_text().splitlines()[0] == "/hello /check /turn "
+    assert fake.calls("/turn")[0]["body"]["reply"] == "Changed calc.py."
+    assert not any((run.home / marker).exists() for marker in ("slow", "unanswered", "offline"))
+    fake.requests.clear()
+    prompt(run, repo, "Change calc.py", session="s-b")
+    assert [call["path"] for call in fake.requests][:1] == ["/check"]
+
+
+def test_status_in_the_minute_after_the_server_was_missed_says_so_and_check_tries_it(run, fake, repo):
+    """“vyavasta status” asks nothing while no hook does, and says what that means for the developer's messages;
+    “vyavasta check” tries the server all the same, and its answer ends the minute."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    for marker, said in (("offline", "The server couldn’t be reached a moment ago"),
+                         ("unanswered", "The server didn’t answer a moment ago")):
+        aged(run, marker, 5)
+        status = run("status", cwd=repo).stdout
+        assert "Signed in as sam@acme.test in Acme.\n" in status and fake.requests == []
+        assert f"{said}, so requests aren’t being checked. It is tried again in a minute, and “vyavasta check” " \
+               "tries it now." in status
+        assert "ok: Vyavasta’s server answers." in run("check", cwd=repo).stdout
+        assert not (run.home / marker).exists()
+        assert "Signed in as sam@acme.test in Acme, on laptop." in run("status", cwd=repo).stdout
+        fake.requests.clear()
+
+
+def test_a_long_call_left_unanswered_only_makes_the_next_ask_the_quick_question_first(run, fake, repo, tmp_path):
+    """A check that runs out may only have been slow (a model reading a long record): the next message is still
+    checked, once the server answers the quick question."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    path, runs = curl_runs(tmp_path, {75: 2})
     fake.delay["/check"] = 5
     said = prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"]
     assert said == ("Vyavasta · sent: your message. · Vyavasta took too long to answer, so it wasn’t checked this time. "
                     "Claude works as usual.")
-    assert (run.home / "slow").exists() and not (run.home / "offline").exists()
-    # Still nothing from it, not even to the quick question: nothing more is sent, after 4 seconds at most.
-    fake.delay["/hello"] = 6
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    del fake.delay["/check"]
     fake.requests.clear()
-    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
-               extra={"PATH": path})
-    assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
-    assert output(done)["systemMessage"] == ("Vyavasta · nothing sent (Vyavasta’s server isn’t answering right now) · "
-                                             "Claude works as usual, and Vyavasta is tried again with your next message.")
-    assert (run.home / "slow").exists()
-    # It answers again: the quick question and the check go in one run of curl, and the calls after it are as usual.
-    del fake.delay["/hello"], fake.delay["/check"]
-    fake.requests.clear()
-    runs.write_text("")
     assert prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"].endswith(fake.check["notice"])
-    assert [call["path"] for call in fake.requests] == ["/hello", "/check"] and runs.read_text() == "/hello /check \n"
-    assert not (run.home / "slow").exists()
-    fake.requests.clear()
-    prompt(run, repo, "Change calc.py")
-    assert [call["path"] for call in fake.requests] == ["/check"]
+    assert [call["path"] for call in fake.requests] == ["/hello", "/check"]
 
 
 def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
@@ -5192,6 +5271,17 @@ def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_w
     second = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
                  server="https://192.0.2.1")
     assert output(second) == output(first) and second.seconds < 2
+    # A new session in that minute starts at once too, and says so; so does a turn's end.
+    started = run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo,
+                  server="https://192.0.2.1")
+    assert output(started)["systemMessage"] == ("Vyavasta: the server couldn’t be reached a moment ago, so requests "
+                                                "aren’t being checked. It is tried again in a minute, and Claude works "
+                                                "as usual.")
+    assert started.seconds < 2
+    (repo / "calc.py").write_text("changed\n")
+    done = run("hook", "stopped", stdin=event("Stop", repo, stop_hook_active=False, last_assistant_message="Done."),
+               cwd=repo, server="https://192.0.2.1")
+    assert done.stdout == "" and done.seconds < 2
 
 
 def test_a_long_message_of_which_nothing_was_sent_is_never_said_to_be_sent_in_part(run, fake, repo):

@@ -205,9 +205,10 @@ TURN_SECONDS=4
 # again for this long.
 REPORT_EVERY=10
 OFFLINE_FOR=60
-# A call that may take longer than SLOW_SECONDS and that the server took and answered nothing to in time makes every
-# such call after it wait for a quick answer first (PROBE_SECONDS at most), until the server answers one or SLOW_FOR
-# seconds have passed.
+# A call that the server took and answered nothing to in time makes every call after it that may take longer than
+# PROBE_SECONDS wait for a quick answer first (PROBE_SECONDS at most), until the server answers one or SLOW_FOR seconds
+# have passed. When the quick question goes unanswered, or a call that may take no longer than SLOW_SECONDS does,
+# nothing is tried by the hooks for OFFLINE_FOR seconds (`held_off`).
 SLOW_SECONDS=10
 SLOW_FOR=600
 PROBE_SECONDS=4
@@ -797,13 +798,33 @@ offline() {
   [ $(( $(now) - since )) -lt "$OFFLINE_FOR" ]
 }
 
-# Whether a long call went unanswered a short while ago (SLOW_FOR): each long call after it waits for a quick answer
-# first (`api`), so a server that takes calls and never answers costs seconds, not minutes, each time.
+# Whether a call went unanswered a short while ago (SLOW_FOR): each call after it that may take longer than a quick
+# question waits for a quick answer first (`api`), so a server that takes calls and never answers costs seconds, not
+# minutes.
 slow_lately() {
   [ -f "$HOME_DIR/slow" ] || return 1
   since=$(cat "$HOME_DIR/slow")
   case "$since" in ''|*[!0-9]*) return 1 ;; esac
   [ $(( $(now) - since )) -lt "$SLOW_FOR" ]
+}
+
+# Whether nothing is to be tried just now: the server was found out of reach (`offline`), or left a quick question
+# unanswered (`unanswered`: the one asked first, or a call no longer than SLOW_SECONDS), less than OFFLINE_FOR seconds
+# ago. The hooks the tool runs by itself (a session's start, a message, an edit, a turn's end) make no call while it
+# holds; a command the developer or the tool's model gives tries all the same (but “vyavasta status”, which says so).
+# AWAY is which of the two it is (offline or unanswered), and AWAY_SAID says why in a few words.
+held_off() {
+  if offline; then AWAY=offline; AWAY_SAID="Vyavasta’s server can’t be reached"; return 0; fi
+  [ -f "$HOME_DIR/unanswered" ] || return 1
+  since=$(cat "$HOME_DIR/unanswered")
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  [ $(( $(now) - since )) -lt "$OFFLINE_FOR" ] || return 1
+  AWAY=unanswered; AWAY_SAID="Vyavasta’s server isn’t answering right now"
+}
+# What `held_off` found, as a sentence's start: “the server couldn’t be reached a moment ago”.
+away_now_said() {
+  if [ "${AWAY:-}" = "offline" ]; then printf '%s' "the server couldn’t be reached a moment ago"
+  else printf '%s' "the server didn’t answer a moment ago"; fi
 }
 
 # This computer is signed out: by the developer here (`out`), or because its connection ended (`ended`: disconnected
@@ -915,13 +936,15 @@ config_path() {
 #
 # curl reads none of the developer's own settings (`-q`: no ~/.curlrc, whose `location` would send a message on to
 # wherever a redirect points), follows no redirect, and speaks https only (or http to this computer, as server_url
-# allows). Out of reach (nothing could be sent: no connection, no address, no secure connection), no call is made
-# for a minute (`offline`). A server that took a long call and answered nothing in time is asked a quick question
-# first, on the same connection, before each long call after it, and nothing more is sent while it doesn't answer
-# that (`slow_lately`). A server that answers with an error is answered with its error each time: one failing call
-# never silences the calls after it. Inside Codex's sandbox, where the network is off by design, a failure says
-# nothing of the server, and nothing is kept of it. A call kept from earlier goes along after this one, on the same
-# connection, when one was picked for it (RIDE, `pick_ride`).
+# allows). Out of reach (nothing could be sent: no connection, no address, no secure connection), no hook makes a
+# call for a minute (`offline`, `held_off`). A server that took a call and answered nothing in time is asked a quick
+# question first, on the same connection, before each call after it that may take longer than that question
+# (`slow_lately`); and when the quick question, or a call no longer than SLOW_SECONDS, goes unanswered, no hook makes a
+# call for a minute either (`unanswered`). Once one of these is found, no more calls are made in the same run (HELD,
+# the reason: “offline” or “unanswered”). A server that answers with an error is answered with its error each time:
+# one failing call never silences the calls after it. Inside Codex's sandbox, where the network is off by design, a
+# failure says nothing of the server, and nothing is kept of it. A call kept from earlier goes along after this one,
+# on the same connection, when one was picked for it (RIDE, `pick_ride`).
 api() {
   STATUS=000
   SLOW=""
@@ -931,9 +954,16 @@ api() {
   RIDE=""
   # (Without curl nothing can be sent at all, which says nothing of the server: NOCURL says so.)
   if [ -n "$NOCURL" ]; then [ "${5:-}" = "keep" ] || [ -z "$3" ] || rm -f "$3"; return 0; fi
+  # (A call earlier in this run found the server out of reach or not answering: none is made after it, and this one
+  # is told as that one was.)
+  if [ -n "${HELD:-}" ]; then
+    [ "$HELD" = "unanswered" ] && SLOW=1
+    [ "${5:-}" = "keep" ] || [ -z "$3" ] || rm -f "$3"
+    return 0
+  fi
   most=$4
   probe=""
-  if [ "$most" -gt "$SLOW_SECONDS" ] && [ -z "${HOLDING:-}" ] && slow_lately; then probe=1; fi
+  if [ "$most" -gt "$PROBE_SECONDS" ] && [ -z "${HOLDING:-}" ] && slow_lately; then probe=1; fi
   # (Connecting never takes longer than the whole call may.)
   connect=5
   [ "$most" -lt "$connect" ] && connect=$most
@@ -993,14 +1023,14 @@ api() {
   if [ -z "${CODEX_SANDBOX:-}" ]; then
     case "$STATUS" in
       000)
-        # (A wait the server holds open on purpose, or a short call, says nothing of whether it answers: only a long
-        # call, or the quick question after one, that went unanswered.)
-        if [ -n "$SLOW" ]; then
-          if [ -n "$probed_out" ] || { [ -z "${HOLDING:-}" ] && [ "$4" -gt "$SLOW_SECONDS" ]; }; then
-            mkdir -p "$HOME_DIR" && now > "$HOME_DIR/slow"
-          fi
-        elif [ -z "$went" ]; then mkdir -p "$HOME_DIR" && now > "$HOME_DIR/offline"; fi ;;
-      *) rm -f "$HOME_DIR/offline" "$HOME_DIR/slow" ;;
+        # (A wait the server holds open on purpose says nothing of whether it answers. A long call that went
+        # unanswered may only have been slow: the calls after it ask the quick question first. The quick question
+        # unanswered, or a call no longer than SLOW_SECONDS, says the server doesn't answer.)
+        if [ -n "$SLOW" ] && [ -z "${HOLDING:-}" ]; then
+          mkdir -p "$HOME_DIR" && now > "$HOME_DIR/slow"
+          if [ -n "$probed_out" ] || [ "$4" -le "$SLOW_SECONDS" ]; then now > "$HOME_DIR/unanswered"; HELD=unanswered; fi
+        elif [ -z "$SLOW" ] && [ -z "$went" ]; then mkdir -p "$HOME_DIR" && now > "$HOME_DIR/offline"; HELD=offline; fi ;;
+      *) rm -f "$HOME_DIR/offline" "$HOME_DIR/slow" "$HOME_DIR/unanswered" ;;
     esac
   fi
   [ -z "$ride" ] || [ -z "$ride_status" ] || ride_settled "$ride_status"
@@ -1014,7 +1044,7 @@ api() {
       # Refused by something on the way that isn't Vyavasta (a page in between): Vyavasta itself wasn't reached, and
       # the connection is kept.
       STATUS=000; WENT=""
-      [ -n "${CODEX_SANDBOX:-}" ] || now > "$HOME_DIR/offline"
+      [ -n "${CODEX_SANDBOX:-}" ] || { now > "$HOME_DIR/offline"; HELD=offline; }
     fi
   fi
 }
@@ -1236,7 +1266,8 @@ start_pairing() {
   api_unsigned POST /pair "$TMP/pair" "$QUICK_SECONDS"
   if [ "$STATUS" != "201" ]; then
     PAIR_FAILED=$(refusal)
-    [ -n "$PAIR_FAILED" ] || PAIR_FAILED="Vyavasta’s server can’t be reached"
+    if [ -z "$PAIR_FAILED" ] && [ -n "$SLOW" ]; then PAIR_FAILED="Vyavasta’s server isn’t answering right now"
+    elif [ -z "$PAIR_FAILED" ]; then PAIR_FAILED="Vyavasta’s server can’t be reached"; fi
     return 1
   fi
   device=$(json_text "$(answer device_code)")
@@ -1291,7 +1322,7 @@ code_lasts_said() {
 finish_waiting_sign_in() {
   FINISHED_LINE=""
   pending_waiting || return 0
-  offline && return 0
+  held_off && return 0
   QUICK_SECONDS=2
   finish_pairing
   [ -n "$CONNECTED" ] || return 0
@@ -1997,7 +2028,8 @@ $WHATS_NEW
   else ROOT=""; REMOTE=""; fi
   # Sessions over a week old are forgotten.
   find "$SESSIONS" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
-  offline || finish_pairing
+  # (Nothing is asked of a server found out of reach, or not answering, a moment ago: `held_off`.)
+  held_off || finish_pairing
   if [ -z "$TOKEN" ]; then
     # (Signed out in the middle of work: the next message says so.)
     [ "$source" = "compact" ] && return
@@ -2008,7 +2040,10 @@ $WHATS_NEW
       say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
     elif [ -f "$HOME_DIR/signed-out" ]; then
       say "${BANNER}Vyavasta: $(out_said), so nothing is checked. $WAY_IN_AGAIN ${AGENT} works as usual.$SUMMARIES_NOTE"
-    elif ! offline && start_pairing; then
+    elif held_off; then
+      PAIR_FAILED=$AWAY_SAID
+      say "${BANNER}Vyavasta: not signed in, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
+    elif start_pairing; then
       true > "$dir/said-sign-in"
       say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
     else
@@ -2023,6 +2058,10 @@ $WHATS_NEW
   if [ -n "$quiet" ]; then
     STATUS=200
     checks=$(kept_checks)
+  elif held_off; then
+    # (Found out of reach, or not answering, a moment ago: the session starts at once, saying so, and the tool's model
+    # is given the plugin's guidance with the first message that reaches Vyavasta.)
+    STATUS=held
   else
     # (A server that can sends what teammates sent the developer with this answer, as /inbox?told=1 would: one call
     # less. An older one sends none, and /inbox is asked below.)
@@ -2076,14 +2115,15 @@ $(arrived_context "$listing" "While the developer was away" "your first reply in
       fi
       rm -f "$dir/unguided"
       ;;
+    held) say "${BANNER}Vyavasta: $(away_now_said), so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     401) say "${BANNER}Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
     429) say "${BANNER}Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for a moment. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     5*) say "${BANNER}Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     unread) say "${BANNER}Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     *)
       if [ -n "$NOCURL" ]; then say "${BANNER}Vyavasta needs curl, which isn’t installed here, so nothing is checked. ${AGENT} works as usual.$SUMMARIES_NOTE"
-      elif [ -n "$SLOW" ]; then say "${BANNER}Vyavasta: the server took too long to answer just now, so some requests may go unchecked for a while. ${AGENT} works as usual.$SUMMARIES_NOTE"
-      else say "${BANNER}Vyavasta: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE"; fi ;;
+      elif [ -n "$SLOW" ]; then say "${BANNER}Vyavasta: the server took too long to answer just now, so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE"
+      else say "${BANNER}Vyavasta: the server can’t be reached right now, so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE"; fi ;;
   esac
 }
 
@@ -2103,7 +2143,7 @@ $TRY_SAID"
     [ -f "$WELCOMED" ] && foot="
 $WHATS_NEW$foot"
     mark_greeted || return 0
-    offline || finish_pairing
+    held_off || finish_pairing
     if [ -n "$TOKEN" ]; then
       say "${top}Vyavasta is installed in ${TOOL}. This computer is already connected as $(person "$(saved email)") in $(person "$(saved workspace)"): one connection serves both Claude Code and Codex. It stays off in this project until you send “vyavasta on”. $(guide_said)$foot"
     elif pending_waiting; then
@@ -2111,16 +2151,17 @@ $WHATS_NEW$foot"
       say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
     elif [ -f "$HOME_DIR/signed-out" ]; then
       say "${top}Vyavasta is installed, and sends nothing, because $(out_said). $WAY_IN_AGAIN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
-    elif ! offline && start_pairing; then
+    elif ! held_off && start_pairing; then
       true > "$1/said-sign-in"
       say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
     else
+      [ -n "$PAIR_FAILED" ] || PAIR_FAILED=${AWAY_SAID:-}
       say "${top}Vyavasta is installed, but sign-in couldn’t start: $(pair_failed_said) $WAY_IN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
     fi
     return 0
   fi
   [ -f "$PENDING" ] && [ -z "$TOKEN" ] || return 0
-  offline || finish_pairing
+  held_off || finish_pairing
   if [ -n "$TOKEN" ]; then
     say "Vyavasta: $(printf '%s' "$CONNECTED" | sed 's/^Connected/connected/') It is off in this project: send “vyavasta on” to use it here, and “vyavasta help” to see everything it does."
   elif pending_waiting; then
@@ -2690,7 +2731,7 @@ handle_message() {
     OUT_LINE=$(nothing_line "Vyavasta needs curl, which isn’t installed here" "${AGENT} works as usual.")
     emit; return
   fi
-  finish_pairing
+  held_off || finish_pairing
   if [ -z "$TOKEN" ]; then
     # Signed out: sign-in starts by itself on the first message of a session (unless the session's start began it),
     # and never again in it; one still waiting is told again with its code, and its page isn't opened again. A
@@ -2701,6 +2742,9 @@ handle_message() {
     elif [ -f "$HOME_DIR/signed-out" ]; then
       why=$(out_said)
       outcome="$WAY_IN_AGAIN ${AGENT} works as usual."
+    elif held_off; then
+      PAIR_FAILED=$AWAY_SAID
+      outcome="Sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual."
     elif [ ! -f "$dir/said-sign-in" ]; then
       true > "$dir/said-sign-in"
       if start_pairing; then
@@ -2720,8 +2764,8 @@ handle_message() {
   fi
   # A folder that is no repository has nothing to check, and a question about the team can still be asked from it.
   if repository "$HERE"; then :; else ROOT=""; REMOTE=""; BRANCH=""; fi
-  if offline; then
-    OUT_LINE=$(nothing_line "Vyavasta’s server can’t be reached" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
+  if held_off; then
+    OUT_LINE=$(nothing_line "$AWAY_SAID" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
     emit; return
   fi
   NFILES=0; shared=""; consent=""
@@ -2767,7 +2811,7 @@ handle_message() {
       if [ -n "$SLOW" ] && [ -n "$WENT" ]; then
         OUT_LINE=$(line "your message" "" "Vyavasta took too long to answer, so it wasn’t checked this time. ${AGENT} works as usual.")
       elif [ -n "$SLOW" ]; then
-        OUT_LINE=$(nothing_line "Vyavasta’s server isn’t answering right now" "${AGENT} works as usual, and Vyavasta is tried again with your next message.")
+        OUT_LINE=$(nothing_line "Vyavasta’s server isn’t answering right now" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
       elif [ -n "$WENT" ]; then
         OUT_LINE=$(line "your message" "" "Vyavasta’s answer was cut off, so it wasn’t checked this time. ${AGENT} works as usual.")
       else
@@ -3132,7 +3176,16 @@ hook_report() {
   fi
   STATUS=""
   REPORTED=""
-  if [ -n "$TOKEN" ] && repository "$folder" && ! offline; then
+  if [ -n "$TOKEN" ] && held_off; then
+    # Found out of reach, or not answering, a moment ago: nothing is tried, so the turn's end never waits. What would
+    # have gone is kept to go along with a later call (`keep_unsent`): the reply first, which nothing later stands in
+    # for, then the files' names as they stand.
+    if [ -n "$turn" ]; then turn_ready "$dir" "$folder"; keep_turn "$dir"; turn=""; fi
+    if repository "$folder"; then
+      changed_files
+      if work_report "$dir" bare; then now > "$dir/reported"; keep_unsent work "$(basename "$dir")" "$TMP/report"; fi
+    fi
+  elif [ -n "$TOKEN" ] && repository "$folder"; then
     changed_files
     if [ -z "$turn" ]; then report_work "$dir"
     elif work_report "$dir"; then
@@ -3148,7 +3201,7 @@ hook_report() {
       else
         # (An older server: the report on its own, after the reply. One that didn't answer is not called twice: the
         # report is kept to go along with a later call, as the reply is.)
-        if [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then api POST /work "$TMP/report" "$REPORT_SECONDS" keep; fi
+        if [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! held_off; then api POST /work "$TMP/report" "$REPORT_SECONDS" keep; fi
         work_sent "$dir"
       fi
     fi
@@ -3156,7 +3209,7 @@ hook_report() {
   fi
   # (A report just now that found the server out of reach, or too slow to answer, is not followed by a second
   # call: the end of a turn is never held up twice.)
-  if [ -n "$turn" ] && [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then send_turn "$dir" "$folder"; fi
+  if [ -n "$turn" ] && [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! held_off; then send_turn "$dir" "$folder"; fi
   # What the developer is shown at a turn's end: a conflict found in the change, and teammates' messages that wait for
   # them. (A turn that ended in an error shows nothing: what a conflict says waits for the next edit or message.)
   if [ "$1" = "stopped" ] && [ -z "$failed" ]; then
@@ -3229,20 +3282,31 @@ reply_json() {
 # request_id, to go along with a later call (`keep_unsent`), when it names its message. $1 is the session folder, $2
 # the folder the tool works in.
 send_turn() {
-  if repository "$2"; then :; else REMOTE=""; BRANCH=""; fi
-  kept_id=$(cat "$1/turn-waiting")
-  rm -f "$1/turn-waiting"
-  turn_id=$(new_request_id)
-  reply_json > "$TMP/reply-json"
+  turn_ready "$1" "$2"
   turn_body "$1" "${3:-}" > "$TMP/turn"
   if [ "${3:-}" = "work" ]; then api POST /turn "$TMP/turn" "$REPORT_SECONDS"; else api POST /turn "$TMP/turn" "$TURN_SECONDS"; fi
   cp "$TMP/answer" "$TMP/turned"
   INBOX_WAITING=""
   [ "$STATUS" != "200" ] || INBOX_WAITING=$(json_get "$TMP/turned" inbox_waiting)
-  if send_later && [ -n "$kept_id" ] && [ "$(cat "$TMP/reply-json")" != '""' ]; then
-    turn_body "$1" "" > "$TMP/turn"
-    keep_unsent turn "$turn_id" "$TMP/turn"
-  fi
+  if send_later; then keep_turn "$1"; fi
+}
+
+# A turn's end made ready: the message it answers (kept_id; the session no longer waits for it), its own request_id
+# (turn_id) and the reply ($TMP/reply-json). $1 is the session folder, $2 the folder the tool works in.
+turn_ready() {
+  if repository "$2"; then :; else REMOTE=""; BRANCH=""; fi
+  kept_id=$(cat "$1/turn-waiting")
+  rm -f "$1/turn-waiting"
+  turn_id=$(new_request_id)
+  reply_json > "$TMP/reply-json"
+}
+
+# Keeps the reply made ready to go along with a later call, by its request_id, when it names its message and says
+# something. $1 is the session folder.
+keep_turn() {
+  [ -n "$kept_id" ] && [ "$(cat "$TMP/reply-json")" != '""' ] || return 0
+  turn_body "$1" "" > "$TMP/turn"
+  keep_unsent turn "$turn_id" "$TMP/turn"
 }
 
 # The body of a turn's end: its request_id (turn_id), the session ($1), the reply (as `reply_json` left it) to the
@@ -3467,7 +3531,7 @@ command_share_on() {
   limit_lines=$CHANGE_LINES
   [ -f "$HOME_DIR/limits" ] && kept_lines=$(sed -n 's/^lines=//p' "$HOME_DIR/limits") && case "$kept_lines" in ''|*[!0-9]*) ;; *) limit_lines=$kept_lines ;; esac
   told=""; SHARING_NOTICE=""
-  if [ -n "$TOKEN" ] && ! offline; then tell_sharing on && told=1; fi
+  if [ -n "$TOKEN" ] && ! held_off; then tell_sharing on && told=1; fi
   # The server's own account when it answered (what Vyavasta does with the changes, and whether it reads this
   # repository), else the plugin's. The list of what never leaves this computer is always the plugin's: it decides.
   if [ -n "$SHARING_NOTICE" ]; then echo "$SHARING_NOTICE"
@@ -3485,7 +3549,7 @@ command_share_off() {
   command_here
   project_keep && echo off > "$PDIR/sharing"
   SHARING_NOTICE=""
-  if repository "$HERE" && [ -n "$REMOTE" ] && [ -n "$TOKEN" ] && ! offline; then tell_sharing off; fi
+  if repository "$HERE" && [ -n "$REMOTE" ] && [ -n "$TOKEN" ] && ! held_off; then tell_sharing off; fi
   if [ -n "$SHARING_NOTICE" ]; then echo "$SHARING_NOTICE"
   else echo "Code sharing is off: from now on your uncommitted changes aren’t sent, only your changed files’ names."; fi
   echo "Send “vyavasta share code on” to turn it on again."
@@ -3529,6 +3593,13 @@ command_status() {
     else
       echo "Not signed in. $WAY_IN"
     fi
+    return
+  fi
+  # (Found out of reach, or not answering, a moment ago: nothing is asked, as no hook asks anything then, and what
+  # that means for the developer's messages is said instead.)
+  if held_off; then
+    echo "Signed in as $(person "$(saved email)") in $(person "$(saved workspace)")."
+    echo "$(away_now_said | sed 's/^t/T/'), so requests aren’t being checked. It is tried again in a minute, and “vyavasta check” tries it now."
     return
   fi
   api GET /me "" "$QUICK_SECONDS"
