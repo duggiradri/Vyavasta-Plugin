@@ -3457,18 +3457,22 @@ command_documents_search() {
     echo "Nothing in the documents you may read mentions those words. $(docs_cmd) lists them."
     return
   fi
+  # (In a hook, which only the developer reads, the passages stand under their headings with no words for the model
+  # before and after them.)
+  top="$SEARCH_TOP"; last="$DOC_END"
+  [ -z "${IN_HOOK:-}" ] || { top=""; last=""; }
   printf '%s' "$passages" | LC_ALL=C awk -v NAME="$DOC_NAME_CHARACTERS" -v PERSON="$PERSON_CHARACTERS" \
-      -v MARK="$QUOTE_MARK" -v TOP="$SEARCH_TOP" -v LAST="$DOC_END" -v COUNT="$TMP/found-count" \
+      -v MARK="$QUOTE_MARK" -v TOP="$top" -v LAST="$last" -v COUNT="$TMP/found-count" \
       "$LINES_AWK$JSON_AWK$WORDS_AWK$DOCS_AWK"'
     BEGIN { RS = "\001" }
     NR == 1 {
-      n = jsplit($0, row); print TOP
+      n = jsplit($0, row); if (TOP != "") print TOP
       for (i = 1; i <= n; i++) {
         jobj(row[i], f)
         printf "%s── %s. %s · %s ──\n%s", (i > 1 ? "\n" : ""), oneline(jstr(f["n"])), named(jstr(f["name"]), NAME),
           by(jstr(f["uploaded_by"])), marks(jstr(f["text"]))
       }
-      print LAST
+      if (LAST != "") print LAST
       printf "%d\n", n > COUNT
     }' > "$TMP/found"
   shown=$(cat "$TMP/found-count")
@@ -3542,13 +3546,20 @@ command_documents_read() {
   printf '── %s. %s · %s · part %s of %s ──\n' "$n" "$name" "$(docs_by "$(json_text "$(answer uploaded_by)")")" "$part" "$parts"
   [ "$(answer image)" = "true" ] && echo "It is an image: below is what Vyavasta’s assistant read in it, not the picture itself."
   text=$(json_text "$(answer text)")
-  if [ -n "$text" ]; then quoted "$text" "$DOC_TOP" "$DOC_END"; else echo "This part holds no text."; fi
+  # (In a hook, which only the developer reads, its lines are marked, with no words for the model around them.)
+  if [ -n "$text" ] && [ -n "${IN_HOOK:-}" ]; then marked "$text"
+  elif [ -n "$text" ]; then quoted "$text" "$DOC_TOP" "$DOC_END"; else echo "This part holds no text."; fi
   if [ "$part" -lt "$parts" ]; then echo; echo "This is part $part of $parts. The next part: $(docs_cmd "read $n $((part + 1))")."
   elif [ "$parts" -gt 1 ]; then echo; echo "This is the last part."; fi
 }
 
 # The longest message a teammate can be sent, in characters (the server takes no more).
 TELL_CHARACTERS=4000
+
+# Words someone wrote, under one of the plugin's headers: a quoted record (`quoted`) where the tool's model reads them
+# (a command it ran), and in a hook, whose answer only the developer reads, the same lines marked (`marked`), with no
+# words written for the model around the developer's own.
+record_said() { if [ -n "${IN_HOOK:-}" ]; then marked "$1"; else quoted "$1"; fi; }
 
 # A message to a teammate: a question for their agent (`ask`), something told them (`tell`), or a reply to an item of
 # the inbox. $1 is who it is for, $2 the words, $3 the message it replies to, and $4 is "tell" when it is told them:
@@ -3617,7 +3628,7 @@ tell() {
   # where they see it.
   if [ -z "${3:-}" ] && [ "$status" != "told" ]; then
     printf '── To %s’s agent · from %s · %s · through Vyavasta ──\n' "$to" "$from" "$at"
-    quoted "$sent_text"; echo
+    record_said "$sent_text"; echo
     said=$(json_text "$(answer answer)")
     context=$(json_text "$(answer context)")
     if [ "$status" = "answered" ] && [ -n "$said" ]; then
@@ -3625,7 +3636,7 @@ tell() {
       # and the server sent its context, that context: the app's sentence and the answer in the quoted block.
       printf '── From %s’s agent · %s · answered only from what you can both already see ──\n' "$to" \
         "$(one_line "$(json_text "$(answer answer_at_said)")")"
-      if [ -z "${IN_HOOK:-}" ] && [ -n "$context" ]; then printf '%s\n\n' "$context"; else quoted "$said"; echo; fi
+      if [ -z "${IN_HOOK:-}" ] && [ -n "$context" ]; then printf '%s\n\n' "$context"; else record_said "$said"; echo; fi
     elif [ -z "$notice" ]; then
       # (The server's notice says the same when it gives one.)
       echo "$to’s agent is still answering. The answer will be in your conversation with $to in Vyavasta."
@@ -3633,7 +3644,7 @@ tell() {
     fi
   else
     printf '── To %s · from %s · %s · through Vyavasta ──\n' "$to" "$from" "$at"
-    quoted "$sent_text"; echo
+    record_said "$sent_text"; echo
   fi
   [ -n "$notice" ] && echo "$notice"
   # The link once: the server's notice may end with it already.
