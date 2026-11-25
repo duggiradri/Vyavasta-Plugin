@@ -3484,7 +3484,8 @@ not_reached() {
     429) echo "$(busy_said Vyavasta | sed 's/^t/T/'). Try again $(busy_again)." ;;
     000)
       if [ -n "$NOCURL" ]; then echo "Vyavasta needs curl, which isn’t installed here. Install it, and on Windows use Git for Windows, which brings it."
-      elif [ -n "$SLOW" ]; then echo "Vyavasta took too long to answer. Try again in a moment."
+      elif [ -n "$SLOW" ] && [ -n "$WENT" ]; then echo "Vyavasta took too long to answer. Try again in a moment."
+      elif [ -n "$SLOW" ]; then echo "Vyavasta’s server isn’t answering right now. Try again in a minute."
       elif [ "$CLIENT" = "codex" ] && [ -z "${IN_HOOK:-}" ]; then echo "Vyavasta can’t be reached from here. Codex runs the commands its model starts in a closed-off space that can’t reach the internet: send it as a message instead, such as “vyavasta status”."
       else echo "Vyavasta’s server can’t be reached right now. Check your internet connection, or try again in a minute."; fi ;;
     5*)
@@ -3974,10 +3975,12 @@ command_check() {
       minimum=$(version_said "$(json_text "$(answer minimum)")") ;;
     404) echo "ok: Vyavasta’s server answers." ;;
     000)
-      if [ -n "$SLOW" ]; then echo "Problem: Vyavasta’s server is very slow to answer. Try again in a minute."
+      if [ -n "$SLOW" ]; then echo "Problem: Vyavasta’s server isn’t answering right now. Try again in a minute."
       elif [ "$CLIENT" = "codex" ] && [ -z "${IN_HOOK:-}" ]; then echo "Problem: Vyavasta’s server can’t be reached from here. Codex runs the commands its model starts in a closed-off space that can’t reach the internet. Send “vyavasta check” as a message instead; messages aren’t closed off."
       else echo "Problem: Vyavasta’s server can’t be reached. Check your internet connection, and that $SERVER is the right address."; fi ;;
-    *) echo "Problem: Vyavasta’s server isn’t working right now. Try again in a few minutes." ;;
+    *)
+      if [ "$(refusal_code)" = "restarting" ]; then echo "Problem: Vyavasta is restarting just now. Try again in a moment."
+      else echo "Problem: Vyavasta’s server isn’t working right now. Try again in a few minutes."; fi ;;
   esac
   reached=""
   [ "$STATUS" = "200" ] || [ "$STATUS" = "404" ] && reached=1
@@ -4597,7 +4600,11 @@ command_ask_assistant() {
     5*)
       if [ "$(refusal_code)" = "restarting" ]; then echo "Vyavasta is restarting, so nothing was asked. Ask again in a moment."
       else echo "Vyavasta’s server isn’t working right now, so nothing was asked."; fi ;;
-    *) echo "Vyavasta can’t be reached right now, so nothing was asked." ;;
+    # (Refused for another reason by a server that was reached: in its own sentence when it gave one.)
+    *)
+      said=$(refusal)
+      if [ -n "$said" ]; then echo "$said Nothing was asked."
+      else echo "Vyavasta couldn’t take that question just now, so nothing was asked."; fi ;;
   esac
 }
 

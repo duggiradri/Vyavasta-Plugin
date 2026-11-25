@@ -5426,7 +5426,7 @@ def test_vyavasta_check_whose_own_quick_question_goes_unanswered_starts_the_minu
     switched_on(run, fake, repo)
     path, _ = curl_runs(tmp_path, {8: 2})
     fake.delay["/hello"] = 5
-    assert "Problem: Vyavasta’s server is very slow to answer." in run("check", cwd=repo, extra={"PATH": path}).stdout
+    assert "Problem: Vyavasta’s server isn’t answering right now." in run("check", cwd=repo, extra={"PATH": path}).stdout
     assert (run.home / "unanswered").exists()
     fake.requests.clear()
     assert prompt(run, repo, "Change calc.py")["systemMessage"] == HELD_LINE and fake.requests == []
@@ -5486,9 +5486,13 @@ def test_a_server_restarting_for_a_deploy_says_so_everywhere_and_is_tried_again(
     for tool in (None, "codex"):
         assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
             "Vyavasta is restarting, so nothing was asked. Ask again in a moment.\n")
+    fake.code["/hello"] = "restarting"
+    fake.status = {"/hello": 503}
+    assert "Problem: Vyavasta is restarting just now. Try again in a moment.\n" in run("check", cwd=repo).stdout
     assert not any((run.home / marker).exists() for marker in ("slow", "unanswered", "offline"))
     # Any other failure: the server isn't working, and was reached.
     fake.code = {}
+    fake.status = {"/ask": 503}
     for tool in (None, "codex"):
         assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
             "Vyavasta’s server isn’t working right now, so nothing was asked.\n")
@@ -5496,6 +5500,12 @@ def test_a_server_restarting_for_a_deploy_says_so_everywhere_and_is_tried_again(
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
         " · Vyavasta’s server isn’t working right now, so it wasn’t checked. Claude works as usual, and Vyavasta is "
         "tried again with your next message.")
+    # Refused for another reason, by a server that was reached: in its own sentence, never out of reach.
+    fake.refused = "This workspace has no assistant for this computer."
+    fake.status = {"/ask": 403}
+    for tool in (None, "codex"):
+        assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
+            "This workspace has no assistant for this computer. Nothing was asked.\n")
     # Back: the next message is checked.
     fake.status = {}
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
@@ -5517,6 +5527,9 @@ def test_a_question_the_server_answers_too_late_is_said_to_be_that_never_out_of_
     done = run("ask", "Who owns billing?", cwd=repo, extra={"PATH": path})
     assert done.stdout == "Vyavasta’s server isn’t answering right now, so nothing was asked.\n"
     assert (run.home / "unanswered").exists()
+    # A typed command held back the same way, and “vyavasta check”, whose own quick question went unanswered.
+    assert run("inbox", cwd=repo).stdout == "Vyavasta’s server isn’t answering right now. Try again in a minute.\n"
+    assert "Problem: Vyavasta’s server isn’t answering right now. Try again in a minute.\n" in run("check", cwd=repo).stdout
 
 
 def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
