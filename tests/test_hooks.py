@@ -4755,7 +4755,12 @@ DIRECTION_TURNERS = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066",
                      # space, a word joiner, an invisible operator, a deprecated format character, a byte order mark, a
                      # Mongolian vowel separator, an annotation character, and tag characters that spell “hi”.
                      "\u200e", "\u200f", "\u061c", "\u00ad", "\u200b", "\u2060", "\u2064", "\u206f", "\ufeff",
-                     "\u180e", "\ufff9", "\U000e0001", "\U000e0068", "\U000e0069", "\U000e007f"]
+                     "\u180e", "\ufff9", "\U000e0001", "\U000e0068", "\U000e0069", "\U000e007f",
+                     # And the characters that show only as blank space: the Hangul fillers, the combining grapheme
+                     # joiner, the Khmer inherent vowels, the musical symbols that only shape a beam or a phrase (the
+                     # first, the last and one between) and the blank Braille pattern.
+                     "\u115f", "\u1160", "\u3164", "\uffa0", "\u034f", "\u17b4", "\u17b5", "\U0001d173", "\U0001d177",
+                     "\U0001d17a", "\u2800"]
 
 
 def test_the_models_own_commands_in_claude_code_take_the_session_claude_code_gives_them_first(run, fake, repo):
@@ -4793,9 +4798,10 @@ def test_characters_that_turn_the_text_around_never_reach_a_header_or_a_quoted_l
     fake.read = {**READ_PAGE, "name": f"refund{turned}-policy.md"}
     said = run("documents", "read", "1", cwd=repo).stdout
     assert not any(turner in said for turner in DIRECTION_TURNERS) and "refund-policy.md" in said
-    # The joiners that Indic writing and emoji need stay as they are.
-    fake.inbox[0]["from"]["name"] = "Priya Rama\u200dn 👩\u200d💻"
-    assert "From Priya Rama\u200dn 👩\u200d💻 · " in run("inbox", cwd=repo).stdout
+    # The joiners that Indic writing and emoji need stay as they are, and so do the characters beside those taken out
+    # (the musical symbols just before and after the ones that only shape a beam or a phrase, a Braille dot, Hangul).
+    fake.inbox[0]["from"]["name"] = "Priya Rama\u200dn 👩\u200d💻 \U0001d172\U0001d17b\u2801한"
+    assert "From Priya Rama\u200dn 👩\u200d💻 \U0001d172\U0001d17b\u2801한 · " in run("inbox", cwd=repo).stdout
 
 
 # -- 0.6.0: the command grammar takes the ways people type the commands ----------------------------------------------

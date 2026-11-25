@@ -613,8 +613,10 @@ LINES_AWK='
     # format characters: the soft hyphen (U+00AD), the zero-width space (U+200B), the word joiner and invisible
     # operators (U+2060-2064), the deprecated format characters (U+206A-206F), the byte order mark (U+FEFF), the
     # Mongolian vowel separator (U+180E), the annotation characters (U+FFF9-FFFB) and the tag characters
-    # (U+E0000-E007F), which spell words no one sees. The joiners U+200C and U+200D stay: Indic and Persian writing
-    # and emoji need them.
+    # (U+E0000-E007F), which spell words no one sees; and the characters that show only as blank space: the Hangul
+    # fillers (U+115F, U+1160, U+3164, U+FFA0), the combining grapheme joiner (U+034F), the Khmer inherent vowels
+    # (U+17B4, U+17B5), the musical symbols that only shape a beam, a tie, a slur or a phrase (U+1D173-1D17A) and the
+    # blank Braille pattern (U+2800). The joiners U+200C and U+200D stay: Indic and Persian writing and emoji need them.
     TURNS = sprintf("%c%c%c", 226, 128, 170)
     for (turn = 171; turn <= 174; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 226, 128, turn)
     for (turn = 166; turn <= 169; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 226, 129, turn)
@@ -625,6 +627,11 @@ LINES_AWK='
     TURNS = TURNS "|" sprintf("%c%c%c", 239, 187, 191) "|" sprintf("%c%c%c", 225, 160, 142)
     for (turn = 185; turn <= 187; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 239, 191, turn)
     TURNS = TURNS "|" sprintf("%c%c%c", 243, 160, 128) "." "|" sprintf("%c%c%c", 243, 160, 129) "."
+    TURNS = TURNS "|" sprintf("%c%c%c", 225, 133, 159) "|" sprintf("%c%c%c", 225, 133, 160)
+    TURNS = TURNS "|" sprintf("%c%c%c", 227, 133, 164) "|" sprintf("%c%c%c", 239, 190, 160) "|" sprintf("%c%c", 205, 143)
+    TURNS = TURNS "|" sprintf("%c%c%c", 225, 158, 180) "|" sprintf("%c%c%c", 225, 158, 181)
+    for (turn = 179; turn <= 186; turn++) TURNS = TURNS "|" sprintf("%c%c%c%c", 240, 157, 133, turn)
+    TURNS = TURNS "|" sprintf("%c%c%c", 226, 160, 128)
   }'
 
 # Words as a quoted record: QUOTE_TOP, then each of their lines marked with QUOTE_MARK however it was broken, then
