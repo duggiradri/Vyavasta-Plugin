@@ -4537,6 +4537,59 @@ def test_scratch_folders_a_killed_hook_left_are_removed_when_a_session_starts(ru
     assert sorted(path.name for path in scratch.iterdir()) == ["someone-else.ghi789", "vyavasta.def456"]
 
 
+def test_links_devices_and_large_files_are_named_and_never_read(run, fake, repo, tmp_path):
+    """Only small regular files are opened to count their lines: an untracked link to a large file or to a device,
+    and a pipe, are listed by name with no count, and none can slow a hook down or hold it up."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    big = tmp_path / "big.csv"
+    with big.open("wb") as data:
+        data.truncate(300_000_000)
+    (repo / "data.csv").symlink_to(big)
+    (repo / "zero.txt").symlink_to("/dev/zero")
+    os.mkfifo(repo / "queue")
+    (repo / "queue-link").symlink_to(repo / "queue")
+    (repo / "note.txt").write_text("one\ntwo\n")
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo)
+    assert done.seconds < 5
+    files = {entry["path"]: entry for entry in fake.calls("/work")[-1]["body"]["files"]}
+    assert files["note.txt"]["additions"] == 2
+    for name in ("data.csv", "zero.txt", "queue-link"):
+        assert files[name]["additions"] == 0, name
+    done = run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Write"), cwd=repo)
+    assert done.seconds < 5
+
+
+def test_a_repositorys_own_filters_never_run_and_the_developers_own_are_left_alone(run, fake, repo, tmp_path):
+    """A repository that came as a folder names its own filter programs, in its .git/config, a file it includes, or
+    for files named in .git/info/attributes: none of them runs. A filter the developer set up for every repository
+    (git-lfs's, say) is used as git always uses it."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    sharing_on(run, fake, repo)
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    def ran(name: str) -> str:
+        return f"sh -c 'touch {marks}/{name}; cat'"
+    git(repo, "config", "filter.evil.clean", ran("clean"))
+    git(repo, "config", "filter.evil.smudge", ran("smudge"))
+    git(repo, "config", "filter.evil.required", "true")
+    git(repo, "config", "--file", str(tmp_path / "included.cfg"), "filter.from include.clean", ran("included"))
+    git(repo, "config", "include.path", str(tmp_path / "included.cfg"))
+    git(repo, "config", "filter.mine.clean", ran("mine"))
+    # (The developer's own settings: the hooks run with HOME there.)
+    git(repo, "config", "--file", str(tmp_path / ".gitconfig"), "filter.mine.clean", ran("mine"))
+    (repo / ".gitattributes").write_text("calc.py filter=evil\nold.py filter=mine\n")
+    (repo / ".git" / "info" / "attributes").write_text("gone.py filter=from\\ include\n")
+    for name in ("calc.py", "old.py", "gone.py"):
+        (repo / name).write_text("changed\n")
+    prompt(run, repo, "Change calc.py")
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Write"), cwd=repo)
+    stop(run, repo, last_assistant_message="Done.")
+    assert sorted(path.name for path in marks.iterdir()) == ["mine"]
+    assert fake.calls("/check")[-1]["body"]["change"]["files"] >= 1
+
+
 @pytest.mark.parametrize("status, said", [
     (429, "Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for "
           "a moment. Claude works as usual."),

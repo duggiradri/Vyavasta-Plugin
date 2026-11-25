@@ -39,7 +39,7 @@ VYAVASTA_BROWSER="${VYAVASTA_BROWSER:-${VYAVASTHA_BROWSER:-}}"
 VYAVASTA_SESSION="${VYAVASTA_SESSION:-${VYAVASTHA_SESSION:-}}"
 # Every git command here, through this one door: a repository's own settings never run a program on this computer
 # when the plugin reads it (one that came as a folder rather than a clone can name one, to watch its files or as its
-# hooks).
+# hooks; its filters are switched off by `quiet_filters`, and the diffs' own programs by DIFF_OPTIONS).
 git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # Nothing a command writes to its error output ever reaches the developer or the tool: each failure has its own
 # plain sentence instead.
@@ -1073,6 +1073,7 @@ repository() {
   [ -z "$NOGIT" ] || { ROOT=""; return 1; }
   ROOT=$(git_read -C "$1" rev-parse --show-toplevel) || return 1
   [ -n "$ROOT" ] || return 1
+  quiet_filters
   REMOTE=$(git_read -C "$ROOT" remote get-url origin)
   if [ -z "$REMOTE" ]; then
     first=$(git_read -C "$ROOT" remote | sed -n '1p')
@@ -1081,6 +1082,43 @@ repository() {
   REMOTE=$(printf '%s' "$REMOTE" | sed -E 's#^([A-Za-z+]+://)[^@/]*@#\1#')
   BRANCH=$(git_read -C "$ROOT" symbolic-ref --short -q HEAD)
   return 0
+}
+
+# The filters a repository's own settings name (its .git/config and its worktree's, with what they include) are
+# switched off for every git command here while the script runs: git runs a filter's program on each file it
+# compares, and a repository that came as a folder can name any program as one. A filter the developer set up for
+# every repository (each of its programs the one their global or system settings name, such as git-lfs's) is left as
+# it is. They are switched off as settings given on git's command line are, through its environment, so that any
+# name is passed as it is. (A git older than 2.31 takes no settings this way, and is left as it was.)
+quiet_filters() {
+  [ "${FILTERS_QUIET:-}" = "$ROOT" ] && return 0
+  FILTERS_QUIET=$ROOT
+  # The drivers the repository's own settings define, one to a line (no name holds a line break), by the scope git
+  # read each from.
+  git_read -C "$ROOT" config --show-scope --includes --name-only -z --get-regexp '^filter\..*\.(clean|smudge|process)$' \
+    | tr '\000' '\n' | awk 'NR % 2 == 1 { scope = $0; next }
+      scope == "local" || scope == "worktree" { sub(/\.[a-z]*$/, ""); if (!($0 in seen)) { seen[$0] = 1; print } }' \
+    > "$TMP/filters-here"
+  [ -s "$TMP/filters-here" ] || return 0
+  count=${GIT_CONFIG_COUNT:-0}
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  while IFS= read -r driver; do
+    own=1
+    for part in clean smudge process; do
+      here=$(git_read -C "$ROOT" config --includes --get "$driver.$part")
+      mine=$(git_read config --global --includes --get "$driver.$part" || git_read config --system --includes --get "$driver.$part")
+      [ "$here" = "$mine" ] || own=""
+    done
+    [ -z "$own" ] || continue
+    for part in clean smudge process; do
+      export "GIT_CONFIG_KEY_$count=$driver.$part" "GIT_CONFIG_VALUE_$count="
+      count=$((count + 1))
+    done
+    export "GIT_CONFIG_KEY_$count=$driver.required" "GIT_CONFIG_VALUE_$count=false"
+    count=$((count + 1))
+  done < "$TMP/filters-here"
+  GIT_CONFIG_COUNT=$count
+  export GIT_CONFIG_COUNT
 }
 
 # -- what changed in the working tree ---------------------------------------------------------------------------
@@ -1093,9 +1131,10 @@ BIG_FILE=1000000
 # At most this many new files are looked at; any more are left out as past the limit.
 NEW_FILES=2000
 # git's own options for every listing and diff here, the same each time so its lists agree: rename detection, and
-# nothing an outside program or filter does. (Each also treats a file over BIG_FILE as one that isn't text, so it is
+# nothing an outside program or filter does. A submodule counts by the commit it is at: git never looks inside it,
+# where its own settings could run a program. (Each also treats a file over BIG_FILE as one that isn't text, so it is
 # never compared line by line.)
-DIFF_OPTIONS="-M --no-ext-diff --no-textconv"
+DIFF_OPTIONS="-M --no-ext-diff --no-textconv --ignore-submodules=dirty"
 
 # Which paths look like keys or credentials, or are written by machines: by name only, in any letter case.
 CLASSIFY='
@@ -1179,7 +1218,8 @@ scan_tree() {
   SCANNED=1
   SCAN_INDEX=""
   HEAD_SHA=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
-  true > "$TMP/add"; true > "$TMP/big"; true > "$TMP/left-untracked"; true > "$TMP/added"
+  true > "$TMP/add"; true > "$TMP/big"; true > "$TMP/left-untracked"; true > "$TMP/added"; true > "$TMP/countable"
+  true > "$TMP/links"
   git_read -C "$ROOT" ls-files --others --exclude-standard -z -- . "$OWN_SETTINGS" | tr '\000' '\001' \
     | awk -v ADD="$TMP/add" -v LEFT="$TMP/left-untracked" -v MOST="$NEW_FILES" "$CLASSIFY"'
       BEGIN { RS = "\001"; added = 0 }
@@ -1189,13 +1229,28 @@ scan_tree() {
         if (w == "" && added >= MOST) w = "limit"
         if (w == "") { print $0 > ADD; added++ } else printf "%s\t%s%c", w, $0, 1 > LEFT }'
   if [ -s "$TMP/add" ]; then
-    # Their sizes, from the file system alone: every character escaped for xargs, so any name is passed as it is.
+    # Which of them are regular files no larger than BIG_FILE, from the file system alone (every character escaped
+    # for xargs, so any name is passed as it is): only those are ever read here, to count their lines. A link is
+    # given to git like them, which reads where it points and never what is there; a larger file is left out as past
+    # the limit; a device or a pipe is listed by its name alone, as a file that isn't text. So nothing in the folder
+    # can slow a hook down or hold it up.
     (cd "$ROOT" && sed -e 's#^#./#' -e 's/./\\&/g' "$TMP/add" \
-      | xargs sh -c 'exec find "$@" -prune -type f -size +'"$BIG_FILE"'c -print' sh) > "$TMP/big"
-    awk -v LEFT="$TMP/left-untracked" '
-      FILENAME == ARGV[1] { big[substr($0, 3)] = 1; next }
-      ($0 in big) { printf "limit\t%s%c", $0, 1 >> LEFT; next }
-      { print }' "$TMP/big" "$TMP/add" > "$TMP/added"
+      | xargs sh -c 'exec find "$@" -prune -type f -size -'"$((BIG_FILE + 1))"'c -print' sh) > "$TMP/small"
+    awk -v REST="$TMP/rest-untracked" '
+      FILENAME == ARGV[1] { small[substr($0, 3)] = 1; next }
+      ($0 in small) { print; next }
+      { print > REST }' "$TMP/small" "$TMP/add" > "$TMP/countable"
+    cp "$TMP/countable" "$TMP/added"
+    if [ -s "$TMP/rest-untracked" ]; then
+      (cd "$ROOT" && sed -e 's#^#./#' -e 's/./\\&/g' "$TMP/rest-untracked" | xargs sh -c \
+        'exec find "$@" -prune \( -type f -exec printf "big\t%s\n" {} + -o -type l -exec printf "link\t%s\n" {} + \)' sh) \
+        > "$TMP/big"
+      awk -v LEFT="$TMP/left-untracked" -v LINKS="$TMP/links" '
+        FILENAME == ARGV[1] { k = index($0, "\t"); kind[substr($0, k + 3)] = substr($0, 1, k - 1); next }
+        kind[$0] == "link" { print > LINKS; print; next }
+        { printf "%s\t%s%c", ((kind[$0] == "big") ? "limit" : "binary"), $0, 1 >> LEFT }' "$TMP/big" "$TMP/rest-untracked" \
+        >> "$TMP/added"
+    fi
   fi
   # git reads a copy of the developer's index, never their own: comparing the working tree, it may rewrite an index
   # whose times look stale even when told to take no optional lock. (Its times kept, so git tells a file changed
@@ -1216,11 +1271,12 @@ scan_tree() {
 
 # git's own list of what changed in the working tree and the index since the last commit, as a JSON array of
 # paths, statuses and line counts, written to $TMP/files without its brackets. Nothing of any file is sent. A new
-# file git didn't compare has its lines counted here (each is under BIG_FILE, and at most 200 are counted); one left
-# out by name or size is listed with no counts. NFILES is how many there are.
+# file git didn't compare has its lines counted here (each is a regular file under BIG_FILE, and at most 200 are
+# counted); a link, and one left out by name or size, is listed with no counts. NFILES is how many there are.
 changed_files() {
   scan_tree
-  tr '\n' '\001' < "$TMP/added" > "$TMP/added-list"
+  tr '\n' '\001' < "$TMP/countable" > "$TMP/added-list"
+  tr '\n' '\001' < "$TMP/links" > "$TMP/links-list"
   (cd "$ROOT" && awk -v COUNT="$TMP/files-count" "$AWK_ESCAPE$SCAN_AWK"'
     function lines(path,   count, line) {
       count = 0; RS = "\n"
@@ -1239,6 +1295,7 @@ changed_files() {
     FILENAME == ARGV[1] { scan_record($0); next }
     FILENAME == ARGV[2] { k = index($0, "\t"); if (k) more[++extra] = substr($0, k + 1); next }
     FILENAME == ARGV[3] { if ($0 != "") small[++smalls] = $0; next }
+    FILENAME == ARGV[4] { if ($0 != "") link[++links] = $0; next }
     END {
       for (e = 1; e <= n; e++) {
         s = st[e]
@@ -1247,9 +1304,10 @@ changed_files() {
       }
       # New files git was not asked to compare: counted here, or listed by name only.
       for (e = 1; e <= smalls; e++) if (!(small[e] in seen)) show(small[e], "added", (counted++ < 200) ? lines(small[e]) : 0, 0)
+      for (e = 1; e <= links; e++) show(link[e], "added", 0, 0)
       for (e = 1; e <= extra; e++) show(more[e], "added", 0, 0)
       printf "%d\n", shown > COUNT
-    }' "$TMP/scan" "$TMP/left-untracked" "$TMP/added-list") > "$TMP/files-raw"
+    }' "$TMP/scan" "$TMP/left-untracked" "$TMP/added-list" "$TMP/links-list") > "$TMP/files-raw"
   clean_utf8 "$TMP/files-raw" "$TMP/files"
   NFILES=$(cat "$TMP/files-count")
   [ -n "$NFILES" ] || NFILES=0
