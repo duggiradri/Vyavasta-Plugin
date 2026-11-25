@@ -2040,7 +2040,9 @@ $WHATS_NEW
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
       fi
-      update=$(update_said "$TMP/answer")
+      # (A newer plugin is told of from /me's answer, at a start that asked for one: a session that goes on asks
+      # nothing and greets nobody.)
+      update=""; [ -n "$quiet" ] || update=$(update_said "$TMP/answer")
       [ -z "$update" ] || greeting="$greeting $update"
       greeting="$greeting$SUMMARIES_NOTE"
       # What teammates told the developer, or asked of them, while they were away, each told once: the tool's model is
