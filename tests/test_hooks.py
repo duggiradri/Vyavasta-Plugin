@@ -723,8 +723,8 @@ def test_a_message_for_a_teammate_that_vyavasta_doesnt_take_says_first_that_it_w
     """“@rohan standup in five” is blocked by the hook, so once Vyavasta turns it away neither the tool's model nor
     Rohan has it: what it says opens with what became of it, then why and when to send it again, chosen by the status
     and the refusal's code, never by the server's sentence. The developer's typed command and the tool's model's
-    command say the same. One that went out and got no answer in time, or whose answer was cut off, may have arrived
-    or not: it says so, and to look for it before sending it again."""
+    command say the same. One that went out and got no answer in time, whose answer was cut off, or that met a server
+    that failed, may have arrived or not: it says so, and to look for it before sending it again."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.check = {"verdict": "teammate", "hold": False, "repository": "acme/api", "notice": "", "context": "",
@@ -739,8 +739,10 @@ def test_a_message_for_a_teammate_that_vyavasta_doesnt_take_says_first_that_it_w
         (429, "busy", "Not sent: Vyavasta is busy just now. Send it again in a moment."),
         (429, "x", "Not sent: Vyavasta had too many requests just now. Send it again in a moment."),
         (503, "restarting", "Not sent: Vyavasta is restarting. Send it again in a moment."),
-        (503, "x", "Not sent: Vyavasta’s server isn’t working right now. Send it again in a minute."),
-        (500, "x", "Not sent: Vyavasta’s server isn’t working right now. Send it again in a minute."),
+        (503, "x", "Not known whether it was sent: Vyavasta’s server isn’t working right now. Look for it in "
+                   "Vyavasta before you send it again."),
+        (500, "x", "Not known whether it was sent: Vyavasta’s server isn’t working right now. Look for it in "
+                   "Vyavasta before you send it again."),
         (401, "signed_out", "Not sent: this computer’s connection to Vyavasta has ended. Send “vyavasta sign in” to "
                             "connect again."),
         (422, "x", "Not sent: Vyavasta couldn’t take it as it was sent. Something in it is longer than Vyavasta "

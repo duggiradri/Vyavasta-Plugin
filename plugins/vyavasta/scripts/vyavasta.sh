@@ -3509,9 +3509,10 @@ not_reached() {
 
 # What a message for a teammate says when Vyavasta didn't take it (`tell`): what became of it first, then why, chosen
 # by the status and the refusal's code as `not_reached` chooses for the other commands. One turned away, met by a
-# server that failed, was restarting or couldn't be reached, or never sent at all, was not sent, and is to be sent
-# again. One that went out and got no answer in time, or whose answer was cut off, may have reached them or not: that
-# is said, with where to look before it is sent again.
+# server that was restarting (which refuses a call before it begins) or couldn't be reached, or never sent at all, was
+# not sent, and is to be sent again. One that went out and got no answer in time, whose answer was cut off, or that
+# met a server that failed (which may fail after the message is kept) may have reached them or not: that is said, with
+# where to look before it is sent again.
 not_sent() {
   case "$STATUS" in
     401) echo "Not sent: this computer’s connection to Vyavasta has ended. $WAY_IN_AGAIN" ;;
@@ -3524,7 +3525,7 @@ not_sent() {
       else echo "Not sent: Vyavasta’s server can’t be reached right now. Check your internet connection, or send it again in a minute."; fi ;;
     5*)
       if [ "$(refusal_code)" = "restarting" ]; then echo "Not sent: Vyavasta is restarting. Send it again in a moment."
-      else echo "Not sent: Vyavasta’s server isn’t working right now. Send it again in a minute."; fi ;;
+      else echo "Not known whether it was sent: Vyavasta’s server isn’t working right now. Look for it in Vyavasta before you send it again."; fi ;;
     422) echo "Not sent: Vyavasta couldn’t take it as it was sent. Something in it is longer than Vyavasta takes." ;;
     *) said=$(refusal); echo "Not sent: ${said:-Vyavasta couldn’t take it just now. Send it again in a minute.}" ;;
   esac
