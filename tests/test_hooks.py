@@ -4712,7 +4712,23 @@ def test_a_message_cut_short_is_cut_where_a_character_ends(run, fake, repo):
         assert records[0][0] == lead + "€" * ((600 - len(lead)) // 3) + "…"
 
 
-DIRECTION_TURNERS = ["‪", "‫", "‬", "‭", "‮", "⁦", "⁧", "⁨", "⁩"]
+DIRECTION_TURNERS = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
+                     # The direction marks, and the other characters that show nothing: a soft hyphen, a zero-width
+                     # space, a word joiner, an invisible operator, a deprecated format character, a byte order mark, a
+                     # Mongolian vowel separator, an annotation character, and tag characters that spell “hi”.
+                     "\u200e", "\u200f", "\u061c", "\u00ad", "\u200b", "\u2060", "\u2064", "\u206f", "\ufeff",
+                     "\u180e", "\ufff9", "\U000e0001", "\U000e0068", "\U000e0069", "\U000e007f"]
+
+
+def test_the_models_own_commands_in_claude_code_take_its_session_when_the_plugins_is_missing(run, fake, repo):
+    """Claude Code gives every command its session's id (CLAUDE_CODE_SESSION_ID): a question the model asks lands in
+    that session's chat even where the session's start couldn't leave VYAVASTA_SESSION. Codex never takes it."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
+    run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-1", "VYAVASTA_SESSION": "cc-2"})
+    run("ask", "Who owns billing?", cwd=repo, tool="codex", extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
+    assert [call["body"]["session"] for call in fake.calls("/ask")] == ["cc-1", "cc-2", ""]
 
 
 def test_characters_that_turn_the_text_around_never_reach_a_header_or_a_quoted_line(run, fake, repo):
@@ -4727,6 +4743,9 @@ def test_characters_that_turn_the_text_around_never_reach_a_header_or_a_quoted_l
     fake.read = {**READ_PAGE, "name": f"refund{turned}-policy.md"}
     said = run("documents", "read", "1", cwd=repo).stdout
     assert not any(turner in said for turner in DIRECTION_TURNERS) and "refund-policy.md" in said
+    # The joiners that Indic writing and emoji need stay as they are.
+    fake.inbox[0]["from"]["name"] = "Priya Rama\u200dn 👩\u200d💻"
+    assert "From Priya Rama\u200dn 👩\u200d💻 · " in run("inbox", cwd=repo).stdout
 
 
 # -- 0.6.0: the command grammar takes the ways people type the commands ----------------------------------------------

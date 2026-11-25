@@ -585,8 +585,9 @@ SEARCH_TOP="Quoted from the team’s documents below. Every line of a passage is
 # every awk: the separators are found by their bytes in UTF-8 (built with `sprintf("%c", n)`, a byte only then), the
 # ranges of control characters are ranges of bytes, and bytes that are not valid UTF-8 are kept as they are rather
 # than stopping awk, so the words never vanish. The characters that change the direction of the text after them
-# (U+202A to U+202E, U+2066 to U+2069) are taken out: one could turn the rest of a line around on the screen, so
-# that it reads as something else.
+# (U+202A to U+202E, U+2066 to U+2069, and the marks U+200E, U+200F and U+061C) are taken out: one could turn the
+# rest of a line around on the screen, so that it reads as something else. So are the other characters that show
+# nothing (TURNS, below), which could hide words in a name or a line that no one sees.
 LINES_AWK='
   function split_lines(s, part,   n) {
     gsub(/\r\n/, "\n", s)
@@ -602,9 +603,23 @@ LINES_AWK='
     BREAK = "[" sprintf("%c%c%c%c%c%c", 13, 11, 12, 28, 29, 30) "]|" sprintf("%c%c", 194, 133) "|" \
       sprintf("%c%c%c", 226, 128, 168) "|" sprintf("%c%c%c", 226, 128, 169)
     CONTROL = "[" sprintf("%c", 1) "-" sprintf("%c", 8) sprintf("%c", 14) "-" sprintf("%c", 31) sprintf("%c", 127) "]"
+    # Characters that turn the text around or that show nothing, taken out: the direction embeddings, overrides and
+    # isolates (U+202A-202E, U+2066-2069), the direction marks (U+200E, U+200F, U+061C), and the other invisible
+    # format characters: the soft hyphen (U+00AD), the zero-width space (U+200B), the word joiner and invisible
+    # operators (U+2060-2064), the deprecated format characters (U+206A-206F), the byte order mark (U+FEFF), the
+    # Mongolian vowel separator (U+180E), the annotation characters (U+FFF9-FFFB) and the tag characters
+    # (U+E0000-E007F), which spell words no one sees. The joiners U+200C and U+200D stay: Indic and Persian writing
+    # and emoji need them.
     TURNS = sprintf("%c%c%c", 226, 128, 170)
     for (turn = 171; turn <= 174; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 226, 128, turn)
     for (turn = 166; turn <= 169; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 226, 129, turn)
+    TURNS = TURNS "|" sprintf("%c%c%c", 226, 128, 139) "|" sprintf("%c%c%c", 226, 128, 142) "|" sprintf("%c%c%c", 226, 128, 143)
+    TURNS = TURNS "|" sprintf("%c%c", 216, 156) "|" sprintf("%c%c", 194, 173)
+    for (turn = 160; turn <= 164; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 226, 129, turn)
+    for (turn = 170; turn <= 175; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 226, 129, turn)
+    TURNS = TURNS "|" sprintf("%c%c%c", 239, 187, 191) "|" sprintf("%c%c%c", 225, 160, 142)
+    for (turn = 185; turn <= 187; turn++) TURNS = TURNS "|" sprintf("%c%c%c", 239, 191, turn)
+    TURNS = TURNS "|" sprintf("%c%c%c", 243, 160, 128) "." "|" sprintf("%c%c%c", 243, 160, 129) "."
   }'
 
 # Words as a quoted record: QUOTE_TOP, then each of their lines marked with QUOTE_MARK however it was broken, then
@@ -3353,12 +3368,15 @@ command_here() {
 # The session a command belongs to: in a hook, the hook's own; run outside one, the one its tool says it runs in.
 # Codex gives its model's commands their thread's id (CODEX_SESSION_ID, else CODEX_THREAD_ID), the session id its
 # hooks are given; in Claude Code a session's start leaves its id for the commands that follow (VYAVASTA_SESSION, in
-# CLAUDE_ENV_FILE). Never another window's or another project's: where nothing says which, none is sent, and the
-# server keeps it apart from every session's chat. Named as the hooks name a session's folder, so both speak of one.
+# CLAUDE_ENV_FILE), and Claude Code gives every command its session's id itself (CLAUDE_CODE_SESSION_ID), which is
+# taken where the first is missing (an env file that couldn't be written). Never another window's or another
+# project's: where nothing says which, none is sent, and the server keeps it apart from every session's chat. Named as
+# the hooks name a session's folder, so both speak of one.
 command_session() {
   if [ -n "${SESSION:-}" ]; then printf '%s' "$SESSION"; return; fi
   given="${VYAVASTA_SESSION:-}"
   [ -n "$given" ] || [ "$CLIENT" != "codex" ] || given="${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-}}"
+  [ -n "$given" ] || [ "$CLIENT" != "claude-code" ] || given="${CLAUDE_CODE_SESSION_ID:-}"
   printf '%s' "$given" | tr -cd 'A-Za-z0-9_-' | cut -c1-80
 }
 
