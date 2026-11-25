@@ -1085,15 +1085,33 @@ from_vyavasta() {
 
 answer() { json_get "$TMP/answer" "$1"; }
 
+# The code a refusal from Vyavasta itself gave (`from_vyavasta`), such as `busy` or `restarting`; nothing for any other
+# answer. What is said of a refusal is chosen by this code alone, never by the words of the server's sentence.
+refusal_code() {
+  from_vyavasta && json_text "$(json_get "$TMP/detail" code)"
+}
+
 # Why the server turned a call away for too many calls (429), as the start of a sentence, by the code it gave: this
-# computer sent too many (`rate_limited`), or Vyavasta is busy for everyone just now (`busy`); words that blame neither
-# when it gave another code or none (a page in between). $1 names Vyavasta where it is busy: “Vyavasta” or “the server”.
+# computer sent too many in the last minute (`rate_limited`), Vyavasta is still working on this computer's earlier
+# requests (`working`: as many of its checks or questions as it takes at once are under way, or the same request
+# still is), or Vyavasta is busy for everyone just now (`busy`); words that blame neither when it gave another code or
+# none (a page in between). $1 names Vyavasta where it is busy or working: “Vyavasta” or “the server”.
 busy_said() {
-  json_get "$TMP/answer" detail > "$TMP/detail"
-  case "$(json_text "$(json_get "$TMP/detail" code)")" in
+  case "$(refusal_code)" in
     rate_limited) printf '%s' "this computer sent Vyavasta too many requests in the last minute" ;;
+    working) printf '%s is still working on this computer’s earlier requests' "$1" ;;
     busy) printf '%s is busy just now' "$1" ;;
     *) printf '%s had too many requests just now' "$1" ;;
+  esac
+}
+# When to send again a call turned away for too many calls, by the same code, as the end of a sentence (“in a
+# minute”): only too many requests in the last minute take that long to clear, and earlier requests still under way
+# end within seconds.
+busy_again() {
+  case "$(refusal_code)" in
+    rate_limited) printf '%s' "in a minute" ;;
+    working) printf '%s' "in a few seconds" ;;
+    *) printf '%s' "in a moment" ;;
   esac
 }
 
@@ -3430,7 +3448,7 @@ need_token() {
 not_reached() {
   case "$STATUS" in
     401) echo "This computer’s connection to Vyavasta has ended. $WAY_IN_AGAIN" ;;
-    429) echo "$(busy_said Vyavasta | sed 's/^t/T/'). Try again in a minute." ;;
+    429) echo "$(busy_said Vyavasta | sed 's/^t/T/'). Try again $(busy_again)." ;;
     000)
       if [ -n "$NOCURL" ]; then echo "Vyavasta needs curl, which isn’t installed here. Install it, and on Windows use Git for Windows, which brings it."
       elif [ -n "$SLOW" ]; then echo "Vyavasta took too long to answer. Try again in a moment."
@@ -4518,7 +4536,9 @@ command_ask_assistant() {
       fi
       ;;
     401) echo "This computer’s connection to Vyavasta has ended, so nothing was asked. Tell the developer: $WAY_IN_AGAIN" ;;
-    429) echo "$(busy_said Vyavasta | sed 's/^t/T/'). Ask again in a minute." ;;
+    # (The model is told to ask again in a minute only when this computer sent too many requests in the last minute:
+    # it waits as long as it is told.)
+    429) echo "$(busy_said Vyavasta | sed 's/^t/T/'). Ask again $(busy_again)." ;;
     422) echo "Vyavasta couldn’t take that question as it was sent, so nothing was asked. Ask it in fewer words." ;;
     000)
       # Out of reach at once, under Codex: inside its sandbox, which Codex says of a command it runs there

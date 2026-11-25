@@ -666,17 +666,21 @@ def test_a_server_that_fails_or_is_busy_is_said_in_one_plain_line(run, fake, rep
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
 
 
-@pytest.mark.parametrize("code, why", [
-    ("busy", ("the server is busy just now", "Vyavasta is busy just now")),
+@pytest.mark.parametrize("code, why, again", [
+    ("busy", ("the server is busy just now", "Vyavasta is busy just now"), "in a moment"),
     ("rate_limited", ("this computer sent Vyavasta too many requests in the last minute",
-                      "This computer sent Vyavasta too many requests in the last minute")),
-    ("x", ("the server had too many requests just now", "Vyavasta had too many requests just now"))])
-def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, repo, code, why):
-    """A 429 is this computer's doing only when the server says so (`rate_limited`); “busy” is Vyavasta's, for
-    everyone; any other code, or none, blames neither."""
+                      "This computer sent Vyavasta too many requests in the last minute"), "in a minute"),
+    ("working", ("the server is still working on this computer’s earlier requests",
+                 "Vyavasta is still working on this computer’s earlier requests"), "in a few seconds"),
+    ("x", ("the server had too many requests just now", "Vyavasta had too many requests just now"), "in a moment")])
+def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, repo, code, why, again):
+    """A 429 is this computer's doing only when the server says so: too many requests in the last minute
+    (`rate_limited`), or its earlier requests still under way (`working`); “busy” is Vyavasta's, for everyone; any other
+    code, or none, blames neither. Only the limit of a minute tells the model, or the developer, to wait a minute: a
+    model waits as long as it is told."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    fake.code = {"/me": code, "/check": code, "/ask": code, "/inbox": code}
+    fake.code = {"/me": code, "/check": code, "/ask": code, "/inbox": code, "/tell": code}
     fake.status = {"/me": 429}
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
     assert started == f"Vyavasta: {why[0]}, so requests aren’t checked for a moment. Claude works as usual."
@@ -684,9 +688,32 @@ def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, r
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
         f" · {why[1]}, so it wasn’t checked. Claude works as usual.")
     fake.status = {"/inbox": 429}
-    assert run("inbox", cwd=repo).stdout == f"{why[1]}. Try again in a minute.\n"
+    assert run("inbox", cwd=repo).stdout == f"{why[1]}. Try again {again}.\n"
+    assert prompt(run, repo, "vyavasta inbox")["reason"] == f"{why[1]}. Try again {again}."
+    fake.status = {"/tell": 429}
+    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == f"{why[1]}. Try again {again}.\n"
     fake.status = {"/ask": 429}
-    assert run("ask", "Who owns billing?", cwd=repo).stdout == f"{why[1]}. Ask again in a minute.\n"
+    assert run("ask", "Who owns billing?", cwd=repo).stdout == f"{why[1]}. Ask again {again}.\n"
+    assert run("ask", "Who owns billing?", cwd=repo, tool="codex").stdout == f"{why[1]}. Ask again {again}.\n"
+    # None of these is the server out of reach, or not answering.
+    assert not any((run.home / marker).exists() for marker in ("offline", "slow", "unanswered"))
+
+
+def test_too_many_requests_is_told_by_the_code_alone_never_by_the_servers_sentence(run, fake, repo):
+    """A sentence that speaks of earlier requests, with a code that says nothing of them, is told as that code is: what
+    the plugin says is chosen by the code alone."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.refused = "Vyavasta is still working on this computer’s earlier messages. Send it again in a moment."
+    fake.code = {"/ask": "rate_limited"}
+    fake.status = {"/ask": 429}
+    assert run("ask", "Who owns billing?", cwd=repo).stdout == (
+        "This computer sent Vyavasta too many requests in the last minute. Ask again in a minute.\n")
+    # A page in between that answers 429 with a code of its own in no detail of Vyavasta's: the neutral words.
+    del fake.status["/ask"]
+    fake.page["/ask"] = (429, b'{"code": "working", "message": "Slow down."}')
+    assert run("ask", "Who owns billing?", cwd=repo).stdout == (
+        "Vyavasta had too many requests just now. Ask again in a moment.\n")
 
 
 def test_a_connection_ended_in_settings_signs_this_computer_out(run, fake, repo):
