@@ -23,7 +23,7 @@ Your setup
 - `vyavasta status`: whether this computer is signed in, and whether this project, code sharing and summaries are on.
 - `vyavasta check`: tests sign-in, the connection, this project and the plugin’s version, and says how to fix each problem.
 - `vyavasta off`: stop using Vyavasta in this project.
-- `vyavasta sign out`: disconnect this computer.
+- `vyavasta sign out`: disconnect this computer. Nothing signs in again by itself until the developer sends `vyavasta sign in`.
 
 See what is shared
 - `vyavasta settings`: every setting and how to change it.

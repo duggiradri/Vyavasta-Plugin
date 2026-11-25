@@ -407,7 +407,9 @@ def whats_new(tool: str = "Claude Code") -> str:
     return (f"New in {VERSION}: {slash} line under each message is short after the first of a session. “vyavasta "
             "login”, “vyavasta turn on”, “vyavasta: status” and the like are commands too, and a mistyped one says which "
             "command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. "
-            "Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all.")
+            "Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all. The "
+            "end of a turn says when some are waiting. After “vyavasta sign out”, nothing signs in by itself until you "
+            "send “vyavasta sign in”.")
 
 
 def greeted() -> str:

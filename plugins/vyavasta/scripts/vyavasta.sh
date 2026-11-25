@@ -180,7 +180,7 @@ guide_said() {
     printf '“vyavasta help” shows the commands any time.'
   fi
 }
-WHATS_NEW="line under each message is short after the first of a session. “vyavasta login”, “vyavasta turn on”, “vyavasta: status” and the like are commands too, and a mistyped one says which command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all."
+WHATS_NEW="line under each message is short after the first of a session. “vyavasta login”, “vyavasta turn on”, “vyavasta: status” and the like are commands too, and a mistyped one says which command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all. The end of a turn says when some are waiting. After “vyavasta sign out”, nothing signs in by itself until you send “vyavasta sign in”."
 case "$CLIENT" in
   claude-code) WHATS_NEW="New in $VERSION: slash commands such as /vyavasta:status answer at once, with no turn of Claude. The $WHATS_NEW" ;;
   *) WHATS_NEW="New in $VERSION: the $WHATS_NEW" ;;
@@ -3588,7 +3588,7 @@ Your setup
 - “vyavasta status”: whether you’re signed in, and whether this project, code sharing and summaries are on.
 - “vyavasta check”: tests sign-in, the connection, this project and the plugin’s version, and says how to fix each problem.
 - “vyavasta off”: stop using Vyavasta in this project.
-- “vyavasta sign out”: disconnect this computer.
+- “vyavasta sign out”: disconnect this computer. Nothing signs in again by itself until you send “vyavasta sign in”.
 See what is shared
 - “vyavasta settings”: every setting and how to change it.
 - “vyavasta open” / “vyavasta open settings”: open Vyavasta, or your settings there, in your browser.
@@ -3600,7 +3600,7 @@ See what is shared
 - “vyavasta upload”: opens that chat so you can drop in a file for your next question.
 Teammates
 - “vyavasta team”: what each teammate is working on, from the summaries they share with the team.
-- “vyavasta inbox”: what teammates told you and asked of you. What is new also comes with your next message, at the top of ${AGENT}’s reply.
+- “vyavasta inbox”: what teammates told you and asked of you. What is new also comes with your next message, at the top of ${AGENT}’s reply, and the end of a turn says when some are waiting.
 - “@<name> <your words>” (a message that starts with “@” and their name), or “vyavasta tell <name>: <your words>”: tell a teammate something, as you wrote it. They see it in Vyavasta at once, and in their own coding tool with their next message there, and answer it themselves. “@team <your words>” (or “vyavasta tell team: …”) tells everyone else in your workspace, and several names at the start (“@priya @sam …”, or “vyavasta tell priya, sam: …”) tell each of them.
 - “vyavasta ask <name>: <question>”: ask a teammate’s agent, which is Vyavasta answering for them. It answers only from what you can both already see and does not see their computer; they see what you asked and can answer you themselves.
 - “vyavasta reply <number>: <your words>”: answer an item of your inbox.
