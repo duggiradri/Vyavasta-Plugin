@@ -666,17 +666,21 @@ def test_a_server_that_fails_or_is_busy_is_said_in_one_plain_line(run, fake, rep
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
 
 
-@pytest.mark.parametrize("code, why", [
-    ("busy", ("the server is busy just now", "Vyavasta is busy just now")),
+@pytest.mark.parametrize("code, why, again", [
+    ("busy", ("the server is busy just now", "Vyavasta is busy just now"), "in a moment"),
     ("rate_limited", ("this computer sent Vyavasta too many requests in the last minute",
-                      "This computer sent Vyavasta too many requests in the last minute")),
-    ("x", ("the server had too many requests just now", "Vyavasta had too many requests just now"))])
-def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, repo, code, why):
-    """A 429 is this computer's doing only when the server says so (`rate_limited`); “busy” is Vyavasta's, for
-    everyone; any other code, or none, blames neither."""
+                      "This computer sent Vyavasta too many requests in the last minute"), "in a minute"),
+    ("working", ("the server is still working on this computer’s earlier requests",
+                 "Vyavasta is still working on this computer’s earlier requests"), "in a few seconds"),
+    ("x", ("the server had too many requests just now", "Vyavasta had too many requests just now"), "in a moment")])
+def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, repo, code, why, again):
+    """A 429 is this computer's doing only when the server says so: too many requests in the last minute
+    (`rate_limited`), or its earlier requests still under way (`working`); “busy” is Vyavasta's, for everyone; any other
+    code, or none, blames neither. Only the limit of a minute tells the model, or the developer, to wait a minute: a
+    model waits as long as it is told."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    fake.code = {"/me": code, "/check": code, "/ask": code, "/inbox": code}
+    fake.code = {"/me": code, "/check": code, "/ask": code, "/inbox": code, "/tell": code}
     fake.status = {"/me": 429}
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
     assert started == f"Vyavasta: {why[0]}, so requests aren’t checked for a moment. Claude works as usual."
@@ -684,9 +688,32 @@ def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, r
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
         f" · {why[1]}, so it wasn’t checked. Claude works as usual.")
     fake.status = {"/inbox": 429}
-    assert run("inbox", cwd=repo).stdout == f"{why[1]}. Try again in a minute.\n"
+    assert run("inbox", cwd=repo).stdout == f"{why[1]}. Try again {again}.\n"
+    assert prompt(run, repo, "vyavasta inbox")["reason"] == f"{why[1]}. Try again {again}."
+    fake.status = {"/tell": 429}
+    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == f"{why[1]}. Try again {again}.\n"
     fake.status = {"/ask": 429}
-    assert run("ask", "Who owns billing?", cwd=repo).stdout == f"{why[1]}. Ask again in a minute.\n"
+    assert run("ask", "Who owns billing?", cwd=repo).stdout == f"{why[1]}. Ask again {again}.\n"
+    assert run("ask", "Who owns billing?", cwd=repo, tool="codex").stdout == f"{why[1]}. Ask again {again}.\n"
+    # None of these is the server out of reach, or not answering.
+    assert not any((run.home / marker).exists() for marker in ("offline", "slow", "unanswered"))
+
+
+def test_too_many_requests_is_told_by_the_code_alone_never_by_the_servers_sentence(run, fake, repo):
+    """A sentence that speaks of earlier requests, with a code that says nothing of them, is told as that code is: what
+    the plugin says is chosen by the code alone."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.refused = "Vyavasta is still working on this computer’s earlier messages. Send it again in a moment."
+    fake.code = {"/ask": "rate_limited"}
+    fake.status = {"/ask": 429}
+    assert run("ask", "Who owns billing?", cwd=repo).stdout == (
+        "This computer sent Vyavasta too many requests in the last minute. Ask again in a minute.\n")
+    # A page in between that answers 429 with a code of its own in no detail of Vyavasta's: the neutral words.
+    del fake.status["/ask"]
+    fake.page["/ask"] = (429, b'{"code": "working", "message": "Slow down."}')
+    assert run("ask", "Who owns billing?", cwd=repo).stdout == (
+        "Vyavasta had too many requests just now. Ask again in a moment.\n")
 
 
 def test_a_connection_ended_in_settings_signs_this_computer_out(run, fake, repo):
@@ -2217,8 +2244,9 @@ def test_the_end_of_a_turn_is_never_held_up_twice_by_a_server_that_does_not_answ
     assert done.stdout == "" and done.seconds < 10.5
     assert [call["path"] for call in fake.requests if call["path"] in ("/turn", "/work")] == ["/turn", "/work"]
     assert fake.calls("/turn")[-1]["body"]["work"]["files"][0]["path"] == "calc.py"
-    # (A quick call left unanswered: no hook makes a call for a minute after it.)
-    assert (run.home / "unanswered").exists()
+    # (A short call left unanswered may only have been slow: the calls after it ask the quick question first, and no
+    # minute without calls starts.)
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
     # A reply that takes too long: the report is not sent after it.
     del fake.delay["/work"]
     (run.home / "slow").unlink(missing_ok=True)
@@ -2325,7 +2353,9 @@ def test_the_first_session_says_plainly_when_the_server_cannot_be_reached(run, f
 def test_a_session_start_never_waits_long_for_a_slow_server(run, fake, repo):
     fake.delay["/pair"] = 12
     done = run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo)
-    assert "sign-in couldn’t start" in output(done)["systemMessage"] and done.seconds < 7
+    # (It took the call and answered too late: said to be that, never a server that doesn't answer.)
+    assert "sign-in couldn’t start: Vyavasta’s server didn’t answer in time." in output(done)["systemMessage"]
+    assert done.seconds < 7
     # A project that is on, with a sign-in waiting whose approval is slow to check: still well within 15 seconds.
     del fake.delay["/pair"]
     switched_on(run, fake, repo)
@@ -2633,15 +2663,15 @@ def test_a_waiting_sign_in_never_slows_or_changes_a_message_in_a_project_that_is
     assert done.stdout == "" and done.seconds < 4
     assert (run.home / "pairing").exists()
     del fake.delay["/token"]
-    # (A quick question left unanswered: the next minute's messages ask nothing.)
-    assert (run.home / "unanswered").exists()
-    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 1
-    (run.home / "unanswered").unlink()
+    # (A short call left unanswered may only have been slow: no minute without calls starts, and the next message asks
+    # again, as briefly.)
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
     # A server that answers with an error is asked again with the next message (it answers at once); one out of reach
     # is not asked again for a minute.
     fake.status["/token"] = 503
-    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
     assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 3
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 4
     assert not (run.home / "offline").exists()
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -4725,18 +4755,35 @@ DIRECTION_TURNERS = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066",
                      # space, a word joiner, an invisible operator, a deprecated format character, a byte order mark, a
                      # Mongolian vowel separator, an annotation character, and tag characters that spell “hi”.
                      "\u200e", "\u200f", "\u061c", "\u00ad", "\u200b", "\u2060", "\u2064", "\u206f", "\ufeff",
-                     "\u180e", "\ufff9", "\U000e0001", "\U000e0068", "\U000e0069", "\U000e007f"]
+                     "\u180e", "\ufff9", "\U000e0001", "\U000e0068", "\U000e0069", "\U000e007f",
+                     # And the characters that show only as blank space: the Hangul fillers, the combining grapheme
+                     # joiner, the Khmer inherent vowels, the musical symbols that only shape a beam or a phrase (the
+                     # first, the last and one between) and the blank Braille pattern.
+                     "\u115f", "\u1160", "\u3164", "\uffa0", "\u034f", "\u17b4", "\u17b5", "\U0001d173", "\U0001d177",
+                     "\U0001d17a", "\u2800"]
 
 
-def test_the_models_own_commands_in_claude_code_take_its_session_when_the_plugins_is_missing(run, fake, repo):
-    """Claude Code gives every command its session's id (CLAUDE_CODE_SESSION_ID): a question the model asks lands in
-    that session's chat even where the session's start couldn't leave VYAVASTA_SESSION. Codex never takes it."""
+def test_the_models_own_commands_in_claude_code_take_the_session_claude_code_gives_them_first(run, fake, repo):
+    """Claude Code gives every command its session's id (CLAUDE_CODE_SESSION_ID), the id its hooks send: a question the
+    model asks lands in that session's chat, in a session forked from another too, whose start left the id of the one
+    it was forked from in VYAVASTA_SESSION. That one is taken only where Claude Code gives none. Codex never takes
+    Claude Code's, and keeps its own order."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
-    run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-1", "VYAVASTA_SESSION": "cc-2"})
+    # (A fork: Claude Code names the fork, and the env file the session it was forked from.)
+    run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
+    run("ask", "Who owns billing?", cwd=repo, extra={"VYAVASTA_SESSION": "cc-2"})
     run("ask", "Who owns billing?", cwd=repo, tool="codex", extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
-    assert [call["body"]["session"] for call in fake.calls("/ask")] == ["cc-1", "cc-2", ""]
+    run("ask", "Who owns billing?", cwd=repo, tool="codex",
+        extra={"CLAUDE_CODE_SESSION_ID": "cc-1", "VYAVASTA_SESSION": "cx-1", "CODEX_THREAD_ID": "cx-2"})
+    assert [call["body"]["session"] for call in fake.calls("/ask")] == ["cc-1", "cc-fork", "cc-2", "", "cx-1"]
+    # The model's message to a teammate and its documents are filed the same way.
+    run("tell", "priya", "The fix is pushed.", cwd=repo,
+        extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
+    run("documents", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
+    assert fake.calls("/tell")[-1]["body"]["session"] == "cc-fork"
+    assert fake.calls("/documents")[-1]["body"]["session"] == "cc-fork"
 
 
 def test_characters_that_turn_the_text_around_never_reach_a_header_or_a_quoted_line(run, fake, repo):
@@ -4751,9 +4798,10 @@ def test_characters_that_turn_the_text_around_never_reach_a_header_or_a_quoted_l
     fake.read = {**READ_PAGE, "name": f"refund{turned}-policy.md"}
     said = run("documents", "read", "1", cwd=repo).stdout
     assert not any(turner in said for turner in DIRECTION_TURNERS) and "refund-policy.md" in said
-    # The joiners that Indic writing and emoji need stay as they are.
-    fake.inbox[0]["from"]["name"] = "Priya Rama\u200dn 👩\u200d💻"
-    assert "From Priya Rama\u200dn 👩\u200d💻 · " in run("inbox", cwd=repo).stdout
+    # The joiners that Indic writing and emoji need stay as they are, and so do the characters beside those taken out
+    # (the musical symbols just before and after the ones that only shape a beam or a phrase, a Braille dot, Hangul).
+    fake.inbox[0]["from"]["name"] = "Priya Rama\u200dn 👩\u200d💻 \U0001d172\U0001d17b\u2801한"
+    assert "From Priya Rama\u200dn 👩\u200d💻 \U0001d172\U0001d17b\u2801한 · " in run("inbox", cwd=repo).stdout
 
 
 # -- 0.6.0: the command grammar takes the ways people type the commands ----------------------------------------------
@@ -4797,10 +4845,22 @@ def test_other_ways_of_typing_a_command_are_the_same_command(run, fake, repo, ty
                                             ("Vyavasta settigns.", "settings"), ("vyavasta signin2", "sign in"),
                                             ("vyavasta xyzzy", None), ("vyavasta offf", "off"), ("vyavasta tem", "team"),
                                             # A short word is a slip only one letter away; a command is never named
-                                            # alone where the one that does the reverse is as near.
-                                            ("vyavasta of", ("on", "off")), ("vyavasta onf", ("on", "off")),
-                                            ("vyavasta signo", ("sign in", "sign out")), ("vyavasta foo", None),
-                                            ("vyavasta log", None), ("vyavasta sign", None)])
+                                            # alone where the one that does the reverse is as near, and the one that
+                                            # does the reverse is named only when it is exactly as near.
+                                            ("vyavasta onf", ("on", "off")), ("vyavasta signo", ("sign in", "sign out")),
+                                            ("vyavasta signot", "sign out"), ("vyavasta signou", "sign out"),
+                                            ("vyavasta sigin", "sign in"), ("vyavasta foo", None),
+                                            ("vyavasta log", None), ("vyavasta sign", None),
+                                            # A word of two letters is a word, never a slip.
+                                            ("vyavasta of", None), ("vyavasta no", None), ("vyavasta ok", None),
+                                            # “start” stands for on, but a slip of it is no offer: “stat” is meant for status.
+                                            ("vyavasta stat", None),
+                                            # A slip of another word for a command offers the command it stands for.
+                                            ("vyavasta logni", "sign in"), ("vyavasta conect", "sign in"),
+                                            ("vyavasta logot", "sign out"), ("vyavasta disconect", "sign out"),
+                                            ("vyavasta enabel", "on"), ("vyavasta turnon", "on"),
+                                            ("vyavasta disabel", "off"), ("vyavasta turnof", ("on", "off")),
+                                            ("vyavasta dcos", "documents"), ("vyavasta summaires", "summary")])
 def test_vyavasta_and_a_word_that_is_no_command_says_so_and_names_the_nearest(run, fake, repo, typed, nearest):
     signed_in(run, fake)
     for on in (False, True):
@@ -5215,10 +5275,12 @@ HELD_LINE = ("Vyavasta · nothing sent (Vyavasta’s server isn’t answering ri
 
 
 def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(run, fake, repo, tmp_path):
-    """A read timeout: the request went out and no answer came. A quick call left unanswered (a session's start here)
-    starts the minute in which no hook makes a call, a turn's end and an edit included: what they would have sent is
-    kept to go along later. After it, each call that may take longer than the quick question is made only once the
-    server answers that question at once (PROBE_SECONDS), in the same run of curl, so no long call starts blind."""
+    """A read timeout: the request went out and no answer came. A short call left unanswered (a session's start here)
+    may only have been slow, so it starts no pause, but each call after it that may take longer than the quick question
+    is made only once the server answers that question at once (PROBE_SECONDS), in the same run of curl, so no long call
+    starts blind. When the quick question goes unanswered too, the minute starts in which no hook makes a call, a turn's
+    end and an edit included: what they would have sent is kept to go along later. So a silent server costs one wait
+    for the quick question more than it did when a short call started the minute, once."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     # (The check's 75 seconds run out in 2 here.)
@@ -5226,12 +5288,19 @@ def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(r
     # A message the server keeps, whose reply waits for the turn's end.
     prompt(run, repo, "Change calc.py", session="s-a")
     (repo / "calc.py").write_text("changed\n")
-    fake.delay["/me"] = 6
+    # The server takes every call and answers none, the quick question included.
+    fake.delay.update({"/me": 6, "/hello": 6, "/check": 6, "/turn": 6, "/work": 6})
     done = run("hook", "session-start", stdin=event("SessionStart", repo, session="s-b"), cwd=repo, extra={"PATH": path})
-    assert done.seconds < 6 and (run.home / "slow").exists() and (run.home / "unanswered").exists()
-    assert output(done)["systemMessage"] == ("Vyavasta: the server took too long to answer just now, so requests aren’t "
-                                             "being checked. It is tried again in a minute, and Claude works as usual.")
-    del fake.delay["/me"]
+    assert done.seconds < 6 and (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    assert output(done)["systemMessage"] == ("Vyavasta: the server didn’t answer in time just now. Claude works as usual, "
+                                             "and Vyavasta is tried again with your next message.")
+    # The next message asks the quick question first, and sends nothing more when that goes unanswered, after 4
+    # seconds at most: the minute starts.
+    fake.requests.clear()
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
+               cwd=repo, extra={"PATH": path})
+    assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
+    assert output(done)["systemMessage"] == HELD_LINE and (run.home / "unanswered").exists()
     # The minute after it: no call at all, and nothing waits.
     fake.requests.clear()
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
@@ -5252,7 +5321,6 @@ def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(r
     # After the minute: the quick question first, and while it goes unanswered nothing more is sent, after 4 seconds
     # at most; the minute starts again. A turn's end does the same.
     aged(run, "unanswered")
-    fake.delay["/hello"] = 6
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
                cwd=repo, extra={"PATH": path})
     assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
@@ -5266,7 +5334,7 @@ def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(r
     assert done.stdout == "" and done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
     # It answers again: the quick question and the check go in one run of curl, with a reply kept from earlier, and
     # the calls after it are as usual.
-    del fake.delay["/hello"]
+    fake.delay.clear()
     aged(run, "unanswered")
     fake.requests.clear()
     runs.write_text("")
@@ -5314,6 +5382,154 @@ def test_a_long_call_left_unanswered_only_makes_the_next_ask_the_quick_question_
     fake.requests.clear()
     assert prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"].endswith(fake.check["notice"])
     assert [call["path"] for call in fake.requests] == ["/hello", "/check"]
+
+
+@pytest.mark.parametrize("route", ["/turn", "/me", "/work"])
+def test_a_server_that_answers_a_short_call_late_still_has_every_message_checked(run, fake, repo, tmp_path, route):
+    """A busy server may answer a turn's end, a session's start or a work report a little late. That says nothing of
+    whether it answers: no minute without checks starts, every message after it is checked (the first after the quick
+    question, which the server answers at once), and the developer is never told that it isn't answering."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "What is Priya working on?")
+    # (The short calls' 4 and 8 seconds run out in 2 here.)
+    path, _ = curl_runs(tmp_path, {4: 2, 8: 2})
+    fake.delay[route] = 5
+    if route == "/me":
+        done = run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo,
+                   extra={"PATH": path})
+        assert output(done)["systemMessage"] == ("Vyavasta: the server didn’t answer in time just now. Claude works as "
+                                                 "usual, and Vyavasta is tried again with your next message.")
+    elif route == "/turn":
+        done = run("hook", "stopped", stdin=event("Stop", repo, stop_hook_active=False,
+                                                  last_assistant_message="Priya is on billing."), cwd=repo,
+                   extra={"PATH": path})
+        assert done.stdout == ""
+    else:
+        (repo / "calc.py").write_text("changed\n")
+        run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"), cwd=repo, extra={"PATH": path})
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    del fake.delay[route]
+    fake.requests.clear()
+    for text in ("Remove customer_plan from the API response", "Drop the plan column too", "Rename add to plus"):
+        said = prompt(run, repo, text)["systemMessage"]
+        assert f" · {fake.check['notice']}" in said and "isn’t answering" not in said
+    assert [call["path"] for call in fake.requests if call["path"] in ("/hello", "/check")] == \
+        ["/hello", "/check", "/check", "/check"]
+    assert not any((run.home / marker).exists() for marker in ("slow", "unanswered", "offline"))
+
+
+def test_vyavasta_check_whose_own_quick_question_goes_unanswered_starts_the_minute(run, fake, repo, tmp_path):
+    """The quick question asked on its own, by “vyavasta check”, is the quick question all the same: unanswered, the
+    hooks make no call for a minute."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    path, _ = curl_runs(tmp_path, {8: 2})
+    fake.delay["/hello"] = 5
+    assert "Problem: Vyavasta’s server isn’t answering right now." in run("check", cwd=repo, extra={"PATH": path}).stdout
+    assert (run.home / "unanswered").exists()
+    fake.requests.clear()
+    assert prompt(run, repo, "Change calc.py")["systemMessage"] == HELD_LINE and fake.requests == []
+
+
+def test_a_kept_reply_a_slow_server_does_not_take_in_time_holds_up_no_message_after_it(run, fake, repo):
+    """A reply kept from a turn's end the server answered too late goes along with the next message. When the server
+    is slow to take it again, no kept call goes along for a minute: the messages in that minute go without it and are
+    never held up by it. After the minute it goes again, by the same request_id, so the server keeps it once."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "What is Priya working on?")
+    fake.delay["/turn"] = 6
+    assert stop(run, repo, last_assistant_message="Priya is on billing.").stdout == ""
+    (kept,) = unsent(run)
+    # The next message is checked, and the reply that goes along after it runs out, after 4 seconds at most.
+    first = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change number 2"), cwd=repo)
+    assert output(first)["systemMessage"].endswith(fake.check["notice"]) and first.seconds < 6.5
+    assert len(fake.calls("/turn")) == 2 and unsent(run) == [kept]
+    assert int((run.home / "unsent" / "after").read_text()) >= time.time() + 50
+    # The minute after it: each message goes alone, checked, and waits for nothing.
+    for text in ("Change number 3", "Change number 4"):
+        done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt=text), cwd=repo)
+        assert output(done)["systemMessage"].endswith(fake.check["notice"]) and done.seconds < 2
+    assert len(fake.calls("/turn")) == 2 and unsent(run) == [kept]
+    # After the minute it goes along again, by the same request_id, and is taken.
+    del fake.delay["/turn"]
+    (run.home / "unsent" / "after").write_text(f"{int(time.time()) - 1}\n")
+    prompt(run, repo, "Change number 5")
+    turns = fake.calls("/turn")
+    assert len(turns) == 3 and len({turn["body"]["request_id"] for turn in turns}) == 1
+    assert turns[2]["body"]["reply"] == "Priya is on billing." and unsent(run) == []
+
+
+def test_a_server_restarting_for_a_deploy_says_so_everywhere_and_is_tried_again(run, fake, repo):
+    """During a deploy the server answers 503 with the code `restarting`: each place says Vyavasta is restarting, never
+    that it isn't working or can't be reached, and nothing stops trying it. Any other failure of a server that answers
+    is said to be that, never out of reach."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.refused = "Vyavasta is restarting. Send it again in a moment."
+    fake.code = {route: "restarting" for route in ("/me", "/check", "/inbox", "/ask", "/tell")}
+    fake.status = {"/me": 503}
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert started == ("Vyavasta: the server is restarting just now. Claude works as usual, and Vyavasta is tried "
+                       "again with your next message.")
+    fake.status = {"/check": 503}
+    for tool, agent in ((None, "Claude"), ("codex", "Codex")):
+        assert prompt(run, repo, "Change calc.py", tool=tool)["systemMessage"].endswith(
+            f" · Vyavasta is restarting, so it wasn’t checked. {agent} works as usual, and Vyavasta is tried again with "
+            "your next message.")
+    fake.status = {"/inbox": 503}
+    assert run("inbox", cwd=repo).stdout == "Vyavasta is restarting. Try again in a moment.\n"
+    fake.status = {"/tell": 503}
+    assert run("tell", "priya", "The fix is pushed.", cwd=repo).stdout == "Vyavasta is restarting. Try again in a moment.\n"
+    fake.status = {"/ask": 503}
+    for tool in (None, "codex"):
+        assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
+            "Vyavasta is restarting, so nothing was asked. Ask again in a moment.\n")
+    fake.code["/hello"] = "restarting"
+    fake.status = {"/hello": 503}
+    assert "Problem: Vyavasta is restarting just now. Try again in a moment.\n" in run("check", cwd=repo).stdout
+    assert not any((run.home / marker).exists() for marker in ("slow", "unanswered", "offline"))
+    # Any other failure: the server isn't working, and was reached.
+    fake.code = {}
+    fake.status = {"/ask": 503}
+    for tool in (None, "codex"):
+        assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
+            "Vyavasta’s server isn’t working right now, so nothing was asked.\n")
+    fake.status = {"/check": 503}
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
+        " · Vyavasta’s server isn’t working right now, so it wasn’t checked. Claude works as usual, and Vyavasta is "
+        "tried again with your next message.")
+    # Refused for another reason, by a server that was reached: in its own sentence, never out of reach.
+    fake.refused = "This workspace has no assistant for this computer."
+    fake.status = {"/ask": 403}
+    for tool in (None, "codex"):
+        assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
+            "This workspace has no assistant for this computer. Nothing was asked.\n")
+    # Back: the next message is checked.
+    fake.status = {}
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
+
+
+def test_a_question_the_server_answers_too_late_is_said_to_be_that_never_out_of_reach(run, fake, repo, tmp_path):
+    """The model's question went out and no answer came in time: it is told that Vyavasta didn't answer in time. Held
+    back because the quick question asked first went unanswered, it is told that nothing was asked."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    # (The question's 55 seconds run out in 2 here.)
+    path, _ = curl_runs(tmp_path, {55: 2})
+    fake.delay["/ask"] = 5
+    for tool in (None, "codex"):
+        done = run("ask", "Who owns billing?", cwd=repo, tool=tool, extra={"PATH": path})
+        assert done.stdout == "Vyavasta didn’t answer in time, so there is no answer this time.\n"
+    assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
+    fake.delay["/hello"] = 6
+    done = run("ask", "Who owns billing?", cwd=repo, extra={"PATH": path})
+    assert done.stdout == "Vyavasta’s server isn’t answering right now, so nothing was asked.\n"
+    assert (run.home / "unanswered").exists()
+    # A typed command held back the same way, and “vyavasta check”, whose own quick question went unanswered.
+    assert run("inbox", cwd=repo).stdout == "Vyavasta’s server isn’t answering right now. Try again in a minute.\n"
+    assert "Problem: Vyavasta’s server isn’t answering right now. Try again in a minute.\n" in run("check", cwd=repo).stdout
 
 
 def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
