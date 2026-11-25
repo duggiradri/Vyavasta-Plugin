@@ -2214,6 +2214,19 @@ cut_message() {
   CUT_NOTE=" Only the first $(thousands "$MESSAGE_CHARACTERS") characters of your message were sent: Vyavasta takes no more."
 }
 
+# Said when a message starts with “@” and a name, and the server found no teammate in it: nobody got it, and the
+# tool's model was given it as it is. Nothing for an “@” before a path or a file's name (“@src/app.py”, “@notes.md”)
+# or a file or folder in the project, which a coding tool's “@” names, never a teammate. $text is the message's words.
+nobody_said() {
+  lead=$(printf '%.200s' "$text"); lead=${lead#"${lead%%[![:space:]]*}"}
+  case "$lead" in @*) ;; *) return 0 ;; esac
+  word=${lead#@}; word=${word%%[[:space:]:,]*}
+  while case "$word" in *[.!?\;\)]) true ;; *) false ;; esac; do word=${word%?}; done
+  case "$word" in ""|*/*|*\\*|@*|*.[A-Za-z0-9]*) return 0 ;; esac
+  [ -e "$HERE/$word" ] && return 0
+  printf '%s' "Vyavasta found no teammate called “$(person "$word")”, so no teammate got this message, and ${AGENT} was given it as written."
+}
+
 # A message in a project that is on: checked, or asked as a question, with its one line. $1 is the message as a JSON
 # string, $2 the session folder.
 handle_message() {
@@ -2413,6 +2426,12 @@ handle_message() {
         else outcome="${notice:-Vyavasta doesn’t read this repository for you, so nothing was checked.}"; fi ;;
       *) outcome="${notice:-Checked against your team’s record.}" ;;
     esac
+    # A message that starts with “@” and a name, where the server found no teammate in it: nobody got it.
+    if [ -z "$named" ]; then
+      nobody=$(nobody_said)
+      if [ -n "$nobody" ] && [ "$verdict" = "not_a_change" ]; then outcome="$nobody"
+      elif [ -n "$nobody" ]; then outcome="$nobody $outcome"; fi
+    fi
     if [ -n "$CONNECTED" ]; then outcome="$CONNECTED $outcome"; fi
     if [ "$(answer hold)" = "true" ]; then
       # Held, as the web app holds a plan: the model isn't sent the request, and the developer is told why and how

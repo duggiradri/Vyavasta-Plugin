@@ -4641,6 +4641,28 @@ def test_the_line_gives_the_whole_account_once_a_session_and_then_a_short_or_qui
     assert "not summed up (summaries are off)" in prompt(run, repo, "And Sam?", session="session-9")["systemMessage"]
 
 
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_a_message_that_starts_with_a_name_no_teammate_has_says_nobody_got_it(run, fake, repo, tool):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = {"verdict": "not_a_change", "hold": False, "notice": "", "context": "", "statements": []}
+    agent = "Codex" if tool else "Claude"
+    for typed, name in (("@ganes the fix is pushed", "ganes"), ("@Pria: done!", "Pria"), ("  @nobody?", "nobody")):
+        said = prompt(run, repo, typed, tool=tool)
+        assert said["systemMessage"].endswith(
+            f"Vyavasta found no teammate called “{name}”, so no teammate got this message, and {agent} was given it as "
+            "written."), said
+        assert "decision" not in said and fake.calls("/tell") == []
+    # A path or a file's name after “@” is the coding tool's way to name a file, and a file of the project the same.
+    (repo / "notes").mkdir()
+    for typed in ("@src/app.py explain this", "@notes.md read this", "@calc.py what does it do?", "@notes summarise",
+                  "Push it, then tell @ganes", "@ hello"):
+        assert "no teammate called" not in prompt(run, repo, typed, tool=tool)["systemMessage"], typed
+    # A teammate the server found in the message is never said to be nobody.
+    fake.check = {**fake.check, "to_teammates": [{"name": "Ganesh Iyer"}]}
+    assert "no teammate called" not in prompt(run, repo, "@ganesh's fix is in", tool=tool)["systemMessage"]
+
+
 def test_a_message_the_server_refuses_for_what_was_sent_is_never_said_to_be_a_passing_problem(run, fake, repo):
     signed_in(run, fake)
     switched_on(run, fake, repo)
