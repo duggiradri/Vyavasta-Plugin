@@ -98,6 +98,23 @@ CREDENTIALS="$HOME_DIR/credentials"
 PENDING="$HOME_DIR/pairing"
 SESSIONS="$HOME_DIR/sessions"
 PROJECTS="$HOME_DIR/projects"
+
+# The one check that runs after every edit in Claude Code: whether a conflict is waiting to be told. It costs a
+# file test when there is none, so it is answered as soon as the settings folder is known, before anything else
+# is set up.
+if [ "${1:-}" = "hook" ] && [ "${2:-}" = "edit-check" ]; then
+  set -- "$SESSIONS"/*/conflict-stop
+  if [ ! -f "$1" ]; then cat >/dev/null; exit 0; fi
+  id=$(head -c 65536 | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' | sed -n '1p')
+  id=$(printf '%s' "$id" | cut -c1-80)
+  [ -n "$id" ] || id="no-session"
+  if [ -f "$SESSIONS/$id/conflict-stop" ]; then
+    cat "$SESSIONS/$id/conflict-stop"
+    rm -f "$SESSIONS/$id/conflict-stop" "$SESSIONS/$id/conflict-say"
+  fi
+  exit 0
+fi
+
 # A file that is there once this tool has welcomed the developer on this computer. The sign-in and the settings are
 # one for both tools; the welcome is each tool's own, so the first session of each says it, whatever the other did
 # before. (A version before 0.5.3 kept one file for the computer, `welcomed`, which doesn't say which tool wrote it:
@@ -108,9 +125,11 @@ WELCOMED="$HOME_DIR/welcomed-$CLIENT"
 # between launches). A greeting is due when nothing greeted yet, or another version or copy did: so a plugin that was
 # removed and installed again greets again, and an update says once what is new. (A file from 0.5.3 or 0.5.4 is
 # empty, so the first session after this update greets.)
-GREETED="$VERSION $(ls -i "$SELF" | awk '{ print $1 }')"
-greeting_due() { [ ! -f "$WELCOMED" ] || [ "$(cat "$WELCOMED")" != "$GREETED" ]; }
-mark_greeted() { mkdir -p "$HOME_DIR" && printf '%s\n' "$GREETED" > "$WELCOMED"; }
+# (Read only where a greeting may be due: most hooks never need it.)
+GREETED=""
+greeted() { [ -n "$GREETED" ] || GREETED="$VERSION $(ls -i "$SELF" | awk '{ print $1 }')"; }
+greeting_due() { greeted; [ ! -f "$WELCOMED" ] || [ "$(cat "$WELCOMED")" != "$GREETED" ]; }
+mark_greeted() { greeted; mkdir -p "$HOME_DIR" && printf '%s\n' "$GREETED" > "$WELCOMED"; }
 # The banner a greeting opens with, what it offers to try, and what this version brought (said when an earlier copy
 # of the plugin greeted here before).
 RULE="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -153,21 +172,6 @@ LONGEST_LINE=2000
 REPLY_CHARACTERS=4000
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 STARTED_AT=$(date +%s)
-
-# The one check that runs after every edit in Claude Code: whether a conflict is waiting to be told. It costs a
-# file test when there is none, so it is answered before anything else is set up.
-if [ "${1:-}" = "hook" ] && [ "${2:-}" = "edit-check" ]; then
-  set -- "$SESSIONS"/*/conflict-stop
-  if [ ! -f "$1" ]; then cat >/dev/null; exit 0; fi
-  id=$(head -c 65536 | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' | sed -n '1p')
-  id=$(printf '%s' "$id" | cut -c1-80)
-  [ -n "$id" ] || id="no-session"
-  if [ -f "$SESSIONS/$id/conflict-stop" ]; then
-    cat "$SESSIONS/$id/conflict-stop"
-    rm -f "$SESSIONS/$id/conflict-stop" "$SESSIONS/$id/conflict-say"
-  fi
-  exit 0
-fi
 
 TMP=$(mktemp -d 2>/dev/null || mktemp -d -t vyavasta 2>/dev/null)
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
@@ -1459,9 +1463,11 @@ docs_hint() {
 # The names in a JSON list of teammates the server gave (each an object with a `name`), each cut to a short one
 # (`person`) and joined in a sentence's way: “Priya Raman”, “Priya Raman and Sam Rivera”, “A, B, and C”.
 names_said() {
-  json_rows "$1" | while IFS= read -r one; do person "$(json_text "$(field "$one" name)")"; echo; done | awk '
-    NF { name[++n] = $0 }
-    END {
+  printf '%s' "$1" | LC_ALL=C awk -v PERSON="$PERSON_CHARACTERS" "$LINES_AWK$JSON_AWK$WORDS_AWK"'
+    BEGIN { RS = "\001" }
+    NR == 1 {
+      m = jsplit($0, one); n = 0
+      for (i = 1; i <= m; i++) { jobj(one[i], f); who = named(jstr(f["name"]), PERSON); if (who != "") name[++n] = who }
       if (n == 1) printf "%s", name[1]
       else if (n == 2) printf "%s and %s", name[1], name[2]
       else for (i = 1; i <= n; i++) printf "%s%s", name[i], (i < n - 1 ? ", " : (i == n - 1 ? ", and " : ""))
@@ -3001,14 +3007,16 @@ command_shared() {
   session=$(command_session)
   api GET "/shared?session=$(url_quote "$session")&remote=$(url_quote "${REMOTE:-}")" "" "$QUICK_SECONDS"
   [ "$STATUS" = "200" ] || { not_reached; return; }
-  json_rows "$(answer items)" > "$TMP/rows"
-  true > "$TMP/listed"
   # (Each on one line: a line of the listing is one thing sent, and a tab separates its parts.)
-  while IFS= read -r row; do
-    printf '%s\t%s\t%s\n' "$(one_line "$(json_text "$(field "$row" at)")")" \
-      "$(one_line "$(json_text "$(field "$row" at_said)")")" "$(one_line "$(json_text "$(field "$row" said)")")" \
-      >> "$TMP/listed"
-  done < "$TMP/rows"
+  LC_ALL=C awk "$LINES_AWK$JSON_AWK$WORDS_AWK"'
+    BEGIN { RS = "\001" }
+    NR == 1 {
+      jobj($0, top); n = jsplit(top["items"], row)
+      for (i = 1; i <= n; i++) {
+        jobj(row[i], f)
+        printf "%s\t%s\t%s\n", oneline(jstr(f["at"])), oneline(jstr(f["at_said"])), oneline(jstr(f["said"]))
+      }
+    }' "$TMP/answer" > "$TMP/listed"
   if [ -s "$TMP/listed" ]; then
     echo "Sent to Vyavasta from this session, oldest first:"
     sort "$TMP/listed" | awk -F '\t' '{ printf "- %s: %s\n", $2, $3 }'
@@ -3135,27 +3143,31 @@ command_team() {
   echo "Each summary is its person’s own, written from their chats and coding sessions. To ask one of them, send “vyavasta ask <name>: <your question>”."
 }
 
-# One category of someone's summaries, as its lines: whose it is ($1), the category (a JSON object, $2) with a word of
-# who sees it where that is said ($3), then its summaries, one to a line.
-category_lines() {
-  label=$(one_line "$(json_text "$(field "$2" name)")")
-  [ "$(json_text "$(field "$2" kind)")" = "repository" ] && label="the repository $label"
-  printf '%s · %s%s · brought up to date %s\n' "$1" "$label" "${3:+ · $3}" "$(one_line "$(json_text "$(field "$2" updated_said)")")"
-  json_rows "$(field "$2" points)" | while IFS= read -r point; do
-    printf -- '- %s\n' "$(one_line "$(json_text "$point")")"
-  done
-  echo
-}
+# One category of someone's summaries, as its lines: whose it is (who), the category (a JSON object, raw) with a word
+# of who sees it where that is said (seen), then its summaries, one to a line, and an empty line. An awk function,
+# for the listings below, each printed whole by one awk program.
+CATEGORY_AWK='
+  function category(who, raw, seen,   c, label, points, n, i, out) {
+    jobj(raw, c); label = oneline(jstr(c["name"]))
+    if (jstr(c["kind"]) == "repository") label = "the repository " label
+    out = who " · " label (seen != "" ? " · " seen : "") " · brought up to date " oneline(jstr(c["updated_said"])) "\n"
+    n = jsplit(c["points"], points)
+    for (i = 1; i <= n; i++) out = out "- " oneline(jstr(points[i])) "\n"
+    return out "\n"
+  }'
 
 # What teammates show of their work ($1: the server's list of people, each with their categories), category by
 # category under each person's name.
 team_listing() {
-  json_rows "$1" | while IFS= read -r one; do
-    name=$(person "$(json_text "$(field "$one" name)")")
-    json_rows "$(field "$one" categories)" | while IFS= read -r category; do
-      category_lines "$name" "$category"
-    done
-  done
+  printf '%s' "$1" | LC_ALL=C awk -v PERSON="$PERSON_CHARACTERS" "$LINES_AWK$JSON_AWK$WORDS_AWK$CATEGORY_AWK"'
+    BEGIN { RS = "\001" }
+    NR == 1 {
+      n = jsplit($0, one)
+      for (i = 1; i <= n; i++) {
+        jobj(one[i], f); who = named(jstr(f["name"]), PERSON); m = jsplit(f["categories"], cats)
+        for (j = 1; j <= m; j++) printf "%s", category(who, cats[j], "")
+      }
+    }'
 }
 
 # The developer's own summaries, each category with whether teammates see it, and then what teammates show of their
@@ -3180,10 +3192,15 @@ command_summary() {
   if [ -z "$mine" ] || [ "$mine" = "[]" ]; then
     echo "You have no summary yet. One is written a few seconds after each reply, from your chats in Vyavasta and your coding sessions."
   else
-    json_rows "$mine" | while IFS= read -r category; do
-      if [ "$(field "$category" visible)" = "true" ]; then seen="shown to teammates"; else seen="hidden from teammates"; fi
-      category_lines "You" "$category" "$seen"
-    done > "$TMP/mine"
+    printf '%s' "$mine" | LC_ALL=C awk "$LINES_AWK$JSON_AWK$WORDS_AWK$CATEGORY_AWK"'
+      BEGIN { RS = "\001" }
+      NR == 1 {
+        n = jsplit($0, cats)
+        for (i = 1; i <= n; i++) {
+          jobj(cats[i], c)
+          printf "%s", category("You", cats[i], c["visible"] == "true" ? "shown to teammates" : "hidden from teammates")
+        }
+      }' > "$TMP/mine"
     echo "Your summaries, as Vyavasta keeps them:"
     if [ -n "${IN_HOOK:-}" ]; then echo; cat "$TMP/mine"; else quoted "$(cat "$TMP/mine")"; echo; fi
   fi
@@ -3266,6 +3283,9 @@ docs_body() {
 docs_by() {
   if [ "$1" = "you" ]; then printf 'yours'; else printf 'from %s' "$(person "$1")"; fi
 }
+# The same as an awk function, for a listing printed whole by one awk program (with PERSON set).
+DOCS_AWK='
+  function by(who) { return (who == "you") ? "yours" : "from " named(who, PERSON) }'
 
 # “vyavasta documents”: every document the developer may read, numbered, each with its kind, its size, whose it is,
 # and what stands in the way of reading it where something does. Their names were chosen by whoever uploaded them,
@@ -3279,13 +3299,17 @@ command_documents() {
     echo "You have no documents in Vyavasta, and none is shared with you. Documents are uploaded under “Sources” in its web app."
     return
   fi
-  json_rows "$rows" | while IFS= read -r row; do
-    said=$(one_line "$(json_text "$(field "$row" said)")")
-    printf '%s. %s · %s, %s · %s%s\n' "$(one_line "$(json_text "$(field "$row" n)")")" \
-      "$(person "$(json_text "$(field "$row" name)")" "$DOC_NAME_CHARACTERS")" \
-      "$(one_line "$(json_text "$(field "$row" type)")")" "$(one_line "$(json_text "$(field "$row" size)")")" \
-      "$(docs_by "$(json_text "$(field "$row" uploaded_by)")")" "${said:+ · $said}"
-  done > "$TMP/listed"
+  printf '%s' "$rows" | LC_ALL=C awk -v NAME="$DOC_NAME_CHARACTERS" -v PERSON="$PERSON_CHARACTERS" \
+      "$LINES_AWK$JSON_AWK$WORDS_AWK$DOCS_AWK"'
+    BEGIN { RS = "\001" }
+    NR == 1 {
+      n = jsplit($0, row)
+      for (i = 1; i <= n; i++) {
+        jobj(row[i], f); said = oneline(jstr(f["said"]))
+        printf "%s. %s · %s, %s · %s%s\n", oneline(jstr(f["n"])), named(jstr(f["name"]), NAME), oneline(jstr(f["type"])),
+          oneline(jstr(f["size"])), by(jstr(f["uploaded_by"])), (said != "" ? " · " said : "")
+      }
+    }' > "$TMP/listed"
   echo "The team’s documents you may read in Vyavasta:"
   if [ -n "${IN_HOOK:-}" ]; then echo; cat "$TMP/listed"; echo; else quoted "$(cat "$TMP/listed")"; echo; fi
   echo "Read one with $(docs_cmd "read <number>"), or search them all with $(docs_cmd "search <words>")."
@@ -3312,20 +3336,21 @@ command_documents_search() {
     echo "Nothing in the documents you may read mentions those words. $(docs_cmd) lists them."
     return
   fi
-  shown=0
-  json_rows "$passages" > "$TMP/rows"
-  {
-    echo "$SEARCH_TOP"
-    while IFS= read -r row; do
-      [ "$shown" -gt 0 ] && echo
-      shown=$((shown + 1))
-      printf '── %s. %s · %s ──\n' "$(one_line "$(json_text "$(field "$row" n)")")" \
-        "$(person "$(json_text "$(field "$row" name)")" "$DOC_NAME_CHARACTERS")" \
-        "$(docs_by "$(json_text "$(field "$row" uploaded_by)")")"
-      marked "$(json_text "$(field "$row" text)")"
-    done < "$TMP/rows"
-    echo "$DOC_END"
-  } > "$TMP/found"
+  printf '%s' "$passages" | LC_ALL=C awk -v NAME="$DOC_NAME_CHARACTERS" -v PERSON="$PERSON_CHARACTERS" \
+      -v MARK="$QUOTE_MARK" -v TOP="$SEARCH_TOP" -v LAST="$DOC_END" -v COUNT="$TMP/found-count" \
+      "$LINES_AWK$JSON_AWK$WORDS_AWK$DOCS_AWK"'
+    BEGIN { RS = "\001" }
+    NR == 1 {
+      n = jsplit($0, row); print TOP
+      for (i = 1; i <= n; i++) {
+        jobj(row[i], f)
+        printf "%s── %s. %s · %s ──\n%s", (i > 1 ? "\n" : ""), oneline(jstr(f["n"])), named(jstr(f["name"]), NAME),
+          by(jstr(f["uploaded_by"])), marks(jstr(f["text"]))
+      }
+      print LAST
+      printf "%d\n", n > COUNT
+    }' > "$TMP/found"
+  shown=$(cat "$TMP/found-count")
   echo "Passages from the team’s documents that mention those words, the best match first:"
   cat "$TMP/found"
   echo
@@ -3379,10 +3404,12 @@ command_documents_read() {
   case "$(json_text "$(answer status)")" in
     read) ;;
     ambiguous)
-      fits=$(json_rows "$(answer matches)" | while IFS= read -r one; do
-        printf '%s. %s\n' "$(one_line "$(json_text "$(field "$one" n)")")" \
-          "$(person "$(json_text "$(field "$one" name)")" "$DOC_NAME_CHARACTERS")"
-      done | awk 'NF { printf "%s%s", (NR > 1 ? ", " : ""), $0 }')
+      fits=$(LC_ALL=C awk -v NAME="$DOC_NAME_CHARACTERS" "$LINES_AWK$JSON_AWK$WORDS_AWK"'
+        BEGIN { RS = "\001" }
+        NR == 1 {
+          jobj($0, top); n = jsplit(top["matches"], one)
+          for (i = 1; i <= n; i++) { jobj(one[i], f); printf "%s%s. %s", (i > 1 ? ", " : ""), oneline(jstr(f["n"])), named(jstr(f["name"]), NAME) }
+        }' "$TMP/answer")
       echo "More than one document fits that: $fits. Read one by its number, such as $(docs_cmd "read 1")."
       return ;;
     not_readable) echo "$not_yet"; return ;;
@@ -3448,8 +3475,12 @@ tell() {
   url=$(one_line "$(json_text "$(answer url)")")
   case "$status" in
     unknown_person)
-      people=$(json_rows "$(answer people)" | while IFS= read -r one; do person "$(json_text "$one")"; echo; done \
-        | awk 'NF' | awk '{ printf "%s%s", (NR > 1 ? ", " : ""), $0 }')
+      people=$(LC_ALL=C awk -v PERSON="$PERSON_CHARACTERS" "$LINES_AWK$JSON_AWK$WORDS_AWK"'
+        BEGIN { RS = "\001" }
+        NR == 1 {
+          jobj($0, top); n = jsplit(top["people"], one); k = 0
+          for (i = 1; i <= n; i++) { who = named(jstr(one[i]), PERSON); if (who != "") printf "%s%s", (k++ ? ", " : ""), who }
+        }' "$TMP/answer")
       echo "Vyavasta doesn’t know a teammate called “$(person "$1")”.${people:+ Your teammates: $people.}"
       return ;;
     refused|unavailable)
