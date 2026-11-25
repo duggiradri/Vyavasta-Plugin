@@ -2533,8 +2533,9 @@ parse_typed() {
       if (helpish(rest)) { printf "help\t\n"; exit }
       if (!asked && rest ~ /^[a-z][a-z0-9]*$/ && length(rest) <= 24) {
         # The nearest command, by its own spelling: one slip of typing away for a word of four letters or fewer, two
-        # for a longer one. A command that has an opposite (on and off, sign in and sign out) is never named alone
-        # when its opposite is as near: both are named, so a slip never points to the command that does the reverse.
+        # for a longer one. A command that has an opposite (on and off, sign in and sign out) is named with it only
+        # when the opposite is exactly as near: so a slip never points to the command that does the reverse alone, and
+        # never names it first when it is the farther of the two.
         split("on off status check settings help inbox team summary documents shared chat upload open ask tell " \
               "reply signin signout", word, " ")
         opposite["on"] = "off"; opposite["off"] = "on"; opposite["signin"] = "signout"; opposite["signout"] = "signin"
@@ -2542,7 +2543,7 @@ parse_typed() {
         best = ""; least = most + 1
         for (i = 1; i in word; i++) { d = slips(rest, word[i]); if (d < least && d < length(rest)) { least = d; best = word[i] } }
         other = ""
-        if (best in opposite) { d = slips(rest, opposite[best]); if (d <= most && d < length(rest)) other = opposite[best] }
+        if (best in opposite && slips(rest, opposite[best]) == least) other = opposite[best]
         # (Named in the order of the list: on before off, sign in before sign out.)
         if (other != "" && (best == "off" || best == "signout")) { swap = best; best = other; other = swap }
         printf "unknown\t%s\n", rest
