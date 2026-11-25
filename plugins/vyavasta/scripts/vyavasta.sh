@@ -111,8 +111,11 @@ UNSENT="$HOME_DIR/unsent"
 
 # The one check that runs after every edit, in both tools: whether a conflict is waiting to be told. It costs a file
 # test when there is none, so it is answered as soon as the settings folder is known, before anything else is set up.
-# Claude Code is stopped (conflict-stop); Codex, which goes on after a hook stops it there, shows the developer the
-# same, and its model is given what to do in place of the edit's result (conflict-block).
+# Claude Code is stopped (conflict-stop). Codex goes on after a hook stops it there, and in its code mode (an edit made
+# inside a script it runs, the way its own models edit) keeps the edit's own result for its model whatever a hook
+# said in its place: only a block reaches its model there, as the error of that edit, which also ends the script. So
+# Codex is given a block (conflict-block), whose reason, shown to the developer under Codex's heading “Blocked by
+# hook” too, says what stands and that the edit was made, and tells its model to make no more edits and ask.
 if [ "${1:-}" = "hook" ] && [ "${2:-}" = "edit-check" ]; then
   if [ "$CLIENT" = "codex" ]; then told=conflict-block; else told=conflict-stop; fi
   set -- "$SESSIONS"/*/"$told"
@@ -1919,8 +1922,7 @@ keep_conflict() {
 Send “continue” to go on, or “stop” to leave the change where it is."
   printf '{"continue":false,"stopReason":%s}\n' "$(json_quote "$told")" > "$1/conflict-stop"
   printf '{"systemMessage":%s}\n' "$(json_quote "$told")" > "$1/conflict-say"
-  printf '{"continue":false,"stopReason":%s,"reason":%s}\n' "$(json_quote "$told")" \
-    "$(json_quote "$(json_text "$(field "$conflict" notice)")
+  printf '{"decision":"block","reason":%s}\n' "$(json_quote "$(json_text "$(field "$conflict" notice)")
 
 The edit was made. Make no more edits: tell the developer what stands against the change, and ask whether to continue or stop.")" \
     > "$1/conflict-block"

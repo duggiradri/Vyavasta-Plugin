@@ -5649,9 +5649,10 @@ def test_a_turn_that_ended_in_an_error_reports_its_work_and_no_reply(run, fake, 
     assert output(stop(run, repo, last_assistant_message="Done."))["systemMessage"].startswith(CONFLICT["notice"])
 
 
-def test_codex_is_told_of_a_conflict_right_after_the_edit(run, fake, repo):
-    """Codex goes on after a hook stops it after an edit: the developer is shown what stands, and Codex's model is
-    given what to do in place of the edit's result."""
+def test_codex_is_told_of_a_conflict_at_its_next_edit_with_a_block_its_model_receives(run, fake, repo):
+    """In Codex's code mode (an edit made inside a script Codex runs) a hook's word in place of the edit's result
+    never reaches its model, and only a block does, as the edit's error: the conflict is told with one. Its reason is
+    the one text, shown to the developer too, and the edit itself stands. (Claude Code is stopped, as before.)"""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.extra["/work"] = {"conflict": CONFLICT}
@@ -5659,12 +5660,8 @@ def test_codex_is_told_of_a_conflict_right_after_the_edit(run, fake, repo):
     run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="apply_patch"), cwd=repo, tool="codex")
     said = output(run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="apply_patch"), cwd=repo,
                       tool="codex"))
-    # (The edit was made: its result stands, and what Codex's model sees in its place says what to do.)
-    assert said["continue"] is False and "decision" not in said
-    assert said["reason"].startswith(CONFLICT["notice"])
-    assert said["reason"].endswith("The edit was made. Make no more edits: tell the developer what stands against the "
-                                   "change, and ask whether to continue or stop.")
-    assert said["stopReason"].endswith("Send “continue” to go on, or “stop” to leave the change where it is.")
+    assert said == {"decision": "block", "reason": CONFLICT["notice"] + "\n\nThe edit was made. Make no more edits: "
+                    "tell the developer what stands against the change, and ask whether to continue or stop."}
     # Told once.
     assert run("hook", "edit-check", stdin=event("PostToolUse", repo), cwd=repo, tool="codex").stdout == ""
 
