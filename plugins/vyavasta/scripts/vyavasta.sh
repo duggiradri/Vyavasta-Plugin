@@ -210,9 +210,8 @@ REPORT_EVERY=10
 OFFLINE_FOR=60
 # A call that the server took and answered nothing to in time makes every call after it that may take longer than
 # PROBE_SECONDS wait for a quick answer first (PROBE_SECONDS at most), until the server answers one or SLOW_FOR seconds
-# have passed. When the quick question goes unanswered, or a call that may take no longer than SLOW_SECONDS does,
-# nothing is tried by the hooks for OFFLINE_FOR seconds (`held_off`).
-SLOW_SECONDS=10
+# have passed: a server that answers, if late, is still called each time. Only when the quick question itself goes
+# unanswered is nothing tried by the hooks for OFFLINE_FOR seconds (`held_off`).
 SLOW_FOR=600
 PROBE_SECONDS=4
 # A reply or a work report that couldn't be sent is kept for this long at most (the server knows a request_id for an
@@ -818,7 +817,7 @@ offline() {
 
 # Whether a call went unanswered a short while ago (SLOW_FOR): each call after it that may take longer than a quick
 # question waits for a quick answer first (`api`), so a server that takes calls and never answers costs seconds, not
-# minutes.
+# minutes, and one that answers late is still called.
 slow_lately() {
   [ -f "$HOME_DIR/slow" ] || return 1
   since=$(cat "$HOME_DIR/slow")
@@ -826,11 +825,12 @@ slow_lately() {
   [ $(( $(now) - since )) -lt "$SLOW_FOR" ]
 }
 
-# Whether nothing is to be tried just now: the server was found out of reach (`offline`), or left a quick question
-# unanswered (`unanswered`: the one asked first, or a call no longer than SLOW_SECONDS), less than OFFLINE_FOR seconds
-# ago. The hooks the tool runs by itself (a session's start, a message, an edit, a turn's end) make no call while it
-# holds; a command the developer or the tool's model gives tries all the same (but “vyavasta status”, which says so).
-# AWAY is which of the two it is (offline or unanswered), and AWAY_SAID says why in a few words.
+# Whether nothing is to be tried just now: the server was found out of reach (`offline`), or left the quick question
+# unanswered (`unanswered`), less than OFFLINE_FOR seconds ago. A server that answered late is no such server: it is
+# tried as usual (`slow_lately`). The hooks the tool runs by itself (a session's start, a message, an edit, a turn's
+# end) make no call while it holds; a command the developer or the tool's model gives tries all the same (but
+# “vyavasta status”, which says so). AWAY is which of the two it is (offline or unanswered), and AWAY_SAID says why in
+# a few words.
 held_off() {
   if offline; then AWAY=offline; AWAY_SAID="Vyavasta’s server can’t be reached"; return 0; fi
   [ -f "$HOME_DIR/unanswered" ] || return 1
@@ -948,18 +948,20 @@ config_path() {
 
 # api METHOD PATH BODYFILE SECONDS [keep]: the answer's body in $TMP/answer and its status in STATUS ("000" when no
 # answer from Vyavasta came). SLOW is set when no answer came in time to a request that reached the server, and WENT
-# when this request went out at all. The token and the files' names travel in curl's configuration on its input,
-# never on its command line. The body's file goes once the call is over (it holds the developer's words), unless
-# `keep` says that a wait sends it again.
+# when this request went out at all: with SLOW, WENT says that this call itself went unanswered in time, and its
+# absence that the quick question did, so that nothing more was sent. The token and the files' names travel in curl's
+# configuration on its input, never on its command line. The body's file goes once the call is over (it holds the
+# developer's words), unless `keep` says that a wait sends it again.
 #
 # curl reads none of the developer's own settings (`-q`: no ~/.curlrc, whose `location` would send a message on to
 # wherever a redirect points), follows no redirect, and speaks https only (or http to this computer, as server_url
 # allows). Out of reach (nothing could be sent: no connection, no address, no secure connection), no hook makes a
 # call for a minute (`offline`, `held_off`). A server that took a call and answered nothing in time is asked a quick
 # question first, on the same connection, before each call after it that may take longer than that question
-# (`slow_lately`); and when the quick question, or a call no longer than SLOW_SECONDS, goes unanswered, no hook makes a
-# call for a minute either (`unanswered`). Once one of these is found, no more calls are made in the same run (HELD,
-# the reason: “offline” or “unanswered”). A server that answers with an error is answered with its error each time:
+# (`slow_lately`): one that is only slow, as a busy server can be, answers it at once and is still called each time.
+# When the quick question itself goes unanswered (the server answers it at once, under any load), no hook makes a call
+# for a minute either (`unanswered`). Once one of these is found, no more calls are made in the same run (HELD, the
+# reason: “offline” or “unanswered”). A server that answers with an error is answered with its error each time:
 # one failing call never silences the calls after it. Inside Codex's sandbox, where the network is off by design, a
 # failure says nothing of the server, and nothing is kept of it. A call kept from earlier goes along after this one,
 # on the same connection, when one was picked for it (RIDE, `pick_ride`).
@@ -1041,12 +1043,12 @@ api() {
   if [ -z "${CODEX_SANDBOX:-}" ]; then
     case "$STATUS" in
       000)
-        # (A wait the server holds open on purpose says nothing of whether it answers. A long call that went
-        # unanswered may only have been slow: the calls after it ask the quick question first. The quick question
-        # unanswered, or a call no longer than SLOW_SECONDS, says the server doesn't answer.)
+        # (A wait the server holds open on purpose says nothing of whether it answers. Any other call that went
+        # unanswered, short or long, may only have been slow: the calls after it ask the quick question first. Only
+        # the quick question unanswered, asked first or on its own, says the server doesn't answer.)
         if [ -n "$SLOW" ] && [ -z "${HOLDING:-}" ]; then
           mkdir -p "$HOME_DIR" && now > "$HOME_DIR/slow"
-          if [ -n "$probed_out" ] || [ "$4" -le "$SLOW_SECONDS" ]; then now > "$HOME_DIR/unanswered"; HELD=unanswered; fi
+          if [ -n "$probed_out" ] || [ "$2" = "/hello" ]; then now > "$HOME_DIR/unanswered"; HELD=unanswered; fi
         elif [ -z "$SLOW" ] && [ -z "$went" ]; then mkdir -p "$HOME_DIR" && now > "$HOME_DIR/offline"; HELD=offline; fi ;;
       *) rm -f "$HOME_DIR/offline" "$HOME_DIR/slow" "$HOME_DIR/unanswered" ;;
     esac
@@ -1296,7 +1298,9 @@ start_pairing() {
   api_unsigned POST /pair "$TMP/pair" "$QUICK_SECONDS"
   if [ "$STATUS" != "201" ]; then
     PAIR_FAILED=$(refusal)
-    if [ -z "$PAIR_FAILED" ] && [ -n "$SLOW" ]; then PAIR_FAILED="Vyavasta’s server isn’t answering right now"
+    # (A server that took the call and answered too late is said to be that, never one that doesn't answer.)
+    if [ -z "$PAIR_FAILED" ] && [ -n "$SLOW" ] && [ -n "$WENT" ]; then PAIR_FAILED="Vyavasta’s server didn’t answer in time"
+    elif [ -z "$PAIR_FAILED" ] && [ -n "$SLOW" ]; then PAIR_FAILED="Vyavasta’s server isn’t answering right now"
     elif [ -z "$PAIR_FAILED" ]; then PAIR_FAILED="Vyavasta’s server can’t be reached"; fi
     return 1
   fi
@@ -2150,8 +2154,10 @@ $(arrived_context "$listing" "While the developer was away" "your first reply in
     5*) say "${BANNER}Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     unread) say "${BANNER}Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     *)
+      # (A server that took the call and answered too late is still asked with the next message, the quick question
+      # first: it may only be busy.)
       if [ -n "$NOCURL" ]; then say "${BANNER}Vyavasta needs curl, which isn’t installed here, so nothing is checked. ${AGENT} works as usual.$SUMMARIES_NOTE"
-      elif [ -n "$SLOW" ]; then say "${BANNER}Vyavasta: the server took too long to answer just now, so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE"
+      elif [ -n "$SLOW" ]; then say "${BANNER}Vyavasta: the server didn’t answer in time just now. ${AGENT} works as usual, and Vyavasta is tried again with your next message.$SUMMARIES_NOTE"
       else say "${BANNER}Vyavasta: the server can’t be reached right now, so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE"; fi ;;
   esac
 }
