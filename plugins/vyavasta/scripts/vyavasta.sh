@@ -1382,12 +1382,26 @@ work_state() {
 # A note for the developer (the model isn't shown it).
 say() { printf '{"systemMessage":%s}\n' "$(json_quote "$1")"; }
 
-# The one line every message in a project that is on gets: what was sent, what was not and why, whether the message
-# was kept for the developer's summary ($4, when it is said), and what came of it.
+# The one line every message in a project that is on gets: what was sent ($1), what was not and why ($2), whether the
+# message was kept for the developer's summary ($4, when it is said), and what came of it ($3). The first one of a
+# session gives the whole account; later ones (LINE_SHORT) are short, with the kept clause cut to a few words
+# (KEPT_SHORT), and “sent” alone when only the message went.
 line() {
-  said="Vyavasta · sent: $1."
-  [ -n "$2" ] && said="$said Not sent: $2."
-  [ -n "${4:-}" ] && said="$said $4"
+  if [ -z "${LINE_SHORT:-}" ]; then
+    said="Vyavasta · sent: $1."
+    [ -n "$2" ] && said="$said Not sent: $2."
+    [ -n "${4:-}" ] && said="$said $4"
+    printf '%s · %s' "$said" "$3"
+    return
+  fi
+  said="Vyavasta · sent"
+  { [ "$1" = "your message" ] && [ -z "$2" ]; } || said="$said: $1"
+  [ -n "$2" ] && said="$said · not sent: $2"
+  if [ -n "${4:-}" ] && [ -n "${KEPT_SHORT:-}" ]; then
+    if [ "$said" != "Vyavasta · sent" ]; then said="$said · $KEPT_SHORT"
+    elif [ "$KEPT_SHORT" = "kept for your summary" ]; then said="$said and $KEPT_SHORT"
+    else said="$said, $KEPT_SHORT"; fi
+  fi
   printf '%s · %s' "$said" "$3"
 }
 
@@ -2053,8 +2067,10 @@ hook_prompt() {
   rm -f "$dir/turn-waiting"
   text=$(json_text "$prompt")
   TYPED=""; TYPED_ARG=""
-  # (Read as a command only when it starts with the plugin's name, after any spaces and a no-break space.)
-  lead=${text#"${text%%[![:space:]]*}"}; lead=${lead#"$NO_BREAK"}; lead=${lead#"${lead%%[![:space:]]*}"}
+  # (Read as a command only when it starts with the plugin's name, after any spaces and a no-break space. Only its
+  # first characters are looked at: some shells take seconds to read a long text's start any other way.)
+  lead=$(printf '%.80s' "$text"); lead=${lead#"${lead%%[![:space:]]*}"}
+  lead=${lead#"$NO_BREAK"}; lead=${lead#"${lead%%[![:space:]]*}"}
   case "$lead" in [Vv][Yy][Aa][Vv][Aa][Ss][Tt]*) parse_typed "$text" ;; esac
   if [ -n "$TYPED" ]; then
     # The plugin's own commands, answered here whether or not it is on, and never sent to the model.
@@ -2164,10 +2180,49 @@ off_answer() {
   fi
 }
 
+# The longest message Vyavasta takes, in characters, and what stands at the end of a longer one cut to it.
+MESSAGE_CHARACTERS=40000
+CUT_MARK=" [cut here: Vyavasta takes 40,000 characters at most]"
+# A message longer than MESSAGE_CHARACTERS (a pasted log, say) is cut to its first characters, CUT_MARK among them,
+# before anything of it is sent, and CUT_NOTE says so on its line; a cut never falls inside a character. A message
+# that holds half of a character pair, which the server can't read, is written again with the replacement character
+# in its place. $prompt is the message as a JSON string, and $text its words (`hook_prompt`).
+cut_message() {
+  CUT_NOTE=""
+  case "$prompt" in *\\[uU][dD]*) prompt=$(json_quote "$text") ;; esac
+  # (Bytes are never fewer than characters: a message of fewer bytes is never longer.)
+  [ "${#text}" -gt "$MESSAGE_CHARACTERS" ] || return 0
+  rm -f "$TMP/message-cut"
+  printf '%s' "$text" | LC_ALL=C awk -v MOST="$MESSAGE_CHARACTERS" -v MARK="$CUT_MARK" -v CUT="$TMP/message-cut" \
+      "$WORDS_AWK"'
+    function chars(s) { return length(s) - gsub(CONT, "", s) }
+    BEGIN { RS = "\001"; CONT = "[" sprintf("%c", 128) "-" sprintf("%c", 191) "]" }
+    NR == 1 {
+      if (chars($0) <= MOST) exit
+      # No character takes more than 4 bytes, so the first keep * 4 hold every character kept. The longest start of
+      # them that holds no more than keep characters is found by halves (no awk reads a long text a character at a
+      # time quickly), and then ends where a character does.
+      keep = MOST - chars(MARK); s = substr($0, 1, keep * 4); lo = 0; hi = length(s)
+      while (lo < hi) { mid = int((lo + hi + 1) / 2); if (chars(substr(s, 1, mid)) <= keep) lo = mid; else hi = mid - 1 }
+      k = lo + 1
+      while (k > 1 && substr(s, k, 1) in GOES_ON) k--
+      printf "%s%s", substr(s, 1, k - 1), MARK
+      printf "" > CUT
+    }' > "$TMP/message"
+  [ -f "$TMP/message-cut" ] || return 0
+  prompt=$(json_quote "$(cat "$TMP/message")")
+  CUT_NOTE=" Only the first $(thousands "$MESSAGE_CHARACTERS") characters of your message were sent: Vyavasta takes no more."
+}
+
 # A message in a project that is on: checked, or asked as a question, with its one line. $1 is the message as a JSON
 # string, $2 the session folder.
 handle_message() {
   prompt=$1; dir=$2
+  # A message longer than Vyavasta takes is cut to it, and its line says so (`cut_message`).
+  cut_message
+  # The session's first message that is checked gets the whole account of what was sent; later ones a short line.
+  LINE_SHORT=""; KEPT_SHORT=""; LINE_MARK=""
+  [ -f "$dir/lined" ] && LINE_SHORT=1
   OUT_LINE=""; OUT_CONTEXT=""; OUT_REASON=""
   ARRIVED_LINE=""; ARRIVED_CONTEXT=""; TELL_GUIDE=""; DOCS_GUIDE=""; SESSION_GUIDE=""
   # Whether this message is kept for the developer's summary is settled before they are told what summaries do: the
@@ -2214,7 +2269,7 @@ handle_message() {
     elif [ ! -f "$PDIR/sharing" ] && [ "$NFILES" -gt 0 ] && [ ! -f "$PDIR/asked" ]; then
       # Asked once: code sharing is off until the developer chooses.
       true > "$PDIR/asked"
-      consent=" Send “vyavasta share code on” to also send your uncommitted changes for the check; teammates see only a summary, and key, ignored, machine-written and non-text files never go (asked once)."
+      consent=" Send “vyavasta share code on” to also send your uncommitted changes for the check: teammates see only a summary, and key, ignored, machine-written and non-text files never go. This is asked only once."
     fi
   fi
   {
@@ -2243,11 +2298,16 @@ handle_message() {
     5*)
       OUT_LINE=$(nothing_line "Vyavasta’s server isn’t working right now" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
       emit; return ;;
+    # (Refused for what was sent, such as a branch name longer than the server takes: it would be refused again.)
+    4*)
+      OUT_LINE=$(line "your message" "" "Vyavasta couldn’t take this message as it was sent, so it wasn’t checked. ${AGENT} works as usual.")
+      emit; return ;;
     *)
       OUT_LINE=$(line "your message" "" "Vyavasta couldn’t check it just now. ${AGENT} works as usual.")
       emit; return ;;
   esac
   cp "$TMP/answer" "$TMP/checked"
+  LINE_MARK="$dir/lined"
   if [ "$(json_text "$(answer verdict)")" = "teammate" ]; then
     # A message that is, whole, for one teammate: it starts with “@” and their name (“@priya the fix is pushed”). The
     # server says for whom and with which words, and it is told them as “vyavasta tell <name>: …” is, as it is
@@ -2282,9 +2342,9 @@ handle_message() {
   # it is then sent when the turn ends, named by the kept message's id when the server gave one.
   if [ "$(answer kept)" = "true" ]; then
     json_text "$(answer kept_id)" | tr -cd 'A-Za-z0-9_.:-' | cut -c1-200 > "$dir/turn-waiting"
-    kept_said="Kept in this session’s chat for your summary."
-  elif [ "$(summaries)" = "off" ]; then kept_said="Not kept, because summaries are off."
-  else kept_said="Not kept for your summary."; fi
+    kept_said="Kept in this session’s chat for your summary."; KEPT_SHORT="kept for your summary"
+  elif [ "$(summaries)" = "off" ]; then kept_said="Not kept, because summaries are off."; KEPT_SHORT="not kept (summaries are off)"
+  else kept_said="Not kept for your summary."; KEPT_SHORT="not kept for your summary"; fi
   verdict=$(json_text "$(answer verdict)")
   notice=$(json_text "$(answer notice)")
   context=$(json_text "$(answer context)")
@@ -2310,7 +2370,8 @@ handle_message() {
     report_work "$dir" changing
     if [ "$REPORTED" = "1" ] && { [ -z "$shared" ] || [ "$was_shared" = "off" ]; }; then
       sent="$sent and $(plural "$NFILES" "changed file’s name" "changed files’ names")"
-      [ -n "$shared" ] || not_sent="${not_sent:+$not_sent; }what the files hold (code sharing is off)"
+      # (Said in the session's first line: it doesn't change from one message to the next.)
+      [ -n "$shared" ] || [ -n "$LINE_SHORT" ] || not_sent="${not_sent:+$not_sent; }what the files hold (code sharing is off)"
     fi
     keep_conflict "$dir" && new_conflict=1
   fi
@@ -2324,19 +2385,26 @@ handle_message() {
       "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep" > "$TMP/ask"
     ask_vyavasta "$TMP/ask"
     sent=$(printf '%s' "$sent" | sed 's/^your message/your question/')
+    # Whether the question and its answer are summed up for teammates: as the project's summaries say (the chat in
+    # Vyavasta keeps them either way).
+    if [ "$keep" = "true" ]; then kept_said="Kept in this session’s chat for your summary."; KEPT_SHORT="kept for your summary"
+    elif [ "$(summaries)" = "off" ]; then kept_said="Not summed up, because summaries are off."; KEPT_SHORT="not summed up (summaries are off)"
+    else kept_said="Not kept for your summary."; KEPT_SHORT="not kept for your summary"; fi
     if [ "$STATUS" != "200" ]; then
-      OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent")
+      OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent" "$kept_said")
     else
       outcome=$(json_text "$(answer notice)")
       [ -n "$outcome" ] || outcome="Vyavasta had no answer to give."
-      OUT_LINE=$(line "$sent" "$not_sent" "$outcome$consent")
+      OUT_LINE=$(line "$sent" "$not_sent" "$outcome$consent" "$kept_said")
       OUT_CONTEXT=$(json_text "$(answer context)")
       # (And when the answer drew on a document.)
       docs_hint "$TMP/answer"
     fi
   else
     case "$verdict" in
-      not_a_change) outcome="It isn’t a request for a change or a question about your team, so nothing was checked." ;;
+      not_a_change)
+        if [ -n "$LINE_SHORT" ] && [ -z "$CONNECTED" ]; then outcome="nothing to check"
+        else outcome="It isn’t a request for a change or a question about your team, so nothing was checked."; fi ;;
       # A server that checks no request (the demo, or one with no model): never told as checked, notice or not.
       not_checked) outcome="${notice:-Not checked: this Vyavasta server doesn’t check requests.}" ;;
       not_connected)
@@ -2389,7 +2457,9 @@ keep_this() {
 # Prints what a message's hook answers: a block with its reason, or the one line and what the model is given. The
 # line carries what summaries do when it is the first to tell it.
 emit() {
-  [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${SUMMARIES_NOTE:-}"
+  [ -n "$OUT_LINE" ] && OUT_LINE="$OUT_LINE${CUT_NOTE:-}${SUMMARIES_NOTE:-}"
+  # (A line after a check gave the session's whole account: its later lines are short.)
+  [ -n "$OUT_LINE" ] && [ -n "${LINE_MARK:-}" ] && true > "$LINE_MARK"
   # What arrived from teammates is read under the line, whatever came of the message itself.
   [ -n "${ARRIVED_LINE:-}" ] && OUT_LINE="${OUT_LINE:+$OUT_LINE
 
@@ -2603,6 +2673,8 @@ not_reached() {
       elif [ "$CLIENT" = "codex" ] && [ -z "${IN_HOOK:-}" ]; then echo "Vyavasta can’t be reached from here. Codex runs the commands its model starts in a closed-off space that can’t reach the internet: send it as a message instead, such as “vyavasta status”."
       else echo "Vyavasta’s server can’t be reached right now. Check your internet connection, or try again in a minute."; fi ;;
     5*) echo "Vyavasta’s server isn’t working right now. Try again in a minute." ;;
+    # (A refusal of what was sent, in the server's words for a program, such as “Check words: …”: never shown.)
+    422) echo "Vyavasta couldn’t take that as it was sent, so nothing was done. Something in it is longer than Vyavasta takes." ;;
     *) said=$(refusal); echo "${said:-Vyavasta couldn’t do that just now. Try again in a minute.}" ;;
   esac
 }
@@ -3252,6 +3324,8 @@ command_summary() {
 
 # How long a documents call may take: a search reads every document the developer may read.
 DOCS_SECONDS=20
+# The most words a search takes, in characters (the server takes no more).
+SEARCH_CHARACTERS=2000
 
 # A documents command, as the one who gives it sends it ($1: what follows “documents”, if anything): a phrase the
 # developer sends, in a hook, else the command the tool's model runs.
@@ -3347,6 +3421,11 @@ command_documents_search() {
   words=${1:-}
   [ -n "${TYPED:-}" ] && words=$(cat "$TMP/typed-text")
   if [ -z "$words" ]; then echo "Say what to look for, such as $(docs_cmd "search refund window")."; return; fi
+  # (Characters as UTF-8 counts them: every byte but those that carry on a character.)
+  if [ "$(printf '%s' "$words" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' ')" -gt "$SEARCH_CHARACTERS" ]; then
+    echo "The words to search for can be $(thousands "$SEARCH_CHARACTERS") characters at most. Search with fewer words."
+    return
+  fi
   docs_ready || return
   docs_body "\"words\":$(json_quote "$words")," > "$TMP/docs"
   docs_call /documents/search "$TMP/docs" || return
@@ -3640,6 +3719,7 @@ command_ask_assistant() {
       ;;
     401) echo "This computer’s connection to Vyavasta has ended, so nothing was asked. Tell the developer: $WAY_IN_AGAIN" ;;
     429) echo "Too many requests to Vyavasta just now. Ask again in a minute." ;;
+    422) echo "Vyavasta couldn’t take that question as it was sent, so nothing was asked. Ask it in fewer words." ;;
     000)
       # Out of reach at once, under Codex: inside its sandbox, which Codex says of a command it runs there
       # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so, and both

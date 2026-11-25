@@ -538,9 +538,10 @@ def test_a_held_request_is_kept_from_claude_and_plan_it_anyway_sends_it_with_wha
     assert len(fake.calls("/check")) == 1
     again = prompt(run, repo, "Plan it anyway")
     assert len(fake.calls("/check")) == 2 and "decision" in again
-    # The phrase is the plugin's own: checked when nothing waits for it, never kept for the summary.
+    # The phrase is the plugin's own: checked when nothing waits for it, never kept for the summary (said short in the
+    # session's later lines).
     assert fake.calls("/check")[-1]["body"]["keep"] is False
-    assert "Not kept for your summary." in again["systemMessage"]
+    assert again["systemMessage"].startswith("Vyavasta · sent, not kept for your summary · ")
 
 
 def test_a_hold_is_forgotten_once_the_developer_asks_for_something_else(run, fake, repo):
@@ -551,8 +552,8 @@ def test_a_hold_is_forgotten_once_the_developer_asks_for_something_else(run, fak
     prompt(run, repo, "Remove it from calc.py")
     fake.check = {"verdict": "not_a_change", "hold": False, "notice": "", "context": ""}
     said = prompt(run, repo, "What does calc.py do?")
-    assert said == {"systemMessage": "Vyavasta · sent: your message. Kept in this session’s chat for your summary. · It isn’t a request for a change "
-                                     "or a question about your team, so nothing was checked."}
+    # (The session's first line gave the whole account: nothing notable is said in a few words.)
+    assert said == {"systemMessage": "Vyavasta · sent and kept for your summary · nothing to check"}
     prompt(run, repo, "Plan it anyway")
     assert len(fake.calls("/check")) == 3
 
@@ -621,7 +622,7 @@ def test_a_repository_with_no_github_copy_and_one_not_read_each_say_so(run, fake
     fake.check = {"verdict": "not_connected", "hold": False, "context": "",
                   "notice": "Not checked: Vyavasta doesn’t read acme/other for you, so nothing was checked or shared."}
     said = prompt(run, local, "Change it", cwd=local)["systemMessage"]
-    assert said == "Vyavasta · sent: your message. Kept in this session’s chat for your summary. · " + fake.check["notice"]
+    assert said == "Vyavasta · sent and kept for your summary · " + fake.check["notice"]
 
 
 # -- questions ---------------------------------------------------------------------------------------------------
@@ -642,7 +643,8 @@ def test_a_question_about_the_team_is_asked_in_vyavasta_and_the_answer_is_given_
     # The model is given the answer as the server worded it, non-ASCII and all; the developer is told it was asked.
     assert said["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit",
                                           "additionalContext": fake.asked["context"]}
-    assert said["systemMessage"] == "Vyavasta · sent: your question. · " + fake.asked["notice"]
+    assert said["systemMessage"] == "Vyavasta · sent: your question. Kept in this session’s chat for your summary. · " + \
+        fake.asked["notice"]
     assert "decision" not in said
     # From a folder that is no repository it is asked all the same.
     outside = tmp_path / "notes"
@@ -667,7 +669,8 @@ def test_a_slow_answer_is_waited_for_over_several_short_calls_and_then_given_up_
     fake.requests.clear()
     fake.slow = 99
     said = prompt(run, repo, "What is Priya doing?")
-    assert said == {"systemMessage": "Vyavasta · sent: your question. · Vyavasta is still working on the answer."}
+    assert said == {"systemMessage": "Vyavasta · sent: your question · kept for your summary · Vyavasta is still "
+                                     "working on the answer."}
     assert len(fake.calls("/ask")) == 6
 
 
@@ -678,11 +681,12 @@ def test_a_question_with_no_answer_goes_to_the_model_as_it_is_with_a_note(run, f
     fake.asked = {"status": "failed", "answer": "", "context": "", "conversation_id": None, "url": None,
                   "notice": "The assistant model couldn’t answer. Your message is saved; try again."}
     said = prompt(run, repo, "What is Priya doing?")
-    assert said == {"systemMessage": "Vyavasta · sent: your question. · " + fake.asked["notice"]}
+    assert said == {"systemMessage": "Vyavasta · sent: your question. Kept in this session’s chat for your summary. · "
+                                     + fake.asked["notice"]}
     fake.status["/ask"] = 500
     said = prompt(run, repo, "What is Priya doing?")
-    assert said == {"systemMessage": "Vyavasta · sent: your question. · Your question couldn’t be asked just now, "
-                                     "so Claude answers by itself."}
+    assert said == {"systemMessage": "Vyavasta · sent: your question · kept for your summary · Your question couldn’t "
+                                     "be asked just now, so Claude answers by itself."}
 
 
 def test_the_model_can_ask_vyavasta_itself_in_the_session_the_developer_last_wrote_in(run, fake, repo):
@@ -770,19 +774,24 @@ def test_with_sharing_off_the_line_names_the_changed_files_and_asks_about_sharin
     assert said.startswith("Vyavasta · sent: your message and 2 changed files’ names. Not sent: what the files hold "
                            "(code sharing is off). Kept in this session’s chat for your summary. · Checked: nothing stands against this change.")
     # The one question about code sharing says what turning it on does, in a sentence.
-    assert said.endswith(" Send “vyavasta share code on” to also send your uncommitted changes for the check; "
-                         "teammates see only a summary, and key, ignored, machine-written and non-text files never go "
-                         "(asked once).")
+    assert said.endswith(" Send “vyavasta share code on” to also send your uncommitted changes for the check: "
+                         "teammates see only a summary, and key, ignored, machine-written and non-text files never go. "
+                         "This is asked only once.")
     (check,) = fake.calls("/check")
     assert "change" not in check["body"] and SECRET.encode() not in check["raw"]
     (work,) = fake.calls("/work")
     assert SECRET.encode() not in work["raw"] and "change" not in work["body"]
-    # Asked once only.
+    # Asked once only; and what doesn't change from one message to the next is said in the session's first line only.
     again = prompt(run, repo, "Change calc.py")["systemMessage"]
-    assert "asked once" not in again
+    assert "asked only once" not in again
+    assert again == ("Vyavasta · sent: your message and 2 changed files’ names · kept for your summary · Checked: "
+                     "nothing stands against this change.")
     # One changed file is said in the singular.
     git(repo, "checkout", "-q", "--", "calc.py")
-    assert "sent: your message and 1 changed file’s name." in prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert "sent: your message and 1 changed file’s name ·" in prompt(run, repo, "Change calc.py")["systemMessage"]
+    # A new session gives the whole account again.
+    assert "Not sent: what the files hold (code sharing is off)." in prompt(run, repo, "Change calc.py",
+                                                                            session="session-2")["systemMessage"]
 
 
 def test_turning_code_sharing_on_says_what_is_sent_and_never_sent_and_tells_the_server(run, fake, repo):
@@ -1541,7 +1550,13 @@ def test_a_message_in_a_project_that_is_off_costs_almost_nothing_however_long(ru
     switched_on(run, fake, repo)
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt=pasted), cwd=repo)
     print(f"[timing] on project, {len(pasted):,} characters: {done.seconds:.3f} s")
-    assert fake.calls("/check")[0]["body"]["request"] == pasted and done.seconds < 10
+    # (Vyavasta takes 40,000 characters at most: the message is cut to them, and its line says so.)
+    request = fake.calls("/check")[0]["body"]["request"]
+    assert len(request) == 40000 and request.endswith(" [cut here: Vyavasta takes 40,000 characters at most]")
+    assert pasted.startswith(request.removesuffix(" [cut here: Vyavasta takes 40,000 characters at most]"))
+    assert done.seconds < 10
+    assert output(done)["systemMessage"].endswith(" Only the first 40,000 characters of your message were sent: "
+                                                  "Vyavasta takes no more.")
 
 
 def test_a_large_new_file_is_never_read_and_is_left_out_as_past_the_limit(run, fake, repo):
@@ -1836,14 +1851,15 @@ def test_the_plugins_own_commands_and_answers_to_its_questions_are_never_kept(ru
     for words in ("continue", "Stop.", "Plan it anyway"):
         said = prompt(run, repo, words)
         assert fake.calls("/check")[-1]["body"]["keep"] is False
-        assert "Not kept for your summary." in said["systemMessage"]
+        assert "not kept for your summary" in said["systemMessage"].lower()
     stop(run, repo, last_assistant_message="Done.")
     assert not fake.calls("/turn")
     # A question goes on to the assistant, whose chat already holds it: the reply is not added again.
     fake.check = dict(QUESTION)
     said = prompt(run, repo, "What is Priya working on?")
     assert fake.calls("/check")[-1]["body"]["keep"] is True and fake.calls("/ask")
-    assert "kept" not in said["systemMessage"].lower()
+    # Its line says it is kept, as every message's line says whether it is.
+    assert said["systemMessage"].startswith("Vyavasta · sent: your question · kept for your summary · ")
     stop(run, repo, last_assistant_message="Priya is moving the export.")
     assert not fake.calls("/turn")
 
@@ -3466,13 +3482,15 @@ def test_what_teammates_sent_comes_with_the_next_message_under_its_line_and_at_t
     after the rest of what it is told, to open its reply with."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    # (The session's first line gives the whole account, and the later ones, compared below, are short.)
+    prompt(run, repo, "Fix the rounding")
     plain = prompt(run, repo, "Fix the rounding")
     fake.extra["/check"] = {"inbox": {"items": ARRIVED, "count": 2, "more": 0}}
     for tool in (None, "codex"):
         said = prompt(run, repo, "Fix the rounding", tool=tool)
         line, context = said["systemMessage"], said["hookSpecificOutput"]["additionalContext"]
         # The message's own line as it always is, then what arrived.
-        assert line.startswith("Vyavasta · sent: your message")
+        assert line.startswith("Vyavasta · sent")
         assert line.endswith("\n\n🔔 New from your teammates, through Vyavasta:\n" + ARRIVED_LISTING), line
         # For the model: what the check found, then what arrived, last.
         assert context == fake.check["context"] + "\n\n" + OPENS_WITH + ARRIVED_TOLD
@@ -3540,7 +3558,7 @@ def test_a_message_that_mentions_a_teammate_gives_the_model_the_command_that_sen
             == (tool == "codex")
         assert ("“vyavasta tell <name>: <their words>”" in guide) == (tool == "codex")
         # The message itself goes on to the model as it is, with its usual line.
-        assert "decision" not in said and said["systemMessage"].startswith("Vyavasta · sent: your message.")
+        assert "decision" not in said and said["systemMessage"].startswith("Vyavasta · sent")
     assert fake.calls("/tell") == []
     # Two and three names read as a sentence names them; a name is cut to a short one, as everywhere.
     fake.check["to_teammates"] = [{"name": "Rohan Mehta"}, {"name": "Priya Raman"}]
@@ -4589,3 +4607,62 @@ def test_a_slash_command_that_is_not_one_of_the_plugins_own_is_left_to_claude_co
     for command in ("vyavasta:guide", "vyavasta:nothing", "other:status", "compact"):
         assert expansion(run, repo, command) == {}
     assert fake.requests == []
+
+
+# -- 0.6.0: a short line under each message, and plain words for what went wrong -----------------------------------
+
+def test_the_line_gives_the_whole_account_once_a_session_and_then_a_short_or_quiet_one(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = {"verdict": "not_a_change", "hold": False, "notice": "", "context": "", "statements": []}
+    first = prompt(run, repo, "What does calc.py do?")["systemMessage"]
+    assert first == ("Vyavasta · sent: your message. Kept in this session’s chat for your summary. · It isn’t a request "
+                     "for a change or a question about your team, so nothing was checked.")
+    # Nothing notable: a few words.
+    assert prompt(run, repo, "Thanks")["systemMessage"] == "Vyavasta · sent and kept for your summary · nothing to check"
+    run("summaries", "off", cwd=repo)
+    assert prompt(run, repo, "Thanks")["systemMessage"] == \
+        "Vyavasta · sent, not kept (summaries are off) · nothing to check"
+    # Something notable still says it: a check that found something, or files whose names went.
+    fake.check = {"verdict": "clear", "hold": False, "notice": "Checked: nothing stands against this change.",
+                  "context": "x", "statements": []}
+    (repo / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+    said = prompt(run, repo, "Make add subtract")["systemMessage"]
+    # (With the one question about code sharing after it, asked once.)
+    assert said.startswith("Vyavasta · sent: your message and 1 changed file’s name · not kept (summaries are off) · "
+                           "Checked: nothing stands against this change. Send “vyavasta share code on”")
+    # A question's line says whether it is kept, in the session's first line and in a later one.
+    run("summaries", "on", cwd=repo)
+    fake.check = dict(QUESTION)
+    asked = prompt(run, repo, "What is Priya doing?", session="session-9")["systemMessage"]
+    assert asked.startswith("Vyavasta · sent: your question and 1 changed file’s name. Not sent: what the files hold "
+                            "(code sharing is off). Kept in this session’s chat for your summary. · ")
+    run("summaries", "off", cwd=repo)
+    assert "not summed up (summaries are off)" in prompt(run, repo, "And Sam?", session="session-9")["systemMessage"]
+
+
+def test_a_message_the_server_refuses_for_what_was_sent_is_never_said_to_be_a_passing_problem(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/check"] = 422
+    fake.refused = "Check branch: String should have at most 200 characters."
+    said = prompt(run, repo, "Make add subtract")["systemMessage"]
+    assert said.endswith("Vyavasta couldn’t take this message as it was sent, so it wasn’t checked. Claude works as usual.")
+    assert "just now" not in said and "String should" not in said
+    # The same for a command: the server's words for a program never reach the developer.
+    fake.status = {"/documents": 422}
+    said = prompt(run, repo, "vyavasta documents")["reason"]
+    assert said.startswith("Vyavasta couldn’t take that as it was sent, so nothing was done.") and "Check" not in said
+
+
+def test_a_search_longer_than_vyavasta_takes_is_answered_before_anything_is_sent(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    for words in ("refund " * 300, "é" * 2001):
+        said = prompt(run, repo, "vyavasta documents search " + words)["reason"]
+        assert said == "The words to search for can be 2,000 characters at most. Search with fewer words."
+        assert run("documents", "search", words, cwd=repo).stdout.strip() == said
+    assert fake.calls("/documents/search") == []
+    # Exactly 2,000 characters are searched.
+    prompt(run, repo, "vyavasta documents search " + "é" * 2000)
+    assert len(fake.calls("/documents/search")[0]["body"]["words"]) == 2000
