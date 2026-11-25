@@ -63,8 +63,11 @@ WAY_IN_AGAIN="Send “vyavasta sign in” to connect again."
 # What a server that checks no request does instead (/me says `"checks": false`: the demo, or one with no model),
 # said wherever a line would otherwise say that requests are checked.
 UNCHECKED="This Vyavasta server doesn’t check requests, so ${AGENT} is shown what your team has said about each one instead."
-# This script, by its full path: what the tool's model is told to run to ask Vyavasta a question.
-SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+# This script, by its full path: what the tool's model is told to run to ask Vyavasta a question. (Its folder and name
+# are taken from the path it was run by with the shell's own words, not with programs: this runs before the check
+# after every edit, which then starts no program until it knows a conflict waits.)
+case "$0" in */*) SELF_DIR=${0%/*} ;; *) SELF_DIR=. ;; esac
+SELF="$(cd "${SELF_DIR:-/}" && pwd)/${0##*/}"
 case "$CLIENT" in codex) ASK_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
 # And what it is told to run to send a teammate a message: the same script, with who it is for and the words.
 case "$CLIENT" in codex) TELL_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" tell" ;; *) TELL_WITH="sh \"$SELF\" tell" ;; esac

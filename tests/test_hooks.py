@@ -1428,10 +1428,20 @@ def test_every_hook_runs_this_script_with_a_command_it_knows():
         assert "$ARGUMENTS" not in text
 
 
-def test_the_check_after_an_edit_costs_almost_nothing_when_no_conflict_waits(run, fake, repo):
+def test_the_check_after_an_edit_costs_almost_nothing_when_no_conflict_waits(run, fake, repo, tmp_path):
     switched_on(run, fake, repo)
     done = run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_input={"content": "x" * 400_000}))
     assert done.stdout == "" and done.seconds < 1 and fake.requests == []
+    # It runs after every edit in Claude Code: it starts one program at most (reading the rest of its input), each
+    # program it starts written down by a stand-in for it on the PATH.
+    shims, log = tmp_path / "shims", tmp_path / "programs.log"
+    shims.mkdir()
+    for name in ("cat", "head", "sed", "cut", "dirname", "basename", "date", "ls", "awk", "mktemp", "rm", "mkdir"):
+        real = shutil.which(name)
+        (shims / name).write_text(f'#!/bin/sh\necho {name} >> "{log}"\nexec {real} "$@"\n')
+        (shims / name).chmod(0o755)
+    run("hook", "edit-check", stdin=event("PostToolUse", repo), extra={"PATH": f"{shims}:{os.environ['PATH']}"})
+    assert (log.read_text().split() if log.exists() else []) in ([], ["cat"])
 
 
 # -- review fixes: what can never be sent, the developer's index, cost, and the words people read ------------------
