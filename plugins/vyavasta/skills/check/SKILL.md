@@ -1,7 +1,7 @@
 ---
 description: "Test sign-in, the connection, this project and the plugin’s version, and say how to fix each problem."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" check:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" check || true`

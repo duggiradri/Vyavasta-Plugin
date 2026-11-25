@@ -1,7 +1,7 @@
 ---
 description: "Connect Claude Code on this computer to your team’s Vyavasta workspace."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" sign-in:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" sign-in || true`

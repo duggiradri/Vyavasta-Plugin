@@ -1,7 +1,7 @@
 ---
 description: "Show your own summaries in Vyavasta, with which of them teammates see, and what your teammates are working on."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" summary:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" summary || true`

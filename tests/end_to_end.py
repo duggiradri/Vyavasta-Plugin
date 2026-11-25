@@ -209,9 +209,9 @@ def main() -> int:
         expect("  V Y A V A S T A  ·  your team’s record, in Claude Code\n" in welcome
                and "\nVyavasta is installed. To connect this computer, enter the code " in welcome
                and f"({base}/" in welcome and "“vyavasta on”" in welcome and "“vyavasta help”" in welcome
-               and welcome.splitlines()[-1].startswith("Try: "),
+               and welcome.splitlines()[-1].startswith("Send “vyavasta on” in a project, then try: "),
                "the welcome opens with the banner, gives the code and the Connect page’s address, then “vyavasta on” "
-               "and “vyavasta help”, and what to try")
+               "and “vyavasta help”, and what to try once the project is on")
         found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", welcome)
         code = found.group(1) if found else ""
         again = hook("session-start", "SessionStart", repo, source="startup").get("systemMessage", "")
@@ -230,9 +230,13 @@ def main() -> int:
                "after approving, Sam’s next ordinary message finishes connecting, says so, and goes through")
         guides = [mail for mail in sam.ok("GET", "/demo/inbox?email=sam@northwind.dev")
                   if mail["subject"] == "Vyavasta in Claude Code and Codex: your guide (keep this email)"]
-        expect(len(guides) == 1 and "A guide to every command was emailed to you; it is worth keeping."
-               in said["systemMessage"],
-               "the first connection brings the guide to every command by email, once, and the line says so")
+        # (The line says so where the server says which sign-in sent it, as a server since 0.6.0 does; with an older
+        # one it says nothing of a guide, never something untrue.)
+        tells_which = "guide_emailed_now" in (project / "src" / "mas_stealth" / "product" / "plugin_api.py").read_text()
+        expect(len(guides) == 1 and ("A guide to every command was emailed to you; it is worth keeping."
+                                     in said["systemMessage"]) == tells_which,
+               "the first connection brings the guide to every command by email, once, and the line says so where the "
+               "server says this sign-in sent it")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta how do I sign in?")
         expect(said.get("decision") == "block" and "You’re signed in as sam@northwind.dev" in said.get("reason", ""),
                "asking how to sign in is answered with help, which says Sam is signed in")
@@ -274,8 +278,9 @@ def main() -> int:
 
         step("UserPromptSubmit: a question")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="What does this repository do?")
+        # (A session's first line gave the whole account: this one says it in a few words.)
         expect("hookSpecificOutput" not in said and "decision" not in said
-               and said.get("systemMessage", "").startswith("Vyavasta · sent: your message."),
+               and said.get("systemMessage", "").startswith("Vyavasta · sent"),
                "a question goes to Claude untouched, with its one line")
 
         step("UserPromptSubmit: a question about the team, asked in Vyavasta as in its web app’s chat")
@@ -337,7 +342,7 @@ def main() -> int:
         step("Summaries: a message kept in this session’s chat, Claude’s reply when the turn ends, Sam’s summaries")
         said = hook("prompt", "UserPromptSubmit", repo,
                     prompt="Rename subscription_tier to plan_tier in api/views.py")
-        expect("Kept in this session’s chat for your summary." in said.get("systemMessage", ""),
+        expect("kept for your summary" in said.get("systemMessage", "").lower(),
                "the line says the message was kept in this session’s chat for Sam’s summary")
         reply = "I renamed subscription_tier to plan_tier in api/views.py; “the tests pass”.\n\nNothing else changed."
         said = hook("stopped", "Stop", repo, stop_hook_active=False, last_assistant_message=reply)
@@ -410,7 +415,7 @@ def main() -> int:
                "“vyavasta summaries off” is answered by the plugin")
         before = len(sam.ok("GET", f"/conversations/{chat_id}").get("messages", [])) if chat_id else -1
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Rename plan_tier back to subscription_tier")
-        expect("Not kept, because summaries are off." in said.get("systemMessage", ""), "the next line says not kept")
+        expect("not kept (summaries are off)" in said.get("systemMessage", ""), "the next line says not kept")
         hook("stopped", "Stop", repo, stop_hook_active=False, last_assistant_message="Renamed it back.")
         after = sam.ok("GET", f"/conversations/{chat_id}") if chat_id else {}
         expect(len(after.get("messages", [])) == before and "Renamed it back" not in json.dumps(after),
@@ -442,9 +447,11 @@ def main() -> int:
                                                                "kind": "message", "client_request_id": "e2e-1"})
         said = hook("session-start", "SessionStart", repo, source="startup")
         start_line = said.get("systemMessage", "")
+        start_context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
         print("  SessionStart said: " + start_line.replace("\n", "\n  ")[:900])
-        expect("While you were away:" in start_line and "· asked your agent ──" in start_line
-               and "Is customer_plan still in the API?" in start_line,
+        # The developer reads that it came, once; Claude is given it to open its first reply with, under its header.
+        expect("While you were away, a message came from your teammates." in start_line
+               and "· asked your agent ──" in start_context and "│ Is customer_plan still in the API?" in start_context,
                "the next session starts with Ganesh’s message, under its header")
 
         step("Teammates with “@”: “@ganesh …” is told him by the plugin, and “vyavasta team” lists their work")

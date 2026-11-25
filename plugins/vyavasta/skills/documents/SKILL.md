@@ -1,7 +1,7 @@
 ---
 description: "List the team’s documents you may read in Vyavasta, numbered, with how to search and read them."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" documents:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" documents || true`
