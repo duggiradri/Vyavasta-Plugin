@@ -131,10 +131,17 @@ greeted() { [ -n "$GREETED" ] || GREETED="$VERSION $(ls -i "$SELF" | awk '{ prin
 greeting_due() { greeted; [ ! -f "$WELCOMED" ] || [ "$(cat "$WELCOMED")" != "$GREETED" ]; }
 mark_greeted() { greeted; mkdir -p "$HOME_DIR" && printf '%s\n' "$GREETED" > "$WELCOMED"; }
 # The banner a greeting opens with, what it offers to try, and what this version brought (said when an earlier copy
-# of the plugin greeted here before).
+# of the plugin greeted here before). Claude Code shows a hook's note after the hook's name and “says:”, on the same
+# line: there the banner starts on a line of its own, so its three lines stand together.
 RULE="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-banner() { printf '%s\n  V Y A V A S T A  ·  your team’s record, in %s\n%s\n' "$RULE" "$TOOL" "$RULE"; }
-TRY_SAID="Try: “What is my team working on?” · “Push this, then tell @priya” · “vyavasta documents” · “vyavasta summary”"
+banner() {
+  [ "$CLIENT" = "claude-code" ] && echo
+  printf '%s\n  V Y A V A S T A  ·  your team’s record, in %s\n%s\n' "$RULE" "$TOOL" "$RULE"
+}
+# (Said where the project is off: what it offers works once the project is on. A name after “@” has words after it:
+# in Codex's terminal a name at the very end of a message opens its file picker.)
+TRY_THESE="“What is my team working on?” · “Push this, then tell @priya it’s done” · “vyavasta documents” · “vyavasta summary”"
+TRY_SAID="Send “vyavasta on” in a project, then try: $TRY_THESE"
 # Said once a sign-in finishes, and in a later welcome, where the server emailed the guide to every command.
 GUIDE_EMAILED="A guide to every command was emailed to you; it is worth keeping."
 guide_said() {
@@ -144,7 +151,11 @@ guide_said() {
     printf '“vyavasta help” shows the commands any time.'
   fi
 }
-WHATS_NEW="New in $VERSION: “vyavasta documents” lists the team’s documents you may read in Vyavasta, and “vyavasta documents search <words>” and “vyavasta documents read <number>” search and read them; ${AGENT} reads them the same way when your work needs them. The plugin keeps no copy of them on this computer; what ${AGENT} reads stays in its own conversation, as anything it reads does. “@team <your words>” tells everyone else in your workspace, and a message that starts with several names (“@priya @sam …”) tells each of them."
+WHATS_NEW="line under each message is short after the first of a session. “vyavasta login”, “vyavasta turn on”, “vyavasta: status” and the like are commands too, and a mistyped one says which command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all."
+case "$CLIENT" in
+  claude-code) WHATS_NEW="New in $VERSION: slash commands such as /vyavasta:status answer at once, with no turn of Claude. The $WHATS_NEW" ;;
+  *) WHATS_NEW="New in $VERSION: the $WHATS_NEW" ;;
+esac
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
 # How long one call for the answer to a question may take, and for how long in all calls go on waiting for an
@@ -913,9 +924,10 @@ finish_pairing() {
       rm -f "$PENDING"
       TOKEN=$(token_for "$SERVER")
       CONNECTED="Connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
-      # Whether the server emailed its person the guide to every command (a server from before 0.5.6 says nothing,
-      # and nothing is said of it): said here and in a later welcome, and only then, so it is never said untrue.
-      if [ "$(answer guide_emailed)" = "true" ]; then
+      # Whether the server emailed its person the guide to every command with this sign-in (`guide_emailed_now`; a
+      # server from before 0.6.0 doesn't say, and nothing is said of it): said here and in the other tool's first
+      # welcome, and only then, so it is never said untrue and never said again after a later sign-in.
+      if [ "$(answer guide_emailed_now)" = "true" ]; then
         printf '%s\n' "$SERVER" > "$HOME_DIR/guide-emailed"
         CONNECTED="$CONNECTED $GUIDE_EMAILED"
       else
@@ -1561,6 +1573,35 @@ away_said() {
   fi
 }
 
+# What a session's start says of a newer plugin than this one ($1: /me's answer, whose `plugin` has the newest version
+# and the oldest the server still works with): in Claude Code, which updates a plugin only when told to (Codex does it
+# by itself when it starts), once for each newer version, how to update; and in either tool, at every start, that this
+# one must be updated when the server no longer works with it. The newest version told is kept in `update-told`. One
+# awk program reads the answer and compares the versions (each numbers separated by dots, or it is no version).
+update_said() {
+  set -- $(LC_ALL=C awk -v HAVE="$VERSION" "$JSON_AWK"'
+    function version(s) { return (s ~ /^[0-9]+(\.[0-9]+)*$/) ? s : "" }
+    function before(a, b,   x, y, n, m, i) {
+      n = split(a, x, "."); m = split(b, y, ".")
+      for (i = 1; i <= (n > m ? n : m); i++) { if (x[i] + 0 < y[i] + 0) return 1; if (x[i] + 0 > y[i] + 0) return 0 }
+      return 0
+    }
+    BEGIN { RS = "\001" }
+    NR == 1 {
+      jobj($0, top); jobj(top["plugin"], f); latest = version(jstr(f["latest"])); minimum = version(jstr(f["minimum"]))
+      if (minimum != "" && before(HAVE, minimum)) print "must", minimum
+      else if (latest != "" && before(HAVE, latest)) print "newer", latest
+    }' "$1")
+  case "${1:-}" in
+    must) printf '%s' "This plugin ($VERSION) is older than the oldest version Vyavasta still works with ($2), so it must be updated. $(update_how)" ;;
+    newer)
+      [ "$CLIENT" = "claude-code" ] || return 0
+      [ -f "$HOME_DIR/update-told" ] && [ "$(cat "$HOME_DIR/update-told")" = "$2" ] && return 0
+      printf '%s\n' "$2" > "$HOME_DIR/update-told"
+      printf '%s' "Vyavasta $2 is out (you have $VERSION). $(update_how)" ;;
+  esac
+}
+
 hook_session_start() {
   PAIR_FAILED=""
   # The tool gives this hook 15 seconds in all: each call is short, and none is made while the server was just found
@@ -1621,6 +1662,8 @@ $WHATS_NEW
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
       fi
+      update=$(update_said "$TMP/answer")
+      [ -z "$update" ] || greeting="$greeting $update"
       greeting="$greeting$SUMMARIES_NOTE"
       # What teammates told the developer, or asked of them, while they were away, each told once: the tool's model is
       # given a few of them, after its own instructions, to open its first reply with, and the developer reads under
@@ -2790,6 +2833,7 @@ command_on() {
   # This answer tells what summaries do, so no later line tells it again.
   summaries_said
   mark_summaries_told
+  echo "Try: $TRY_THESE"
   echo "Send “vyavasta help” for everything else, or “vyavasta off” to turn it off here."
 }
 

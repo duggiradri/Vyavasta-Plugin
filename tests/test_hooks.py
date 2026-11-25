@@ -324,23 +324,25 @@ def signed_in(run, fake: Fake) -> None:
 # script words them; and what its file of who greeted last holds once this copy of the plugin has greeted.
 VERSION = re.search(r'^VERSION="([^"]+)"', SCRIPT.read_text(), re.M).group(1)
 RULE = re.search(r'^RULE="(━+)"', SCRIPT.read_text(), re.M).group(1)
-TRY = ("\nTry: “What is my team working on?” · “Push this, then tell @priya” · “vyavasta documents” · “vyavasta "
-       "summary”")
+TRY_THESE = "“What is my team working on?” · “Push this, then tell @priya it’s done” · “vyavasta documents” · “vyavasta " \
+    "summary”"
+TRY = f"\nSend “vyavasta on” in a project, then try: {TRY_THESE}"
 AGENTS = {"Claude Code": "Claude", "Codex": "Codex"}
 
 
 def banner(tool: str = "Claude Code") -> str:
-    return f"{RULE}\n  V Y A V A S T A  ·  your team’s record, in {tool}\n{RULE}\n"
+    # (Claude Code shows a hook's note after “SessionStart:startup says:” on the same line: the banner starts on a line
+    # of its own there.)
+    return ("\n" if tool == "Claude Code" else "") + f"{RULE}\n  V Y A V A S T A  ·  your team’s record, in {tool}\n{RULE}\n"
 
 
 def whats_new(tool: str = "Claude Code") -> str:
-    agent = AGENTS[tool]
-    return (f"New in {VERSION}: “vyavasta documents” lists the team’s documents you may read in Vyavasta, and “vyavasta "
-            "documents search <words>” and “vyavasta documents read <number>” search and read them; "
-            f"{agent} reads them the same way when your work needs them. The plugin keeps no copy of them on this "
-            f"computer; what {agent} reads stays in its own conversation, as anything it reads does. “@team <your "
-            "words>” tells everyone else in your workspace, and a message that starts with several names (“@priya "
-            "@sam …”) tells each of them.")
+    slash = "slash commands such as /vyavasta:status answer at once, with no turn of Claude. The" \
+        if tool == "Claude Code" else "the"
+    return (f"New in {VERSION}: {slash} line under each message is short after the first of a session. “vyavasta "
+            "login”, “vyavasta turn on”, “vyavasta: status” and the like are commands too, and a mistyped one says which "
+            "command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. "
+            "Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all.")
 
 
 def greeted() -> str:
@@ -2120,10 +2122,11 @@ def test_the_first_session_signed_in_opens_nothing_and_says_so_under_the_banner(
     signed_in(run, fake)
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
     assert said == already_connected("Claude Code")
-    # The banner's three lines, one sentence line, and what to try.
+    # The banner's three lines on lines of their own, one sentence line, and what to try once the project is on.
     lines = said.splitlines()
-    assert len(lines) == 5 and lines[0] == lines[2] == RULE and set(RULE) == {"━"}
-    assert lines[1] == "  V Y A V A S T A  ·  your team’s record, in Claude Code" and lines[4].startswith("Try: ")
+    assert len(lines) == 6 and lines[0] == "" and lines[1] == lines[3] == RULE and set(RULE) == {"━"}
+    assert lines[2] == "  V Y A V A S T A  ·  your team’s record, in Claude Code"
+    assert lines[5].startswith("Send “vyavasta on” in a project, then try: ")
     assert run.opened() == [] and fake.requests == []
 
 
@@ -3911,7 +3914,9 @@ def test_vyavasta_open_opens_the_web_app_or_one_of_its_pages_in_the_browser(run,
 def test_codexs_listing_offers_three_things_to_start_with():
     listing = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["interface"]
     prompts = listing["defaultPrompt"]
-    assert prompts == ["vyavasta help", "vyavasta on", "What is my team working on?"]
+    # Each works in a project that is still off, as every project is right after the plugin is installed: the first
+    # turns it on, and the others are the plugin's own commands.
+    assert prompts == ["vyavasta on", "vyavasta team", "vyavasta help"]
     assert len(prompts) <= 3 and all(len(prompt) <= 128 and "@" not in prompt for prompt in prompts)
     assert "carries messages between you and your teammates" in listing["longDescription"]
 
@@ -4389,8 +4394,8 @@ def test_a_message_that_mentions_the_team_gives_the_model_one_command_for_it(run
 
 @pytest.mark.parametrize("emailed", [True, False])
 def test_the_sign_in_says_the_guide_was_emailed_only_when_it_was(run, fake, repo, emailed):
-    if emailed:
-        fake.extra["/token"] = {"guide_emailed": True}
+    # (The server says so of the sign-in that sent it; that one was ever sent says nothing of this one.)
+    fake.extra["/token"] = {"guide_emailed": True, **({"guide_emailed_now": True} if emailed else {})}
     run("sign-in", cwd=repo)
     fake.approved = True
     status = run("status", cwd=repo).stdout
@@ -4404,6 +4409,27 @@ def test_the_sign_in_says_the_guide_was_emailed_only_when_it_was(run, fake, repo
     # Signing out forgets it.
     run("sign-out", cwd=repo)
     assert not (run.home / "guide-emailed").exists()
+
+
+def test_a_later_sign_in_that_sent_no_guide_says_nothing_of_it(run, fake, repo):
+    """The guide is emailed once: a sign-in after it, which the server says sent none, says nothing of a guide, and
+    neither does the other tool's first session after it, nor a server from before it said which sign-in sent it."""
+    fake.extra["/token"] = {"guide_emailed": True, "guide_emailed_now": True}
+    run("sign-in", cwd=repo)
+    fake.approved = True
+    assert "was emailed to you" in run("status", cwd=repo).stdout
+    run("sign-out", cwd=repo)
+    fake.approved = False
+    for answer in ({"guide_emailed": True, "guide_emailed_now": False}, {"guide_emailed": True}):
+        fake.extra["/token"] = answer
+        run("sign-in", cwd=repo)
+        fake.approved = True
+        status = run("status", cwd=repo).stdout
+        assert "connected as sam@acme.test in Acme." in status and "emailed" not in status and "guide" not in status
+        assert "emailed" not in start(run, repo, "codex", f"s-{len(answer)}")["systemMessage"]
+        run("sign-out", cwd=repo)
+        fake.approved = False
+        (run.home / "welcomed-codex").unlink(missing_ok=True)
 
 
 # -- 0.6.0: what a hook says fits what the coding tools pass on ----------------------------------------------------
@@ -4724,3 +4750,57 @@ def test_a_search_longer_than_vyavasta_takes_is_answered_before_anything_is_sent
     # Exactly 2,000 characters are searched.
     prompt(run, repo, "vyavasta documents search " + "é" * 2000)
     assert len(fake.calls("/documents/search")[0]["body"]["words"]) == 2000
+
+
+# -- 0.6.0: a newer plugin is told of once, and what to try works -------------------------------------------------
+
+def later(version: str) -> str:
+    """A version after ``version``: its last number one more."""
+    *head, last = version.split(".")
+    return ".".join([*head, str(int(last) + 1)])
+
+
+UPDATE_HOW = ("Update it with “claude plugin marketplace update vyavasta” and “claude plugin update vyavasta@vyavasta” in "
+              "a terminal, then run /reload-plugins.")
+
+
+def test_claude_code_is_told_once_a_version_that_a_newer_plugin_is_out(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    # The newest is this one: nothing is said.
+    assert " is out " not in start(run, repo, None, "s1")["systemMessage"]
+    newer = later(VERSION)
+    fake.latest = newer
+    told = f"Vyavasta {newer} is out (you have {VERSION}). {UPDATE_HOW}"
+    assert told in start(run, repo, None, "s2")["systemMessage"]
+    # Once for that version: the next sessions say nothing of it, and a newer one again is told once.
+    assert " is out " not in start(run, repo, None, "s3")["systemMessage"]
+    fake.latest = later(newer)
+    assert f"Vyavasta {fake.latest} is out (you have {VERSION})." in start(run, repo, None, "s4")["systemMessage"]
+    assert " is out " not in start(run, repo, None, "s5")["systemMessage"]
+    # Codex updates the plugin by itself when it starts: it is told nothing of it.
+    fake.latest = later(fake.latest)
+    assert " is out " not in start(run, repo, "codex", "s6")["systemMessage"]
+    # A plugin older than the oldest the server still works with is told so at every start, in both tools.
+    fake.minimum = later(VERSION)
+    for tool, session in ((None, "s7"), (None, "s8"), ("codex", "s9")):
+        said = start(run, repo, tool, session)["systemMessage"]
+        assert f"This plugin ({VERSION}) is older than the oldest version Vyavasta still works with ({fake.minimum}), " \
+               "so it must be updated." in said
+    # A server that says nothing of versions, or something that is no version, is told of nothing.
+    fake.minimum = "0.3.0"
+    for latest in ("", "9.x", "../9"):
+        fake.latest = latest
+        said = start(run, repo, None, f"s-{latest}")["systemMessage"]
+        assert " is out " not in said and "older than" not in said
+
+
+def test_what_to_try_works_where_it_is_offered(run, fake, repo):
+    signed_in(run, fake)
+    # Where the project is off, the welcome says first to turn it on.
+    welcome = start(run, repo, None, "s1")["systemMessage"]
+    assert welcome.endswith(f"\nSend “vyavasta on” in a project, then try: {TRY_THESE}")
+    # Turning it on offers the same, now that it works; a name after “@” has words after it.
+    on = prompt(run, repo, "vyavasta on")["reason"]
+    assert f"\nTry: {TRY_THESE}\n" in on
+    assert "@priya it’s done" in TRY_THESE and not TRY_THESE.rstrip("”").endswith(("@priya", "@sam"))

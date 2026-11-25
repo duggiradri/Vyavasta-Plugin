@@ -29,9 +29,9 @@
     "composerIcon": "./assets/composer-icon.png",
     "brandColor": "#9A2219",
     "defaultPrompt": [
-      "vyavasta help",
       "vyavasta on",
-      "What is my team working on?"
+      "vyavasta team",
+      "vyavasta help"
     ]
   }
 }
