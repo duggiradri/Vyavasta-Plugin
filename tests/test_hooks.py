@@ -2317,7 +2317,7 @@ def test_help_starts_with_what_it_does_and_three_steps_that_say_where_you_stand(
                               "1. Sign in: send “vyavasta sign in”. You aren’t signed in yet.",
                               "2. Turn it on in this project: send “vyavasta on”. It is off here now.",
                               "3. Then just work. Every message gets one line from Vyavasta saying what was sent, "
-                              "and what came of it."]
+                              "and what came of it: the whole account first, then a few words."]
         for group in ("Your setup", "See what is shared", "Teammates"):
             assert group in lines
     # In a project that is off, the next message finishes connecting too, and the project still needs turning on.
@@ -3693,7 +3693,7 @@ def test_vyavasta_tell_typed_by_the_developer_is_told_the_teammate_as_written(ru
     text = run("help", cwd=repo).stdout
     assert ("- “@<name> <your words>” (a message that starts with “@” and their name), or “vyavasta tell <name>: <your "
             "words>”: tell a teammate something, as you wrote it.") in text
-    assert "- Mention a teammate anywhere else in a message, such as “push this, then tell @priya”: Claude sends it " \
+    assert "- Mention a teammate anywhere else in a message, such as “push this, then tell @priya it’s done”: Claude sends it " \
         "through Vyavasta when the work is done." in text
     assert "let Priya know" not in text
 
@@ -4814,3 +4814,22 @@ def test_what_to_try_works_where_it_is_offered(run, fake, repo):
     on = prompt(run, repo, "vyavasta on")["reason"]
     assert f"\nTry: {TRY_THESE}\n" in on
     assert "@priya it’s done" in TRY_THESE and not TRY_THESE.rstrip("”").endswith(("@priya", "@sam"))
+
+
+def test_help_the_readme_and_the_skills_say_what_codex_users_need_and_the_other_words_for_commands(run, repo):
+    readme = " ".join((PLUGIN.parents[1] / "README.md").read_text().split())
+    codex_skill = " ".join((PLUGIN / "codex" / "skills" / "vyavasta" / "SKILL.md").read_text().split())
+    guide = (PLUGIN / "skills" / "guide" / "SKILL.md").read_text()
+    codex_help = run("help", cwd=repo, tool="codex").stdout
+    claude_help = run("help", cwd=repo).stdout
+    # Codex's terminal opens its file picker on a name at the very end of a message; Codex starts the plugin with a
+    # session's first message; it shows a command's answer under “Blocked by hook”; codex exec shows no hook's words.
+    for text in (codex_help, readme):
+        assert "opens the file picker" in text or "opens Codex’s file picker" in text
+        assert "first message" in text and "Blocked by hook" in text and "codex exec" in text
+    assert "file picker" in codex_skill and "Blocked by hook" in codex_skill and "codex exec" in codex_skill
+    assert "file picker" not in claude_help and "Blocked by hook" not in claude_help
+    # The other words for the commands, and that a slash command is answered at once in Claude Code.
+    for text in (codex_help, claude_help, readme, codex_skill, guide):
+        assert "vyavasta login" in text and "vyavasta turn on" in text
+    assert "answered at once with no turn of Claude" in claude_help and "answers at once, with no turn of Claude" in readme

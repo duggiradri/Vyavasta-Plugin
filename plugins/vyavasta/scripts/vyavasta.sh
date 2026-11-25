@@ -3009,8 +3009,8 @@ It also sums each session up for teammates under categories you control, answers
 Start here
 1. Sign in: send “vyavasta sign in”. $signed
 2. Turn it on in this project: send “vyavasta on”. $here
-3. Then just work. Every message gets one line from Vyavasta saying what was sent, and what came of it.
-Everything else, each sent as a message of its own:
+3. Then just work. Every message gets one line from Vyavasta saying what was sent, and what came of it: the whole account first, then a few words.
+Everything else, each sent as a message of its own (other words work too, such as “vyavasta login”, “vyavasta turn on” and “vyavasta turn off”):
 Your setup
 - “vyavasta status”: whether you’re signed in, and whether this project, code sharing and summaries are on.
 - “vyavasta check”: tests sign-in, the connection, this project and the plugin’s version, and says how to fix each problem.
@@ -3031,11 +3031,11 @@ Teammates
 - “@<name> <your words>” (a message that starts with “@” and their name), or “vyavasta tell <name>: <your words>”: tell a teammate something, as you wrote it. They see it in Vyavasta at once, and in their own coding tool with their next message there, and answer it themselves. “@team <your words>” (or “vyavasta tell team: …”) tells everyone else in your workspace, and several names at the start (“@priya @sam …”, or “vyavasta tell priya, sam: …”) tell each of them.
 - “vyavasta ask <name>: <question>”: ask a teammate’s agent, which is Vyavasta answering for them. It answers only from what you can both already see and does not see their computer; they see what you asked and can answer you themselves.
 - “vyavasta reply <number>: <your words>”: answer an item of your inbox.
-- Mention a teammate anywhere else in a message, such as “push this, then tell @priya”: ${AGENT} sends it through Vyavasta when the work is done.
+- Mention a teammate anywhere else in a message, such as “push this, then tell @priya it’s done”: ${AGENT} sends it through Vyavasta when the work is done.
 - “vyavasta documents”: the team’s documents you may read in Vyavasta, numbered. “vyavasta documents search <words>” finds passages in them, and “vyavasta documents read <number>” reads one, part by part. ${AGENT} reads them the same way when your work needs them. The plugin keeps no copy of them on this computer; what ${AGENT} reads stays in its own conversation.
 EOF
-  [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:documents and /vyavasta:check; ask, tell, reply, and searching and reading documents are typed only."
-  [ "$CLIENT" = "codex" ] && echo "Codex runs Vyavasta only after you have reviewed and trusted its hooks, and asks you again after each update of the plugin. Until you trust them, Vyavasta does nothing in Codex."
+  [ "$CLIENT" = "claude-code" ] && echo "In Claude Code most of these are slash commands too, such as /vyavasta:on, /vyavasta:documents and /vyavasta:check, answered at once with no turn of Claude; ask, tell, reply, and searching and reading documents are typed only."
+  [ "$CLIENT" = "codex" ] && echo "Codex runs Vyavasta only after you have reviewed and trusted its hooks, and asks you again after each update of the plugin. Until you trust them, Vyavasta does nothing in Codex. Vyavasta starts with your first message in a session, so what it says at a session’s start comes with that answer, and its answers to these commands stand under Codex’s heading “Blocked by hook”, which is how Codex shows them: nothing was refused. In Codex’s terminal a name at the very end of a message (“… tell @priya”) opens the file picker: type a space or press Esc before Enter. “codex exec” shows nothing Vyavasta says."
 }
 
 # What the tool's model is told when the developer's message asks how to use the plugin itself (guide_wanted): what

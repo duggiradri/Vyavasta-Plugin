@@ -47,6 +47,13 @@ Teammates
 - `vyavasta reply <number>: <words>`: answers an item of the inbox.
 - `vyavasta documents`: the team’s documents the developer may read in Vyavasta, numbered. `vyavasta documents search <words>` finds passages in them, and `vyavasta documents read <number>` reads one, part by part.
 
+Other words for the same commands work too (`vyavasta login`, `vyavasta turn on`, `vyavasta turn off`, `vyavasta:
+status`), and `vyavasta` with a mistyped command is answered with the command it nearly is. Codex shows the plugin’s
+answer to one of its commands under its heading “Blocked by hook”: that is how Codex shows a hook’s answer to a
+message, and nothing was refused. In Codex’s terminal a name at the very end of a message (“… then tell @priya”)
+opens the file picker, and Enter then puts a file in its place: a space after the name, or Esc, closes it first.
+`codex exec` shows nothing the plugin says.
+
 When a request was held, the developer was told what stands in the way. They go ahead by sending `Plan it anyway`.
 When the plugin says something the team has said stands against the change being made, the developer answers
 `continue` or `stop`.
