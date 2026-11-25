@@ -100,6 +100,12 @@ class Fake:
         self.refused = "Refused."
         # Seconds a route takes to answer.
         self.delay: dict[str, float] = {}
+        # Whether it is a newer server that takes the combined calls: a check that carries the work report and asks a
+        # question at once, /me that carries the inbox, and a turn that carries the work report; and that answers a
+        # repeat of a request_id as it answered it first (``answered``, by route and id).
+        self.combined = False
+        self.answered: dict[tuple[str, str], tuple[int, dict]] = {}
+        self.asked_in_check = 0
         # Routes whose next calls are taken and dropped with no answer at all, and routes that answer with a page that
         # isn't Vyavasta's (status, bytes).
         self.drop: dict[str, int] = {}
@@ -153,6 +159,9 @@ class Fake:
                     return
                 if path in fake.status:
                     return self._answer(fake.status[path], {"detail": {"code": "x", "message": fake.refused}})
+                if fake.combined and isinstance(body, dict) and body.get("request_id") and \
+                        (path, body["request_id"]) in fake.answered:
+                    return self._answer(*fake.answered[(path, body["request_id"])])
                 signed = self.headers.get("Authorization") == f"Bearer {TOKEN}"
                 if path == "/hello":
                     return self._answer(200, {"ok": True, "latest": fake.latest, "minimum": fake.minimum})
@@ -168,13 +177,15 @@ class Fake:
                 if not signed:
                     return self._answer(401, {"detail": {"code": "signed_out", "message": "Ended."}})
                 if path == "/me":
-                    return self._answer(200, {"email": "sam@acme.test", "machine": "laptop",
-                                              "workspace": {"workspace_id": "w", "name": "Acme"},
-                                              "repositories": ["acme/api"],
-                                              "plugin": {"latest": fake.latest, "minimum": fake.minimum},
-                                              "limits": {"change_lines": 5000, "change_bytes": 600000},
-                                              "sharing": sorted(fake.sharing), "admin": False,
-                                              **fake.extra.get("/me", {})})
+                    me = {"email": "sam@acme.test", "machine": "laptop",
+                          "workspace": {"workspace_id": "w", "name": "Acme"}, "repositories": ["acme/api"],
+                          "plugin": {"latest": fake.latest, "minimum": fake.minimum},
+                          "limits": {"change_lines": 5000, "change_bytes": 600000},
+                          "sharing": sorted(fake.sharing), "admin": False, **fake.extra.get("/me", {})}
+                    if fake.combined and parse_qs(parts.query).get("inbox") == ["1"]:
+                        me["inbox"] = {"items": fake.inbox, "count": len(fake.inbox) + fake.inbox_more,
+                                       "more": fake.inbox_more}
+                    return self._answer(200, me)
                 if path == "/sharing":
                     (fake.sharing.add if body["on"] else fake.sharing.discard)("acme/api")
                     return self._answer(200, {"on": body["on"], "repository": "acme/api",
@@ -195,15 +206,27 @@ class Fake:
                     if "change" in body:
                         answer["sharing"] = "on" if "acme/api" in fake.sharing else "off"
                     answer.update(fake.extra.get(path, {}))
+                    if fake.combined and path == "/check" and isinstance(body.get("work"), dict):
+                        answer["work_recorded"] = True
+                        answer["work_answer"] = fake.worked(body["work"])
+                    if fake.combined and path == "/check" and body.get("ask_now") and answer.get("ask") is True:
+                        answer["asked"] = fake.first_asked()
+                    if fake.combined and body.get("request_id"):
+                        fake.answered[(path, body["request_id"])] = (200, answer)
                     return self._answer(200, answer)
                 if path == "/ask":
                     # (An answer that is slow is still being made on the first calls for it.)
-                    if fake.slow > 0 and len(fake.calls("/ask")) <= fake.slow:
+                    if fake.slow > 0 and len(fake.calls("/ask")) + fake.asked_in_check <= fake.slow:
                         return self._answer(200, {"status": "pending", "answer": "", "context": "", "notice":
                                                   "Vyavasta is still working on the answer.", "waiting": "msg_9"})
                     return self._answer(200, fake.asked)
                 if path == "/turn":
-                    return self._answer(200, {"kept": bool(body["keep"]), "url": "http://127.0.0.1/c/cnv_7"})
+                    turned = {"kept": bool(body["keep"]), "url": "http://127.0.0.1/c/cnv_7"}
+                    if fake.combined and isinstance(body.get("work"), dict):
+                        turned["work_recorded"] = True
+                        turned["work_answer"] = fake.worked(body["work"])
+                    turned.update(fake.extra.get(path, {}))
+                    return self._answer(200, turned)
                 if path == "/conflict":
                     return self._answer(200, {"ok": True})
                 if path == "/chat":
@@ -247,6 +270,23 @@ class Fake:
 
     def calls(self, path: str) -> list[dict]:
         return [request for request in self.requests if request["path"] == path]
+
+    def worked(self, work: dict) -> dict:
+        """What /work answers a report, as a newer server answers it inside a check or a turn."""
+        answer = {"recorded": True, "work_id": "wrk_1", "changed": True,
+                  "status": {"changing": "local"}.get(work["state"], work["state"])}
+        if "change" in work:
+            answer["sharing"] = "on" if "acme/api" in self.sharing else "off"
+        answer.update(self.extra.get("/work", {}))
+        return answer
+
+    def first_asked(self) -> dict:
+        """What the first /ask of a question answers, as a newer server answers it inside a check."""
+        self.asked_in_check += 1
+        if self.slow >= self.asked_in_check:
+            return {"status": "pending", "answer": "", "context": "", "notice": "Vyavasta is still working on the "
+                    "answer.", "waiting": "msg_9"}
+        return self.asked
 
 
 @pytest.fixture()
@@ -531,9 +571,12 @@ def test_a_clear_request_reaches_claude_with_the_facts_and_sends_only_what_the_c
                                           "additionalContext": fake.check["context"]}
     assert said["systemMessage"] == "Vyavasta · sent: your message. Kept in this session’s chat for your summary. · " + fake.check["notice"]
     (sent,) = fake.calls("/check")
-    # The request word for word; the repository without its credential; nothing of the transcript or the folder.
-    assert sent["body"] == {"request": text, "remote": "https://github.com/acme/api.git", "branch": "main",
-                            "session": "session-1", "tool": "claude-code", "keep": True}
+    # The request word for word; the repository without its credential; nothing of the transcript or the folder. (Its
+    # own id, and whether a question is asked at once, are the calls' own: see the combined calls below.)
+    body = dict(sent["body"])
+    assert re.fullmatch(r"[0-9a-f]{24}", body.pop("request_id")) and body.pop("ask_now") is True
+    assert body == {"request": text, "remote": "https://github.com/acme/api.git", "branch": "main",
+                    "session": "session-1", "tool": "claude-code", "keep": True}
     assert b"hunter2" not in sent["raw"] and b"transcript" not in sent["raw"] and str(repo).encode() not in sent["raw"]
 
 
@@ -1215,7 +1258,8 @@ def test_ask_a_teammates_agent_prints_both_headers_the_answer_and_who_sees_it(ru
     said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo,
                                                      prompt="vyavasta ask Priya Raman: what is the export’s plan?")))
     assert said["decision"] == "block" and not fake.calls("/check")
-    assert fake.calls("/tell")[0]["body"] == {"to": "Priya Raman", "text": "what is the export’s plan?",
+    assert {key: value for key, value in fake.calls("/tell")[0]["body"].items() if key != "request_id"} == {
+                                              "to": "Priya Raman", "text": "what is the export’s plan?",
                                               "kind": "message", "session": "session-1",
                                               "remote": "https://github.com/acme/api.git", "branch": "main",
                                               "tool": "claude-code"}
@@ -1423,10 +1467,16 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
         for group in groups:
             for hook in group["hooks"]:
                 assert hook["type"] == "command"
-                assert hook["command"].startswith('VYAVASTA_TOOL=codex sh "${PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
-                assert hook["command"].rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped"}
+                # (Through env, which every login shell runs, where some can't give a command a variable before it.)
+                assert hook["command"].startswith('env VYAVASTA_TOOL=codex sh "${PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
+                assert hook["command"].rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check"}
     # Only the report after an edit may run in the background: a check that runs there could hold nothing.
     assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
+    # The check after an edit tells Codex's model of a conflict at once, so it runs in the foreground, quickly; the end
+    # of a turn too, so that its reply is kept when Codex exits right after it.
+    (check,) = [hook for group in hooks["PostToolUse"] for hook in group["hooks"] if hook["command"].endswith("edit-check")]
+    assert not check.get("async") and check["timeout"] <= 10
+    assert not hooks["Stop"][0]["hooks"][0].get("async")
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.5.6"
@@ -1447,7 +1497,10 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
 def test_every_hook_runs_this_script_with_a_command_it_knows():
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())["hooks"]
     commands = [hook["command"] for groups in hooks.values() for group in groups for hook in group["hooks"]]
-    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"}
+    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "StopFailure"}
+    # A turn that ended in an error reports its work as one that ended well does; both in the foreground, so that
+    # what they send is sent when “claude -p” exits right after (it ends a hook still running in the background).
+    assert hooks["StopFailure"] == hooks["Stop"] and not hooks["Stop"][0]["hooks"][0].get("async")
     for command in commands:
         assert command.startswith('sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
         assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check"}
@@ -1791,8 +1844,9 @@ def test_with_summaries_on_the_message_is_kept_and_the_reply_goes_to_its_chat_wh
     done = stop(run, repo, last_assistant_message=reply)
     assert done.stdout == ""
     (turn,) = fake.calls("/turn")
-    assert turn["body"] == {"session": "session-1", "remote": "https://github.com/acme/api.git", "branch": "main",
-                            "tool": "claude-code", "keep": True, "message_id": "msg_1", "reply": reply}
+    assert {key: value for key, value in turn["body"].items() if key != "request_id"} == {
+        "session": "session-1", "remote": "https://github.com/acme/api.git", "branch": "main", "tool": "claude-code",
+        "keep": True, "message_id": "msg_1", "reply": reply}
     assert b"hunter2" not in turn["raw"] and b"transcript" not in turn["raw"]
     # Once for each kept message: a turn that follows none sends nothing.
     stop(run, repo, last_assistant_message="More.")
@@ -2060,23 +2114,28 @@ def test_the_end_of_a_turn_waits_at_most_four_seconds_for_the_reply_to_be_taken(
     assert len(fake.calls("/turn")) == 1
 
 
-def test_no_reply_is_sent_when_the_report_just_before_found_the_server_out_of_reach(run, fake, repo):
+def test_the_end_of_a_turn_is_never_held_up_twice_by_a_server_that_does_not_answer(run, fake, repo):
+    """The reply goes first, carrying the work report: an older server takes the reply and is then sent the report on
+    its own, and one that didn't answer the first call is not called a second time."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     prompt(run, repo, "Change calc.py")
     (repo / "calc.py").write_text("changed\n")
-    # A report that takes too long: the turn's end is not held up a second time.
+    # A report that takes too long: the reply was taken first, and the turn's end waits for the report once.
     fake.delay["/work"] = 12
     done = stop(run, repo, last_assistant_message="Done.")
     assert done.stdout == "" and done.seconds < 10.5
-    assert fake.calls("/work") and not fake.calls("/turn")
-    # A report the server failed: the same.
+    assert [call["path"] for call in fake.requests if call["path"] in ("/turn", "/work")] == ["/turn", "/work"]
+    assert fake.calls("/turn")[-1]["body"]["work"]["files"][0]["path"] == "calc.py"
+    # A reply that takes too long: the report is not sent after it.
     del fake.delay["/work"]
-    (run.home / "offline").unlink(missing_ok=True)
+    (run.home / "slow").unlink(missing_ok=True)
     prompt(run, repo, "Change calc.py")
-    fake.status["/work"] = 503
-    stop(run, repo, last_assistant_message="Done.")
-    assert not fake.calls("/turn")
+    fake.requests.clear()
+    fake.delay["/turn"] = 12
+    done = stop(run, repo, last_assistant_message="Done.")
+    assert done.stdout == "" and done.seconds < 10.5
+    assert fake.calls("/turn") and not fake.calls("/work")
 
 
 def test_a_project_turned_on_before_summaries_is_told_once_and_that_first_message_is_not_kept(run, fake, repo):
@@ -3613,7 +3672,9 @@ def test_the_model_tells_a_teammate_with_the_message_on_the_commands_input_taken
         # (Run in the session its tool names: Claude Code's from what the session's start left, Codex's thread.)
         given = {"CODEX_THREAD_ID": "session-7"} if tool else {"VYAVASTA_SESSION": "session-7"}
         done = run("tell", "Rohan", raw=(words + "\n").encode(), cwd=repo, tool=tool, extra=given)
-        assert fake.calls("/tell")[-1]["body"] == {
+        body = dict(fake.calls("/tell")[-1]["body"])
+        assert re.fullmatch(r"[0-9a-f]{24}", body.pop("request_id"))
+        assert body == {
             "to": "Rohan", "text": words, "kind": "message", "intent": "tell", "session": "session-7",
             "remote": "https://github.com/acme/api.git", "branch": "main", "tool": tool or "claude-code"}
         # Told the teammate: under a header that names them, never their agent, with where they see it.
@@ -4720,9 +4781,217 @@ def test_a_session_that_goes_on_keeps_its_turn_and_tells_the_model_again_without
     assert turn["body"]["reply"] == "Done, after the compaction."
 
 
+def test_a_newer_server_takes_the_report_the_question_the_inbox_and_the_reply_in_fewer_calls(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.combined = True
+    (repo / "calc.py").write_text("changed\n")
+    # A change request with changed files: the report goes with the check.
+    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert [call["path"] for call in fake.requests] == ["/check"]
+    assert fake.calls("/check")[0]["body"]["work"]["files"][0]["path"] == "calc.py"
+    assert "and 1 changed file’s name" in said
+    # The turn's end: the reply carries the report.
+    fake.requests.clear()
+    stop(run, repo, last_assistant_message="Done.")
+    assert [call["path"] for call in fake.requests] == ["/turn"] and fake.calls("/turn")[0]["body"]["work"]
+    # A question about the team: asked by the server with the check; a slow one waited for as before.
+    fake.check = QUESTION
+    fake.requests.clear()
+    said = prompt(run, repo, "What is Priya doing?")
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
+    assert [call["path"] for call in fake.requests] == ["/check"]
+    fake.slow, fake.asked_in_check = 1, 0
+    fake.requests.clear()
+    said = prompt(run, repo, "What is Priya doing?")
+    assert [call["path"] for call in fake.requests] == ["/check", "/ask"]
+    assert fake.calls("/ask")[0]["body"] == {"waiting": "msg_9", "tool": "claude-code"}
+    # A session's start: what teammates sent comes with /me.
+    fake.inbox = INBOX
+    fake.requests.clear()
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))
+    assert [call["path"] for call in fake.requests] == ["/me"] and "While you were away:" in started["systemMessage"]
+    assert fake.calls("/me")[0]["query"] == {"inbox": ["1"]}
+
+
+def test_a_call_dropped_after_it_went_out_is_sent_once_more_with_its_own_id(run, fake, repo):
+    """The server answers a repeat of a request_id as it answered the first and keeps nothing twice."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.combined = True
+    fake.drop["/check"] = 1
+    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert said.endswith(fake.check["notice"])
+    first, second = fake.calls("/check")
+    assert first["body"]["request_id"] == second["body"]["request_id"]
+    fake.drop["/tell"] = 1
+    run("tell", "Priya", "the", "fix", "is", "pushed", cwd=repo)
+    first, second = fake.calls("/tell")
+    assert first["body"]["request_id"] == second["body"]["request_id"]
+    # Each message has an id of its own.
+    prompt(run, repo, "Change old.py")
+    assert fake.calls("/check")[-1]["body"]["request_id"] != first["body"]["request_id"]
+
+
+def test_a_turn_that_ended_in_an_error_reports_its_work_and_no_reply(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change calc.py")
+    (repo / "calc.py").write_text("changed\n")
+    fake.requests.clear()
+    fake.extra["/work"] = {"conflict": CONFLICT}
+    done = run("hook", "stopped", stdin=event("StopFailure", repo, error="rate_limit",
+                                              last_assistant_message="API Error: Rate limited"), cwd=repo)
+    assert done.stdout == ""
+    assert [call["path"] for call in fake.requests] == ["/work"]
+    assert not list(run.home.glob("sessions/*/turn-waiting"))
+    # A conflict that report found waits to be told: the next turn's end says it.
+    assert output(stop(run, repo, last_assistant_message="Done."))["systemMessage"].startswith(CONFLICT["notice"])
+
+
+def test_codex_is_told_of_a_conflict_right_after_the_edit(run, fake, repo):
+    """Codex goes on after a hook stops it after an edit: the developer is shown what stands, and Codex's model is
+    given what to do in place of the edit's result."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/work"] = {"conflict": CONFLICT}
+    (repo / "calc.py").write_text("changed\n")
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="apply_patch"), cwd=repo, tool="codex")
+    said = output(run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="apply_patch"), cwd=repo,
+                      tool="codex"))
+    # (The edit was made: its result stands, and what Codex's model sees in its place says what to do.)
+    assert said["continue"] is False and "decision" not in said
+    assert said["reason"].startswith(CONFLICT["notice"])
+    assert said["reason"].endswith("The edit was made. Make no more edits: tell the developer what stands against the "
+                                   "change, and ask whether to continue or stop.")
+    assert said["stopReason"].endswith("Send “continue” to go on, or “stop” to leave the change where it is.")
+    # Told once.
+    assert run("hook", "edit-check", stdin=event("PostToolUse", repo), cwd=repo, tool="codex").stdout == ""
+
+
 def test_signing_in_again_says_the_guide_is_in_the_email_already(run, fake, repo):
     fake.extra["/token"] = {"guide_emailed": True, "guide_emailed_now": False}
     run("sign-in", cwd=repo)
     fake.approved = True
     status = run("status", cwd=repo).stdout
     assert "The guide to every command is in your email." in status and "was emailed to you" not in status
+
+
+def unsent(run) -> list[Path]:
+    """The calls kept to go along with a later one, oldest first."""
+    return sorted((run.home / "unsent").glob("*.json")) if (run.home / "unsent").exists() else []
+
+
+def test_a_reply_that_could_not_be_sent_goes_along_with_the_next_message_once(run, fake, repo, tmp_path):
+    """A turn's end that fails or runs out keeps its reply on this computer, readable by the developer only, and the
+    next message's run of curl sends it after the check, with the same request_id, so that the server keeps it once."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change calc.py")
+    fake.status["/turn"] = 503
+    assert stop(run, repo, last_assistant_message="Changed calc.py.").stdout == ""
+    (failed,) = fake.calls("/turn")
+    (kept,) = unsent(run)
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o600 and stat.S_IMODE(kept.parent.stat().st_mode) == 0o700
+    assert json.loads(kept.read_text()) == failed["body"]
+    assert not list(run.home.glob("sessions/*/turn-waiting"))
+    del fake.status["/turn"]
+    path, runs = curl_runs(tmp_path)
+    fake.requests.clear()
+    prompt(run, repo, "Change old.py", extra={"PATH": path})
+    assert [call["path"] for call in fake.requests] == ["/check", "/turn"] and runs.read_text() == "/check /turn \n"
+    (again,) = fake.calls("/turn")
+    assert again["body"] == failed["body"] and again["body"]["message_id"] == "msg_1"
+    assert again["body"]["reply"] == "Changed calc.py." and unsent(run) == []
+    # Sent once: the next message sends only itself.
+    fake.requests.clear()
+    prompt(run, repo, "Change gone.py")
+    assert [call["path"] for call in fake.requests] == ["/check"]
+
+
+def test_what_is_kept_to_send_later_is_bounded_and_follows_the_developers_choices(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/turn"] = 503
+    for n in range(12):
+        prompt(run, repo, f"Change calc.py, step {n}")
+        stop(run, repo, last_assistant_message=f"Step {n}.")
+    # At most ten, the newest.
+    kept = unsent(run)
+    assert len(kept) == 10 and json.loads(kept[0].read_text())["reply"] == "Step 2."
+    del fake.status["/turn"]
+    # Kept too long (the server knows a request_id for an hour): given up, never sent.
+    old = kept[0].with_name("1000000000-" + kept[0].name.split("-", 1)[1])
+    kept[0].rename(old)
+    kept[0].with_suffix(".about").rename(old.with_suffix(".about"))
+    fake.requests.clear()
+    prompt(run, repo, "Change old.py")
+    assert fake.calls("/turn")[0]["body"]["reply"] == "Step 3."
+    assert not old.exists() and len(unsent(run)) == 8
+    # Summaries off: no reply goes any more; and signing out forgets the rest.
+    run("summaries", "off", cwd=repo)
+    fake.requests.clear()
+    prompt(run, repo, "Change old.py")
+    assert not fake.calls("/turn") and unsent(run) == []
+    run("summaries", "on", cwd=repo)
+    fake.status["/turn"] = 503
+    prompt(run, repo, "Change calc.py")
+    stop(run, repo, last_assistant_message="Done.")
+    assert len(unsent(run)) == 1
+    run("sign-out", cwd=repo)
+    assert unsent(run) == [] and not (run.home / "unsent").exists()
+
+
+def test_a_work_report_that_could_not_be_sent_goes_along_later_unless_a_newer_one_was_taken(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("changed\n")
+    fake.status["/work"] = 503
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"), cwd=repo)
+    (kept,) = unsent(run)
+    assert json.loads(kept.read_text())["files"][0]["path"] == "calc.py" and "-work-session-1" in kept.name
+    del fake.status["/work"]
+    # Another session's message takes it along.
+    path, runs = curl_runs(tmp_path)
+    fake.requests.clear()
+    prompt(run, repo, "Write the docs", session="session-2", extra={"PATH": path})
+    assert runs.read_text().startswith("/check /work \n") and unsent(run) == []
+    assert fake.calls("/work")[0]["body"]["session"] == "session-1"
+    # A newer report of the same session, taken, gives the kept one up.
+    fake.status["/work"] = 503
+    stop(run, repo, session="session-3", last_assistant_message="Done.")
+    assert len(unsent(run)) == 1
+    del fake.status["/work"]
+    fake.requests.clear()
+    stop(run, repo, session="session-3", last_assistant_message="Done.")
+    assert len(fake.calls("/work")) == 1 and unsent(run) == []
+
+
+@pytest.mark.parametrize("waiting, said", [
+    (2, "Vyavasta: teammates sent you 2 messages. They come with your next message, or send “vyavasta inbox” to read "
+        "them now."),
+    (1, "Vyavasta: a teammate sent you a message. It comes with your next message, or send “vyavasta inbox” to read it "
+        "now."),
+    (0, None)])
+def test_a_turns_end_says_when_teammates_messages_wait_and_marks_none_read(run, fake, repo, waiting, said):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/turn"] = {"inbox_waiting": waiting}
+    prompt(run, repo, "Change calc.py")
+    fake.requests.clear()
+    done = stop(run, repo, last_assistant_message="Done.")
+    assert output(done) == ({"systemMessage": said} if said else {})
+    assert [call["path"] for call in fake.requests] == ["/turn"]
+
+
+def test_a_turns_end_says_a_conflict_and_waiting_messages_in_one_line(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/turn"] = {"inbox_waiting": 3}
+    fake.extra["/work"] = {"conflict": CONFLICT}
+    prompt(run, repo, "Change calc.py")
+    (repo / "calc.py").write_text("changed\n")
+    said = output(stop(run, repo, last_assistant_message="Done."))["systemMessage"]
+    assert said.startswith(CONFLICT["notice"]) and "Send “continue” to go on" in said
+    assert said.endswith("\n\nVyavasta: teammates sent you 3 messages. They come with your next message, or send "
+                         "“vyavasta inbox” to read them now.")

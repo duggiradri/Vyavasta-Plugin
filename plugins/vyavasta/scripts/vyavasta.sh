@@ -104,6 +104,7 @@ CREDENTIALS="$HOME_DIR/credentials"
 PENDING="$HOME_DIR/pairing"
 SESSIONS="$HOME_DIR/sessions"
 PROJECTS="$HOME_DIR/projects"
+UNSENT="$HOME_DIR/unsent"
 # The copy of this script that the tool's model is told to run, one for each tool, in the settings folder: made at a
 # session's start (`keep_model_copy`), its path stays the same when the tool updates the plugin and deletes the folder
 # of the version that runs. It is told wherever this script would be, while it is this very script; otherwise this
@@ -175,6 +176,11 @@ OFFLINE_FOR=60
 SLOW_SECONDS=10
 SLOW_FOR=600
 PROBE_SECONDS=4
+# A reply or a work report that couldn't be sent is kept for this long at most (the server knows a request_id for an
+# hour), at most this many at once, and goes along with a later call, which waits this long for it at most.
+UNSENT_FOR=3000
+UNSENT_MOST=10
+RIDE_SECONDS=4
 # How much of the uncommitted changes is sent at most, unless the server says otherwise, and the longest line.
 CHANGE_LINES=5000
 CHANGE_BYTES=600000
@@ -184,17 +190,20 @@ REPLY_CHARACTERS=4000
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 STARTED_AT=$(date +%s)
 
-# The one check that runs after every edit in Claude Code: whether a conflict is waiting to be told. It costs a
-# file test when there is none, so it is answered before anything else is set up.
+# The one check that runs after every edit, in both tools: whether a conflict is waiting to be told. It costs a file
+# test when there is none, so it is answered before anything else is set up. Claude Code is stopped (conflict-stop);
+# Codex, which goes on after a hook stops it there, shows the developer the same, and its model is given what to do
+# in place of the edit's result (conflict-block).
 if [ "${1:-}" = "hook" ] && [ "${2:-}" = "edit-check" ]; then
-  set -- "$SESSIONS"/*/conflict-stop
+  if [ "$CLIENT" = "codex" ]; then told=conflict-block; else told=conflict-stop; fi
+  set -- "$SESSIONS"/*/"$told"
   if [ ! -f "$1" ]; then cat >/dev/null; exit 0; fi
   id=$(head -c 65536 | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' | sed -n '1p')
   id=$(printf '%s' "$id" | cut -c1-80)
   [ -n "$id" ] || id="no-session"
-  if [ -f "$SESSIONS/$id/conflict-stop" ]; then
-    cat "$SESSIONS/$id/conflict-stop"
-    rm -f "$SESSIONS/$id/conflict-stop" "$SESSIONS/$id/conflict-say"
+  if [ -f "$SESSIONS/$id/$told" ]; then
+    cat "$SESSIONS/$id/$told"
+    rm -f "$SESSIONS/$id/conflict-stop" "$SESSIONS/$id/conflict-say" "$SESSIONS/$id/conflict-block"
   fi
   exit 0
 fi
@@ -582,6 +591,8 @@ keep_credentials() {
   forget_told
   # Signed in again: whatever signed this computer out before is over.
   rm -f "$HOME_DIR/signed-out"
+  # (And nothing kept to send for another connection goes with this one.)
+  rm -rf "$UNSENT"
 }
 
 # What each project last told the server about code sharing belongs to one connection: the server forgets it when
@@ -635,6 +646,7 @@ slow_lately() {
 # of the two, and goes once a sign-in finishes).
 signed_out_here() {
   rm -f "$CREDENTIALS"
+  rm -rf "$UNSENT"
   forget_told
   mkdir -p "$HOME_DIR" && printf '%s\n' "$1" > "$HOME_DIR/signed-out"
 }
@@ -851,6 +863,75 @@ from_vyavasta() {
 
 answer() { json_get "$TMP/answer" "$1"; }
 
+# A request's own id, made once for each message or turn sent and sent again with it when it must be sent again (the
+# call broke after it went out, or it is sent again later from `unsent`): the server answers a repeat as it answered
+# the first and keeps nothing twice. An older server takes no notice of it. Put first in the body, where `api` and
+# `wait_on` find it.
+new_request_id() {
+  id=$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -cd '0-9a-f')
+  [ -n "$id" ] || id="r$(now)$$"
+  printf '%s' "$id"
+}
+
+# Calls that couldn't be sent, kept to go along with a later one: a turn's reply (by its request_id, which the server
+# knows for an hour, so a reply is never kept twice) and a session's work report (the last one only, given up once a
+# later report of that session is taken). Each is kept in UNSENT, readable by the developer only, with the server
+# and the project it belongs to, for UNSENT_FOR seconds at most, UNSENT_MOST at once, and all of them are forgotten
+# when this computer signs in or out. One goes along after a hook's call (`pick_ride`), on the same connection, only
+# while its project is on, and a reply only while summaries are on there. $1 is turn or work, $2 the request_id or the
+# session, $3 the body's file.
+keep_unsent() {
+  mkdir -p "$UNSENT" && chmod 700 "$UNSENT" || return 0
+  [ "$1" != "work" ] || rm -f "$UNSENT"/*-work-"$2".json "$UNSENT"/*-work-"$2".about
+  # (Named by when it was kept, and in what order within that second, so that the names sort oldest first.)
+  order=$(cat "$UNSENT/next" 2>/dev/null)
+  case "$order" in ''|*[!0-9]*) order=0 ;; esac
+  echo $(( (order + 1) % 1000000 )) > "$UNSENT/next"
+  kept="$UNSENT/$(now).$(printf '%06d' "$order")-$1-$2"
+  cp "$3" "$kept.json" && printf 'server=%s\nproject=%s\n' "$SERVER" "$PDIR" > "$kept.about" || return 0
+  set -- "$UNSENT"/*.about
+  over=$(( $# - UNSENT_MOST ))
+  for about in "$@"; do
+    [ "$over" -gt 0 ] || break
+    rm -f "${about%.about}.json" "$about"
+    over=$((over - 1))
+  done
+}
+
+# Picks the oldest kept call that may go along with the next one (RIDE, its body's file, and RIDE_PATH, its route),
+# once in a hook; a session's work report never goes with a report of that same session ($1), which is newer. Calls
+# kept too long, for a project that is off, or for a reply where summaries are off now, are given up.
+pick_ride() {
+  RIDE=""; RIDE_PATH=""; RIDE_KEPT=""
+  [ -z "${RODE:-}" ] && [ -d "$UNSENT" ] || return 0
+  RODE=1
+  for about in "$UNSENT"/*.about; do
+    [ -f "$about" ] || continue
+    kept=${about%.about}
+    name=$(basename "$kept")
+    at=${name%%-*}; at=${at%%.*}; rest=${name#*-}; kind=${rest%%-*}; whose=${rest#*-}
+    kept_project=$(sed -n 's/^project=//p' "$about")
+    case "$at" in ''|*[!0-9]*) rm -f "$kept.json" "$about"; continue ;; esac
+    if [ $(( $(now) - at )) -ge "$UNSENT_FOR" ] || [ ! -f "$kept_project/on" ] || \
+        { [ "$kind" = "turn" ] && [ "$(cat "$kept_project/summaries" 2>/dev/null)" = "off" ]; }; then
+      rm -f "$kept.json" "$about"; continue
+    fi
+    [ "$(sed -n 's/^server=//p' "$about")" = "$SERVER" ] && [ -f "$kept.json" ] || continue
+    [ "$kind" = "work" ] && [ "$whose" = "${1:-}" ] && continue
+    case "$kind" in turn|work) ;; *) continue ;; esac
+    RIDE="$kept.json"; RIDE_PATH="/$kind"; RIDE_KEPT=$kept
+    return 0
+  done
+}
+
+# What came of a kept call that went along ($1, its status): taken, or refused for good (it could never be taken), it
+# is done; otherwise it waits for the next.
+ride_settled() {
+  case "$1" in
+    2*|400|401|403|404|409|410|413|422) rm -f "$RIDE_KEPT.json" "$RIDE_KEPT.about" ;;
+  esac
+}
+
 # The server's own sentence for a refusal (``{"detail": {"message": …}}``), if it gave one, on one line.
 refusal() {
   json_get "$TMP/answer" detail > "$TMP/detail"
@@ -873,7 +954,7 @@ wait_on() {
     waiting=$(answer waiting)
     case "$waiting" in \"*\") ;; *) break ;; esac
     if [ -n "$2" ]; then
-      sed -e 's/^{//' "$2" > "$TMP/rest"
+      sed -e 's/^{"request_id":"[^"]*",/{/' -e 's/^{//' "$2" > "$TMP/rest"
       printf '{"waiting":%s,' "$waiting" > "$TMP/waiting"
       cat "$TMP/rest" >> "$TMP/waiting"
     else
@@ -1597,13 +1678,18 @@ keep_conflict() {
 Send “continue” to go on, or “stop” to leave the change where it is."
   printf '{"continue":false,"stopReason":%s}\n' "$(json_quote "$told")" > "$1/conflict-stop"
   printf '{"systemMessage":%s}\n' "$(json_quote "$told")" > "$1/conflict-say"
+  printf '{"continue":false,"stopReason":%s,"reason":%s}\n' "$(json_quote "$told")" \
+    "$(json_quote "$(json_text "$(field "$conflict" notice)")
+
+The edit was made. Make no more edits: tell the developer what stands against the change, and ask whether to continue or stop.")" \
+    > "$1/conflict-block"
   return 0
 }
 
 close_conflict() {
   cat "$1/conflict-id" >> "$1/conflicts-closed"
   echo >> "$1/conflicts-closed"
-  rm -f "$1/conflict" "$1/conflict-id" "$1/conflict-stop" "$1/conflict-say" "$1/conflict-prompt"
+  rm -f "$1/conflict" "$1/conflict-id" "$1/conflict-stop" "$1/conflict-say" "$1/conflict-block" "$1/conflict-prompt"
 }
 
 # Tells the server what the developer chose about the session's conflict.
@@ -2231,12 +2317,21 @@ handle_message() {
       consent=" Send “vyavasta share code on” to also send your uncommitted changes for the check; teammates see only a summary, and key, ignored, machine-written and non-text files never go (asked once)."
     fi
   fi
+  # A server that can takes the work report that would follow the check with the check itself, and asks a question
+  # about the team as soon as the check finds the message is one (`ask_now`): one or two calls fewer. An older server
+  # leaves both aside, and they are sent on their own below.
+  carried=""
+  if [ "$NFILES" -gt 0 ] && work_report "$dir" bare; then carried=1; fi
   {
-    printf '{"request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s' "$prompt" \
-      "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep"
+    printf '{"request_id":"%s","request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s,"ask_now":true' \
+      "$(new_request_id)" "$prompt" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" \
+      "$CLIENT" "$keep"
     if [ -n "$shared" ]; then printf ',"change":'; cat "$TMP/change"; fi
+    if [ -n "$carried" ]; then printf ',"work":'; cat "$TMP/report"; fi
     printf '}'
   } > "$TMP/check"
+  # (A reply or a report kept from earlier goes along after it.)
+  pick_ride
   api POST /check "$TMP/check" "$CHECK_SECONDS"
   if [ -n "$shared" ] && [ "$STATUS" = "200" ]; then cksum < "$TMP/change" > "$dir/change-sum"; fi
   case "$STATUS" in
@@ -2326,9 +2421,17 @@ handle_message() {
       not_sent="${not_sent:+$not_sent; }$left"
     fi
   fi
-  # The names of changed files go with a work report, in a repository Vyavasta reads.
-  if [ "$NFILES" -gt 0 ] && [ "$verdict" != "not_connected" ] && [ -n "$REMOTE" ]; then
-    report_work "$dir" changing
+  # The names of changed files go with a work report, in a repository Vyavasta reads: taken with the check by a server
+  # that can (what it answered of the report is what /work would have), else sent on their own.
+  if [ -n "$carried" ] && [ "$(answer work_recorded)" = "true" ]; then
+    json_get "$TMP/checked" work_answer > "$TMP/answer"
+    [ -s "$TMP/answer" ] || printf '{"recorded":true,"status":"%s"}' "$state" > "$TMP/answer"
+    now > "$dir/reported"
+    work_taken "$dir"
+    REPORTED=1
+  else carried=""; fi
+  if [ "$NFILES" -gt 0 ] && [ -n "$REMOTE" ] && { [ -n "$carried" ] || [ "$verdict" != "not_connected" ]; }; then
+    [ -n "$carried" ] || report_work "$dir" changing
     if [ "$REPORTED" = "1" ] && { [ -z "$shared" ] || [ "$was_shared" = "off" ]; }; then
       sent="$sent and $(plural "$NFILES" "changed file’s name" "changed files’ names")"
       [ -n "$shared" ] || not_sent="${not_sent:+$not_sent; }what the files hold (code sharing is off)"
@@ -2341,9 +2444,17 @@ handle_message() {
     # answer is given to the tool's model to pass on. When no answer comes, the model has the message as it is.
     # A message put to the team is never also taken for a question about using the plugin.
     GUIDE=""
-    printf '{"question":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s}' "$prompt" \
-      "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep" > "$TMP/ask"
-    ask_vyavasta "$TMP/ask"
+    json_get "$TMP/checked" asked > "$TMP/asked"
+    if [ "$(head -c 1 "$TMP/asked")" = "{" ]; then
+      # Asked by the server with the check: its answer is the first call's, and the wait goes on from it.
+      cp "$TMP/asked" "$TMP/answer"
+      STATUS=200
+      wait_on /ask ""
+    else
+      printf '{"question":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s}' "$prompt" \
+        "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep" > "$TMP/ask"
+      ask_vyavasta "$TMP/ask"
+    fi
     sent=$(printf '%s' "$sent" | sed 's/^your message/your question/')
     if [ "$STATUS" != "200" ]; then
       OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent")
@@ -2392,7 +2503,7 @@ $OUT_CONTEXT}"
     # Something the team said stands against the change already made: the message waits until the developer
     # chooses, and is kept to pass on if they continue.
     json_text "$prompt" > "$dir/conflict-prompt"
-    rm -f "$dir/conflict-stop" "$dir/conflict-say"
+    rm -f "$dir/conflict-stop" "$dir/conflict-say" "$dir/conflict-block"
     OUT_LINE=$(line "$sent" "$not_sent" "Paused: something your team has said stands against the changes already made on your computer. Your message waits until you answer." "$kept_said")
     OUT_REASON="$(json_text "$(field "$(cat "$dir/conflict")" notice)")
 
@@ -2464,12 +2575,39 @@ tell_sharing() {
 # sent) as the session's work. Sets REPORTED to 1 when the server took it. $1 is the session folder.
 report_work() {
   REPORTED=""
+  work_report "$1" || return
+  pick_ride "$(basename "$1")"
+  api POST /work "$TMP/report" "$REPORT_SECONDS" keep
+  work_sent "$1"
+}
+
+# What follows a work report sent on its own, from its status: taken (`work_taken`), or kept to go along with a later
+# call when the server didn't answer, failed or was busy (`keep_unsent`), with the files' names only: changes go with
+# the next report, which finds them not sent yet. $1 is the session folder.
+work_sent() {
+  now > "$1/reported"
+  if [ "$STATUS" = "200" ]; then
+    work_taken "$1"
+  elif send_later; then
+    [ -z "$with_change" ] || work_report "$1" bare
+    keep_unsent work "$(basename "$1")" "$TMP/report"
+  fi
+  rm -f "$TMP/report"
+}
+
+# Whether a call that wasn't taken is to be sent again later: no answer came, the server failed, or it was busy.
+send_later() { case "$STATUS" in 000|5*|429) return 0 ;; esac; return 1; }
+
+# The session's work report as it stands, in $TMP/report: git's list of changed files, and with code sharing on the
+# changes when they moved since they were last sent (unless $2 is "bare": a check that carries the changes itself
+# carries the report). Fails when there is nothing to tell. $1 is the session folder.
+work_report() {
   [ -f "$TMP/files" ] || changed_files
   state=$(work_state "$1")
   # A session that has nothing open and nothing changed has nothing to tell.
-  [ "$state" != "changing" ] && [ ! -f "$1/open" ] && return
+  [ "$state" != "changing" ] && [ ! -f "$1/open" ] && return 1
   with_change=""
-  if [ "$(sharing)" = "on" ]; then
+  if [ "$(sharing)" = "on" ] && [ "${2:-}" != "bare" ]; then
     [ -f "$TMP/change" ] || build_change
     if [ "$(cksum < "$TMP/change")" != "$(cat "$1/change-sum")" ]; then with_change=1; fi
   fi
@@ -2479,10 +2617,14 @@ report_work() {
     if [ -n "$with_change" ]; then printf ',"change":'; cat "$TMP/change"; fi
     printf '}'
   } > "$TMP/report"
-  api POST /work "$TMP/report" "$REPORT_SECONDS"
-  now > "$1/reported"
-  [ "$STATUS" = "200" ] || return
+}
+
+# What follows a work report the server took, from what it answered of it ($TMP/answer): REPORTED, the changes as last
+# sent, whether the session's work is still open, and code sharing turned off in the web app. $1 is the session folder.
+work_taken() {
   REPORTED=1
+  # (A report of this session kept from earlier is older than this one: it is given up.)
+  rm -f "$UNSENT"/*-work-"$(basename "$1")".json "$UNSENT"/*-work-"$(basename "$1")".about
   [ -n "$with_change" ] && cksum < "$TMP/change" > "$1/change-sum"
   if [ "$(answer recorded)" = "true" ]; then
     case "$(json_text "$(answer status)")" in
@@ -2497,8 +2639,11 @@ report_work() {
 
 # After an edit (``edited``, at most every REPORT_EVERY seconds) and when the tool stops (``stopped``): git's list
 # of changed files goes to the server, which keeps the session's work for teammates to see. When the tool stops
-# after a message that was kept for the developer's summary, its last reply goes to the same chat. Nothing is
-# printed, except when the tool stops while a conflict found in the change waits to be told.
+# after a message that was kept for the developer's summary, its last reply goes to the same chat, in the same call
+# as the report where the server takes both at once (one call less at every turn's end; an older server is sent the
+# report on its own after it). A turn that ended in an error (Claude Code's StopFailure) sends its report and no
+# reply: what it would give as one is the error. Nothing is printed, except when the tool stops while a conflict
+# found in the change waits to be told.
 hook_report() {
   dir=$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")
   folder=$(input_folder)
@@ -2508,22 +2653,66 @@ hook_report() {
     last=$(cat "$dir/reported")
     [ -n "$last" ] && [ $(( $(now) - last )) -lt "$REPORT_EVERY" ] && return
   fi
+  # Whether the turn's reply goes to the session's chat.
+  turn=""
+  failed=""
+  [ "$1" = "stopped" ] && [ "$(json_text "$(json_get "$TMP/input" hook_event_name)")" = "StopFailure" ] && failed=1
+  if [ "$1" = "stopped" ] && [ -f "$dir/turn-waiting" ]; then
+    if [ "$(summaries)" = "off" ] || [ -n "$failed" ]; then rm -f "$dir/turn-waiting"
+    else turn=1; fi
+  fi
   STATUS=""
+  REPORTED=""
   if [ -n "$TOKEN" ] && repository "$folder" && ! offline; then
     changed_files
-    report_work "$dir"
+    if [ -z "$turn" ]; then report_work "$dir"
+    elif work_report "$dir"; then
+      send_turn "$dir" "$folder" work
+      turn=""
+      if [ "$STATUS" = "200" ] && [ "$(answer work_recorded)" = "true" ]; then
+        # Taken with the reply: what the server answered of the report is what /work would have (one that says only
+        # that it kept it has kept it as it was told).
+        json_get "$TMP/turned" work_answer > "$TMP/answer"
+        [ -s "$TMP/answer" ] || printf '{"recorded":true,"status":"%s"}' "$state" > "$TMP/answer"
+        now > "$dir/reported"
+        work_taken "$dir"
+      else
+        # (An older server: the report on its own, after the reply. One that didn't answer is not called twice: the
+        # report is kept to go along with a later call, as the reply is.)
+        if [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then api POST /work "$TMP/report" "$REPORT_SECONDS" keep; fi
+        work_sent "$dir"
+      fi
+    fi
     [ "$REPORTED" = "1" ] && keep_conflict "$dir"
   fi
   # (A report just now that found the server out of reach, or too slow to answer, is not followed by a second
   # call: the end of a turn is never held up twice.)
-  if [ "$1" = "stopped" ] && [ -f "$dir/turn-waiting" ]; then
-    if [ "$(summaries)" = "off" ]; then rm -f "$dir/turn-waiting"
-    elif [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then send_turn "$dir" "$folder"; fi
+  if [ -n "$turn" ] && [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then send_turn "$dir" "$folder"; fi
+  # What the developer is shown at a turn's end: a conflict found in the change, and teammates' messages that wait for
+  # them. (A turn that ended in an error shows nothing: what a conflict says waits for the next edit or message.)
+  if [ "$1" = "stopped" ] && [ -z "$failed" ]; then
+    shown=""
+    if [ -f "$dir/conflict-say" ]; then
+      shown=$(json_text "$(json_get "$dir/conflict-say" systemMessage)")
+      rm -f "$dir/conflict-say" "$dir/conflict-stop" "$dir/conflict-block"
+    fi
+    waiting=$(waiting_said)
+    [ -z "$waiting" ] || shown="${shown:+$shown
+
+}$waiting"
+    [ -z "$shown" ] || say "$shown"
   fi
-  if [ "$1" = "stopped" ] && [ -f "$dir/conflict-say" ]; then
-    cat "$dir/conflict-say"
-    rm -f "$dir/conflict-say" "$dir/conflict-stop"
-  fi
+}
+
+# Teammates' messages that wait for the developer and that their coding tool wasn't given yet, as the server counted
+# them when it took the turn's reply (INBOX_WAITING, from its `inbox_waiting`; an older server says nothing of them):
+# who sent them and when they come, in one line. Nothing is marked read.
+waiting_said() {
+  case "${INBOX_WAITING:-}" in
+    ''|*[!0-9]*|0) ;;
+    1) printf '%s' "Vyavasta: a teammate sent you a message. It comes with your next message, or send “vyavasta inbox” to read it now." ;;
+    *) printf '%s' "Vyavasta: teammates sent you $INBOX_WAITING messages. They come with your next message, or send “vyavasta inbox” to read them now." ;;
+  esac
 }
 
 # The tool's last reply of the turn, from the Stop hook's input, as a JSON string of at most REPLY_CHARACTERS
@@ -2565,22 +2754,38 @@ reply_json() {
 }
 
 # Sends the turn's reply to the session's chat, as the answer to the message kept this turn (named by its id when
-# the server gave one). Quiet, and never longer than TURN_SECONDS. $1 is the session folder, $2 the folder the tool
-# works in.
+# the server gave one). Quiet, and never longer than TURN_SECONDS, or REPORT_SECONDS when it carries the session's
+# work report ($3 is "work": $TMP/report, as `work_report` left it). Leaves the answer in $TMP/turned too, and how
+# many of teammates' messages wait for the developer in INBOX_WAITING. A reply the server didn't take is kept, by its
+# request_id, to go along with a later call (`keep_unsent`), when it names its message. $1 is the session folder, $2
+# the folder the tool works in.
 send_turn() {
   if repository "$2"; then :; else REMOTE=""; BRANCH=""; fi
   kept_id=$(cat "$1/turn-waiting")
-  {
-    printf '{"session":%s,"remote":%s,"branch":%s,"tool":"%s","keep":true' \
-      "$(json_quote "$(basename "$1")")" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
-    [ -n "$kept_id" ] && printf ',"message_id":%s' "$(json_quote "$kept_id")"
-    printf ',"reply":'
-    reply_json
-    printf '}'
-  } > "$TMP/turn"
-  api POST /turn "$TMP/turn" "$TURN_SECONDS"
-  # Tried again at the next stop only when the server couldn't be reached.
-  [ "$STATUS" = "000" ] || rm -f "$1/turn-waiting"
+  rm -f "$1/turn-waiting"
+  turn_id=$(new_request_id)
+  reply_json > "$TMP/reply-json"
+  turn_body "$1" "${3:-}" > "$TMP/turn"
+  if [ "${3:-}" = "work" ]; then api POST /turn "$TMP/turn" "$REPORT_SECONDS"; else api POST /turn "$TMP/turn" "$TURN_SECONDS"; fi
+  cp "$TMP/answer" "$TMP/turned"
+  INBOX_WAITING=""
+  [ "$STATUS" != "200" ] || INBOX_WAITING=$(json_get "$TMP/turned" inbox_waiting)
+  if send_later && [ -n "$kept_id" ] && [ "$(cat "$TMP/reply-json")" != '""' ]; then
+    turn_body "$1" "" > "$TMP/turn"
+    keep_unsent turn "$turn_id" "$TMP/turn"
+  fi
+}
+
+# The body of a turn's end: its request_id (turn_id), the session ($1), the reply (as `reply_json` left it) to the
+# message kept (kept_id), and with "work" in $2 the session's work report.
+turn_body() {
+  printf '{"request_id":"%s","session":%s,"remote":%s,"branch":%s,"tool":"%s","keep":true' "$turn_id" \
+    "$(json_quote "$(basename "$1")")" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
+  [ -n "$kept_id" ] && printf ',"message_id":%s' "$(json_quote "$kept_id")"
+  [ "$2" = "work" ] && { printf ',"work":'; cat "$TMP/report"; }
+  printf ',"reply":'
+  cat "$TMP/reply-json"
+  printf '}'
 }
 
 # -- the commands ------------------------------------------------------------------------------------------------
@@ -3481,7 +3686,8 @@ tell() {
   fi
   if repository "$HERE"; then :; else REMOTE=""; BRANCH=""; fi
   {
-    printf '{"to":%s,"text":%s,"kind":"message"' "$(json_quote "$1")" "$(json_quote "$2")"
+    printf '{"request_id":"%s","to":%s,"text":%s,"kind":"message"' "$(new_request_id)" "$(json_quote "$1")" \
+      "$(json_quote "$2")"
     # (Several at once: the list the server gave, its names each a JSON string, sent back as it came.)
     [ -n "${TELL_MANY:-}" ] && printf ',"to_many":%s' "$TELL_MANY"
     [ -n "${3:-}" ] && printf ',"reply_to":%s' "$(json_quote "$3")"
@@ -3489,8 +3695,9 @@ tell() {
     printf ',"session":%s,"remote":%s,"branch":%s,"tool":"%s"}' "$(json_quote "$(command_session)")" \
       "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
   } > "$TMP/tell"
-  api POST /tell "$TMP/tell" "$ASK_SECONDS"
+  api POST /tell "$TMP/tell" "$ASK_SECONDS" keep
   wait_on /tell "$TMP/tell"
+  rm -f "$TMP/tell"
   if [ "$STATUS" = "000" ] && [ -z "$SLOW" ] && [ -z "${IN_HOOK:-}" ] && [ "$CLIENT" = "codex" ]; then
     # Out of reach at once, run by Codex's model: inside its sandbox, which Codex says of a command it runs there
     # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so.
