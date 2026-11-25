@@ -4827,6 +4827,12 @@ def test_each_slash_command_is_answered_by_the_hook_with_what_the_command_says(r
     # The command's session is the one the slash command was sent in.
     expansion(run, repo, "vyavasta:shared", session="s-slash")
     assert fake.calls("/shared")[-1]["query"]["session"] == ["s-slash"]
+    # Once a session's start has kept the copy of the script that stays where it is when the plugin is updated, the
+    # slash command names that copy, as the typed command does.
+    run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo)
+    said = expansion(run, repo, "vyavasta:settings")["reason"]
+    assert f"run “sh {model_copy(run)} use-server <address>”" in said
+    assert said == run("settings", cwd=repo).stdout.rstrip("\n")
 
 
 def test_a_slash_command_that_is_not_one_of_the_plugins_own_is_left_to_claude_code(run, fake, repo):

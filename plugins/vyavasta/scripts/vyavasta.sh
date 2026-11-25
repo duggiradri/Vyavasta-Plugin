@@ -133,7 +133,7 @@ fi
 # script's own path is.
 MODEL_COPY="$HOME_DIR/bin/vyavasta-$CLIENT.sh"
 case "${1:-} ${2:-}" in
-  "hook session-start"|"hook prompt"|ask\ *|tell\ *|documents\ *|docs\ *|settings\ *)
+  "hook session-start"|"hook prompt"|"hook expansion"|ask\ *|tell\ *|documents\ *|docs\ *|settings\ *)
     [ -f "$MODEL_COPY" ] && cmp -s "$SELF" "$MODEL_COPY" && model_commands "$MODEL_COPY" ;;
 esac
 # Writes that copy when it isn't this script already, all at once and readable by the developer only, and tells it
