@@ -4758,15 +4758,27 @@ DIRECTION_TURNERS = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066",
                      "\u180e", "\ufff9", "\U000e0001", "\U000e0068", "\U000e0069", "\U000e007f"]
 
 
-def test_the_models_own_commands_in_claude_code_take_its_session_when_the_plugins_is_missing(run, fake, repo):
-    """Claude Code gives every command its session's id (CLAUDE_CODE_SESSION_ID): a question the model asks lands in
-    that session's chat even where the session's start couldn't leave VYAVASTA_SESSION. Codex never takes it."""
+def test_the_models_own_commands_in_claude_code_take_the_session_claude_code_gives_them_first(run, fake, repo):
+    """Claude Code gives every command its session's id (CLAUDE_CODE_SESSION_ID), the id its hooks send: a question the
+    model asks lands in that session's chat, in a session forked from another too, whose start left the id of the one
+    it was forked from in VYAVASTA_SESSION. That one is taken only where Claude Code gives none. Codex never takes
+    Claude Code's, and keeps its own order."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
-    run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-1", "VYAVASTA_SESSION": "cc-2"})
+    # (A fork: Claude Code names the fork, and the env file the session it was forked from.)
+    run("ask", "Who owns billing?", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
+    run("ask", "Who owns billing?", cwd=repo, extra={"VYAVASTA_SESSION": "cc-2"})
     run("ask", "Who owns billing?", cwd=repo, tool="codex", extra={"CLAUDE_CODE_SESSION_ID": "cc-1"})
-    assert [call["body"]["session"] for call in fake.calls("/ask")] == ["cc-1", "cc-2", ""]
+    run("ask", "Who owns billing?", cwd=repo, tool="codex",
+        extra={"CLAUDE_CODE_SESSION_ID": "cc-1", "VYAVASTA_SESSION": "cx-1", "CODEX_THREAD_ID": "cx-2"})
+    assert [call["body"]["session"] for call in fake.calls("/ask")] == ["cc-1", "cc-fork", "cc-2", "", "cx-1"]
+    # The model's message to a teammate and its documents are filed the same way.
+    run("tell", "priya", "The fix is pushed.", cwd=repo,
+        extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
+    run("documents", cwd=repo, extra={"CLAUDE_CODE_SESSION_ID": "cc-fork", "VYAVASTA_SESSION": "cc-1"})
+    assert fake.calls("/tell")[-1]["body"]["session"] == "cc-fork"
+    assert fake.calls("/documents")[-1]["body"]["session"] == "cc-fork"
 
 
 def test_characters_that_turn_the_text_around_never_reach_a_header_or_a_quoted_line(run, fake, repo):

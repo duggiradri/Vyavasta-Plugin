@@ -2064,7 +2064,8 @@ hook_session_start() {
   sweep_scratch
   keep_model_copy
   # The commands Claude's model runs in this session belong to it: its id is left for them in the file Claude Code
-  # reads into each of their environments (CLAUDE_ENV_FILE), once.
+  # reads into each of their environments (CLAUDE_ENV_FILE), once, for a Claude Code that gives them none of its own
+  # (`command_session`).
   if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ "$(basename "$dir")" != "no-session" ]; then
     told="export VYAVASTA_SESSION=$(basename "$dir")"
     grep -qxF "$told" "$CLAUDE_ENV_FILE" || printf '%s\n' "$told" >> "$CLAUDE_ENV_FILE"
@@ -3422,16 +3423,17 @@ command_here() {
 
 # The session a command belongs to: in a hook, the hook's own; run outside one, the one its tool says it runs in.
 # Codex gives its model's commands their thread's id (CODEX_SESSION_ID, else CODEX_THREAD_ID), the session id its
-# hooks are given; in Claude Code a session's start leaves its id for the commands that follow (VYAVASTA_SESSION, in
-# CLAUDE_ENV_FILE), and Claude Code gives every command its session's id itself (CLAUDE_CODE_SESSION_ID), which is
-# taken where the first is missing (an env file that couldn't be written). Never another window's or another
-# project's: where nothing says which, none is sent, and the server keeps it apart from every session's chat. Named as
-# the hooks name a session's folder, so both speak of one.
+# hooks are given, and VYAVASTA_SESSION, when it is set, goes first there. Claude Code gives every command its
+# session's id itself (CLAUDE_CODE_SESSION_ID), the id its message and turn's-end hooks are given, and that is taken
+# first: a session forked from another is given its own id there, while the id a session's start leaves for the
+# commands that follow (VYAVASTA_SESSION, in CLAUDE_ENV_FILE) names the session it was forked from. That one is taken
+# where Claude Code gives none (a version from before it did). Never another window's or another project's: where
+# nothing says which, none is sent, and the server keeps it apart from every session's chat. Named as the hooks name a
+# session's folder, so both speak of one.
 command_session() {
   if [ -n "${SESSION:-}" ]; then printf '%s' "$SESSION"; return; fi
-  given="${VYAVASTA_SESSION:-}"
-  [ -n "$given" ] || [ "$CLIENT" != "codex" ] || given="${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-}}"
-  [ -n "$given" ] || [ "$CLIENT" != "claude-code" ] || given="${CLAUDE_CODE_SESSION_ID:-}"
+  if [ "$CLIENT" = "codex" ]; then given="${VYAVASTA_SESSION:-${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-}}}"
+  else given="${CLAUDE_CODE_SESSION_ID:-${VYAVASTA_SESSION:-}}"; fi
   printf '%s' "$given" | tr -cd 'A-Za-z0-9_-' | cut -c1-80
 }
 
