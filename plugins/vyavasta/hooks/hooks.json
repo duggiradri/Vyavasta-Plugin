@@ -61,7 +61,20 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh\" hook stopped",
-            "timeout": 20
+            "timeout": 20,
+            "statusMessage": "Sending your work to Vyavasta"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh\" hook stopped",
+            "timeout": 20,
+            "statusMessage": "Sending your work to Vyavasta"
           }
         ]
       }

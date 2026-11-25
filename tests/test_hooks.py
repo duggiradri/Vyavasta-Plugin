@@ -107,6 +107,18 @@ class Fake:
         self.refused = "Refused."
         # Seconds a route takes to answer.
         self.delay: dict[str, float] = {}
+        # Whether it is a newer server that takes the combined calls: a check that carries the work report and asks a
+        # question at once, /me that carries the inbox, and a turn that carries the work report; and that answers a
+        # repeat of a request_id as it answered it first (``answered``, by route and id).
+        self.combined = False
+        self.answered: dict[tuple[str, str], tuple[int, dict]] = {}
+        self.asked_in_check = 0
+        # Routes whose next calls are taken and dropped with no answer at all, and routes that answer with a page that
+        # isn't Vyavasta's (status, bytes).
+        self.drop: dict[str, int] = {}
+        self.page: dict[str, tuple[int, bytes]] = {}
+        # Routes that answer with a redirect to another address.
+        self.redirect: dict[str, str] = {}
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -133,8 +145,30 @@ class Fake:
                                       "headers": dict(self.headers), "raw": raw, "body": body})
                 if path in fake.delay:
                     time.sleep(fake.delay[path])
+                if fake.drop.get(path):
+                    # Taken and dropped: the connection closes with no answer.
+                    fake.drop[path] -= 1
+                    self.close_connection = True
+                    return
+                if path in fake.redirect:
+                    self.send_response(307)
+                    self.send_header("Location", fake.redirect[path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if path in fake.page:
+                    status, page = fake.page[path]
+                    self.send_response(status)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(page)))
+                    self.end_headers()
+                    self.wfile.write(page)
+                    return
                 if path in fake.status:
                     return self._answer(fake.status[path], {"detail": {"code": "x", "message": fake.refused}})
+                if fake.combined and isinstance(body, dict) and body.get("request_id") and \
+                        (path, body["request_id"]) in fake.answered:
+                    return self._answer(*fake.answered[(path, body["request_id"])])
                 signed = self.headers.get("Authorization") == f"Bearer {TOKEN}"
                 if path == "/hello":
                     return self._answer(200, {"ok": True, "latest": fake.latest, "minimum": fake.minimum})
@@ -150,13 +184,15 @@ class Fake:
                 if not signed:
                     return self._answer(401, {"detail": {"code": "signed_out", "message": "Ended."}})
                 if path == "/me":
-                    return self._answer(200, {"email": "sam@acme.test", "machine": "laptop",
-                                              "workspace": {"workspace_id": "w", "name": "Acme"},
-                                              "repositories": ["acme/api"],
-                                              "plugin": {"latest": fake.latest, "minimum": fake.minimum},
-                                              "limits": {"change_lines": 5000, "change_bytes": 600000},
-                                              "sharing": sorted(fake.sharing), "admin": False,
-                                              **fake.extra.get("/me", {})})
+                    me = {"email": "sam@acme.test", "machine": "laptop",
+                          "workspace": {"workspace_id": "w", "name": "Acme"}, "repositories": ["acme/api"],
+                          "plugin": {"latest": fake.latest, "minimum": fake.minimum},
+                          "limits": {"change_lines": 5000, "change_bytes": 600000},
+                          "sharing": sorted(fake.sharing), "admin": False, **fake.extra.get("/me", {})}
+                    if fake.combined and parse_qs(parts.query).get("inbox") == ["1"]:
+                        me["inbox"] = {"items": fake.inbox, "count": len(fake.inbox) + fake.inbox_more,
+                                       "more": fake.inbox_more}
+                    return self._answer(200, me)
                 if path == "/sharing":
                     (fake.sharing.add if body["on"] else fake.sharing.discard)("acme/api")
                     return self._answer(200, {"on": body["on"], "repository": "acme/api",
@@ -177,15 +213,27 @@ class Fake:
                     if "change" in body:
                         answer["sharing"] = "on" if "acme/api" in fake.sharing else "off"
                     answer.update(fake.extra.get(path, {}))
+                    if fake.combined and path == "/check" and isinstance(body.get("work"), dict):
+                        answer["work_recorded"] = True
+                        answer["work_answer"] = fake.worked(body["work"])
+                    if fake.combined and path == "/check" and body.get("ask_now") and answer.get("ask") is True:
+                        answer["asked"] = fake.first_asked()
+                    if fake.combined and body.get("request_id"):
+                        fake.answered[(path, body["request_id"])] = (200, answer)
                     return self._answer(200, answer)
                 if path == "/ask":
                     # (An answer that is slow is still being made on the first calls for it.)
-                    if fake.slow > 0 and len(fake.calls("/ask")) <= fake.slow:
+                    if fake.slow > 0 and len(fake.calls("/ask")) + fake.asked_in_check <= fake.slow:
                         return self._answer(200, {"status": "pending", "answer": "", "context": "", "notice":
                                                   "Vyavasta is still working on the answer.", "waiting": "msg_9"})
                     return self._answer(200, fake.asked)
                 if path == "/turn":
-                    return self._answer(200, {"kept": bool(body["keep"]), "url": "http://127.0.0.1/c/cnv_7"})
+                    turned = {"kept": bool(body["keep"]), "url": "http://127.0.0.1/c/cnv_7"}
+                    if fake.combined and isinstance(body.get("work"), dict):
+                        turned["work_recorded"] = True
+                        turned["work_answer"] = fake.worked(body["work"])
+                    turned.update(fake.extra.get(path, {}))
+                    return self._answer(200, turned)
                 if path == "/conflict":
                     return self._answer(200, {"ok": True})
                 if path == "/chat":
@@ -229,6 +277,23 @@ class Fake:
 
     def calls(self, path: str) -> list[dict]:
         return [request for request in self.requests if request["path"] == path]
+
+    def worked(self, work: dict) -> dict:
+        """What /work answers a report, as a newer server answers it inside a check or a turn."""
+        answer = {"recorded": True, "work_id": "wrk_1", "changed": True,
+                  "status": {"changing": "local"}.get(work["state"], work["state"])}
+        if "change" in work:
+            answer["sharing"] = "on" if "acme/api" in self.sharing else "off"
+        answer.update(self.extra.get("/work", {}))
+        return answer
+
+    def first_asked(self) -> dict:
+        """What the first /ask of a question answers, as a newer server answers it inside a check."""
+        self.asked_in_check += 1
+        if self.slow >= self.asked_in_check:
+            return {"status": "pending", "answer": "", "context": "", "notice": "Vyavasta is still working on the "
+                    "answer.", "waiting": "msg_9"}
+        return self.asked
 
 
 @pytest.fixture()
@@ -515,9 +580,12 @@ def test_a_clear_request_reaches_claude_with_the_facts_and_sends_only_what_the_c
                                           "additionalContext": fake.check["context"]}
     assert said["systemMessage"] == "Vyavasta · sent: your message. Kept in this session’s chat for your summary. · " + fake.check["notice"]
     (sent,) = fake.calls("/check")
-    # The request word for word; the repository without its credential; nothing of the transcript or the folder.
-    assert sent["body"] == {"request": text, "remote": "https://github.com/acme/api.git", "branch": "main",
-                            "session": "session-1", "tool": "claude-code", "keep": True}
+    # The request word for word; the repository without its credential; nothing of the transcript or the folder. (Its
+    # own id, and whether a question is asked at once, are the calls' own: see the combined calls below.)
+    body = dict(sent["body"])
+    assert re.fullmatch(r"[0-9a-f]{24}", body.pop("request_id")) and body.pop("ask_now") is True
+    assert body == {"request": text, "remote": "https://github.com/acme/api.git", "branch": "main",
+                    "session": "session-1", "tool": "claude-code", "keep": True}
     assert b"hunter2" not in sent["raw"] and b"transcript" not in sent["raw"] and str(repo).encode() not in sent["raw"]
 
 
@@ -584,7 +652,11 @@ def test_a_server_that_fails_or_is_busy_is_said_in_one_plain_line(run, fake, rep
     fake.status["/check"] = 503
     said = prompt(run, repo, "Change calc.py")["systemMessage"]
     assert "isn’t working right now" in said and "503" not in said
-    (run.home / "offline").unlink()
+    assert said.endswith("Claude works as usual, and Vyavasta is tried again with your next message.")
+    # A server that answers with an error is no server out of reach: the next message tries again, and is checked.
+    assert not (run.home / "offline").exists()
+    del fake.status["/check"]
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
 
 
 def test_a_connection_ended_in_settings_signs_this_computer_out(run, fake, repo):
@@ -691,27 +763,65 @@ def test_a_question_with_no_answer_goes_to_the_model_as_it_is_with_a_note(run, f
                                      "be asked just now, so Claude answers by itself."}
 
 
-def test_the_model_can_ask_vyavasta_itself_in_the_session_the_developer_last_wrote_in(run, fake, repo):
+def test_the_model_can_ask_vyavasta_itself_in_its_own_session_and_never_in_another(run, fake, repo, tmp_path):
     assert "Not signed in" in run("ask", "What is Priya doing?", cwd=repo).stdout and fake.calls("/ask") == []
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    # Claude Code: a session's start leaves its id in the file Claude Code reads into its commands' environment.
+    env_file = tmp_path / "claude-env"
+    env_file.write_text("export SOMETHING=else\n")
+    for again in range(2):
+        run("hook", "session-start", stdin=event("SessionStart", repo, session="session-7", source="startup"),
+            cwd=repo, extra={"CLAUDE_ENV_FILE": str(env_file)})
+    assert env_file.read_text() == "export SOMETHING=else\nexport VYAVASTA_SESSION=session-7\n"
     prompt(run, repo, "Fix the rounding", session="session-7")
-    done = run("ask", "What is Priya doing?", cwd=repo)
+    # Another window in the same project writes after it: the model's question still goes to its own session.
+    prompt(run, repo, "Write the docs", session="session-8")
+    done = run("ask", "What is Priya doing?", cwd=repo, extra={"VYAVASTA_SESSION": "session-7"})
     assert done.stdout.startswith(f"{QUOTE_TOP}\n│ {fake.asked['answer']}\n{QUOTE_END}\n")
     assert "http://127.0.0.1/c/cnv_1" in done.stdout
     assert TOKEN not in done.stdout
     assert fake.calls("/ask")[-1]["body"] == {"question": "What is Priya doing?", "branch": "main",
                                               "remote": "https://github.com/acme/api.git", "session": "session-7",
                                               "tool": "claude-code", "keep": True}
+    # Codex gives its model's commands their thread's id (CODEX_SESSION_ID first, else CODEX_THREAD_ID), which is the
+    # session its hooks are given; Claude Code's commands never take Codex's.
+    run("ask", "Who owns billing?", cwd=repo, tool="codex", extra={"CODEX_THREAD_ID": "thread-9"})
+    assert fake.calls("/ask")[-1]["body"]["session"] == "thread-9"
+    run("ask", "Who owns billing?", cwd=repo, tool="codex",
+        extra={"CODEX_SESSION_ID": "thread-8", "CODEX_THREAD_ID": "thread-9"})
+    assert fake.calls("/ask")[-1]["body"]["session"] == "thread-8"
+    run("ask", "Who owns billing?", cwd=repo, extra={"CODEX_THREAD_ID": "thread-9"})
+    assert fake.calls("/ask")[-1]["body"]["session"] == ""
+    # Nothing names the session (a terminal, say): none is sent, never the session that last wrote here, nor one of
+    # another project.
+    run("ask", "Who owns billing?", cwd=repo)
+    assert fake.calls("/ask")[-1]["body"]["session"] == ""
     fake.asked = {"status": "pending", "answer": "", "context": "", "notice": "Vyavasta is still working on it."}
     assert run("ask", "And Sam?", cwd=repo).stdout.strip() == "Vyavasta gave no answer: Vyavasta is still working on it."
     assert "Usage" in run("ask", cwd=repo).stdout
-    # A session's start tells the model what Vyavasta is for and the command that asks it, by this script's path.
+    # A session's start tells the model what Vyavasta is for and the command that asks it, by the path of a copy of
+    # this script in the settings folder, which stays where it is when the tool updates the plugin: private, and this
+    # very script.
     told = output(run("hook", "session-start", stdin=event("SessionStart", repo)))["hookSpecificOutput"]
     assert told["hookEventName"] == "SessionStart"
-    assert f'sh "{SCRIPT}" ask "<the question>"' in told["additionalContext"]
+    copy = model_copy(run)
+    assert f'sh "{copy}" ask "<the question>"' in told["additionalContext"] and str(SCRIPT) not in told["additionalContext"]
+    assert copy.read_bytes() == SCRIPT.read_bytes() and stat.S_IMODE(copy.stat().st_mode) == 0o600
+    assert stat.S_IMODE(copy.parent.stat().st_mode) == 0o700
     codex = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))
-    assert f'VYAVASTA_TOOL=codex sh "{SCRIPT}" ask' in codex["hookSpecificOutput"]["additionalContext"]
+    assert f'env VYAVASTA_TOOL=codex sh "{model_copy(run, "codex")}" ask' in codex["hookSpecificOutput"]["additionalContext"]
+    # The copy runs as the script does, and is told on: the plugin updated, the copy still answers.
+    done = run("ask", "What is Priya doing?", cwd=repo)
+    assert "Vyavasta gave no answer" in done.stdout
+    asked_by_copy = subprocess.run(["sh", str(copy), "ask", "What is Priya doing?"], capture_output=True, text=True,
+                                   cwd=repo, env={"PATH": os.environ["PATH"], "HOME": str(tmp_path),
+                                                  "VYAVASTA_HOME": str(run.home), "VYAVASTA_SERVER": fake.url})
+    assert "Vyavasta gave no answer" in asked_by_copy.stdout
+    # Another version of the script: the copy is written again at the next start, all at once.
+    copy.write_text("# an older version\n")
+    run("hook", "session-start", stdin=event("SessionStart", repo))
+    assert copy.read_bytes() == SCRIPT.read_bytes() and not list(copy.parent.glob("*.sh.*"))
     # Codex's model is told to run it outside the sandbox, which it may ask for, and what to say when that is refused.
     told_codex = codex["hookSpecificOutput"]["additionalContext"]
     assert ("Run it outside Codex’s sandbox, by asking for escalated permissions for this one command" in told_codex
@@ -1011,10 +1121,11 @@ def test_upload_opens_the_sessions_chat_to_drop_a_file_and_chat_gives_its_link(r
     assert run.opened() == ["http://127.0.0.1/c/cnv_7?attach=1"]
     assert fake.calls("/chat")[0]["body"] == {"session": "session-3", "remote": "https://github.com/acme/api.git",
                                               "branch": "main", "tool": "claude-code"}
-    chat = run("chat", cwd=repo).stdout
+    # (Run as a slash command, in the session Claude Code names: what the session's start left for its commands.)
+    chat = run("chat", cwd=repo, extra={"VYAVASTA_SESSION": "session-3"}).stdout
     assert "http://127.0.0.1/c/cnv_7" in chat and fake.calls("/chat")[-1]["body"]["session"] == "session-3"
     assert len(run.opened()) == 1
-    run("chat", "open", cwd=repo)
+    run("chat", "open", cwd=repo, extra={"VYAVASTA_SESSION": "session-3"})
     assert run.opened()[-1] == "http://127.0.0.1/c/cnv_7"
 
 
@@ -1047,7 +1158,7 @@ def test_shared_lists_what_this_session_sent_oldest_first_with_what_is_kept(run,
         {"at": "2026-11-18T10:42:00Z", "at_said": "18 Nov, 10:42", "kind": "request",
          "said": "A request of 14 words was checked; nothing stood against it. Its words were not kept."}],
         "chat_url": "http://127.0.0.1/c/cnv_7", "sharing": True, "kept": "Vyavasta keeps this list for 30 days."}
-    listed = run("shared", cwd=repo).stdout.splitlines()
+    listed = run("shared", cwd=repo, extra={"VYAVASTA_SESSION": "session-5"}).stdout.splitlines()
     assert listed == ["Sent to Vyavasta from this session, oldest first:",
                       "- 18 Nov, 10:42: A request of 14 words was checked; nothing stood against it. Its words were "
                       "not kept.",
@@ -1169,7 +1280,8 @@ def test_ask_a_teammates_agent_prints_both_headers_the_answer_and_who_sees_it(ru
     said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo,
                                                      prompt="vyavasta ask Priya Raman: what is the export’s plan?")))
     assert said["decision"] == "block" and not fake.calls("/check")
-    assert fake.calls("/tell")[0]["body"] == {"to": "Priya Raman", "text": "what is the export’s plan?",
+    assert {key: value for key, value in fake.calls("/tell")[0]["body"].items() if key != "request_id"} == {
+                                              "to": "Priya Raman", "text": "what is the export’s plan?",
                                               "kind": "message", "session": "session-1",
                                               "remote": "https://github.com/acme/api.git", "branch": "main",
                                               "tool": "claude-code"}
@@ -1379,10 +1491,21 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
         for group in groups:
             for hook in group["hooks"]:
                 assert hook["type"] == "command"
-                assert hook["command"].startswith('VYAVASTA_TOOL=codex sh "${PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
-                assert hook["command"].rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped"}
+                # (Through env, which every login shell runs, where some can't give a command a variable before it.)
+                assert hook["command"].startswith('env VYAVASTA_TOOL=codex sh "${PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
+                assert hook["command"].rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check"}
     # Only the report after an edit may run in the background: a check that runs there could hold nothing.
     assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
+    # The check after an edit tells Codex's model of a conflict at once, so it runs in the foreground, quickly; the end
+    # of a turn too, so that its reply is kept when Codex exits right after it.
+    (check,) = [hook for group in hooks["PostToolUse"] for hook in group["hooks"] if hook["command"].endswith("edit-check")]
+    assert not check.get("async") and check["timeout"] <= 10
+    assert not hooks["Stop"][0]["hooks"][0].get("async")
+    # Codex shows a word while the hooks that wait on Vyavasta run: a message's hook may answer a question or one of
+    # the plugin's commands as well as check a request.
+    assert hooks["SessionStart"][0]["hooks"][0]["statusMessage"] == "Connecting to Vyavasta"
+    assert hooks["UserPromptSubmit"][0]["hooks"][0]["statusMessage"] == "Waiting for Vyavasta"
+    assert hooks["Stop"][0]["hooks"][0]["statusMessage"] == "Sending your work to Vyavasta"
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.6.0"
@@ -1403,7 +1526,10 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
 def test_every_hook_runs_this_script_with_a_command_it_knows():
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())["hooks"]
     commands = [hook["command"] for groups in hooks.values() for group in groups for hook in group["hooks"]]
-    assert {"SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "Stop"} <= set(hooks)
+    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "Stop", "StopFailure"}
+    # A turn that ended in an error reports its work as one that ended well does; both in the foreground, so that
+    # what they send is sent when “claude -p” exits right after (it ends a hook still running in the background).
+    assert hooks["StopFailure"] == hooks["Stop"] and not hooks["Stop"][0]["hooks"][0].get("async")
     for command in commands:
         assert command.startswith('sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
         assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check", "expansion"}
@@ -1411,6 +1537,7 @@ def test_every_hook_runs_this_script_with_a_command_it_knows():
     # for the plugin's own commands.
     assert hooks["SessionStart"][0]["hooks"][0]["statusMessage"] == "Connecting to Vyavasta"
     assert hooks["UserPromptSubmit"][0]["hooks"][0]["statusMessage"] == "Waiting for Vyavasta"
+    assert hooks["Stop"][0]["hooks"][0]["statusMessage"] == "Sending your work to Vyavasta"
     (expansion,) = hooks["UserPromptExpansion"]
     assert expansion["matcher"] == "^vyavasta:" and expansion["hooks"][0]["statusMessage"] == "Waiting for Vyavasta"
     # The check after an edit is the one that can stop the tool, so it runs in the foreground, quickly.
@@ -1716,7 +1843,8 @@ def test_a_session_start_says_connected_once_and_what_a_folder_not_read_does(run
 def test_signing_out_says_nothing_is_sent_and_help_names_the_typed_only_commands(run, fake, repo):
     signed_in(run, fake)
     assert run("sign-out", cwd=repo).stdout.strip() == ("Signed out of Vyavasta on this computer. Requests are no "
-                                                        "longer checked, and nothing is sent from this computer.")
+                                                        "longer checked, and nothing is sent from this computer until "
+                                                        "you send “vyavasta sign in”.")
     text = run("help", cwd=repo).stdout
     assert "ask, tell, reply, and searching and reading documents are typed only" in text
     assert "It answers only from what you can both already see" in text
@@ -1771,8 +1899,9 @@ def test_with_summaries_on_the_message_is_kept_and_the_reply_goes_to_its_chat_wh
     done = stop(run, repo, last_assistant_message=reply)
     assert done.stdout == ""
     (turn,) = fake.calls("/turn")
-    assert turn["body"] == {"session": "session-1", "remote": "https://github.com/acme/api.git", "branch": "main",
-                            "tool": "claude-code", "keep": True, "message_id": "msg_1", "reply": reply}
+    assert {key: value for key, value in turn["body"].items() if key != "request_id"} == {
+        "session": "session-1", "remote": "https://github.com/acme/api.git", "branch": "main", "tool": "claude-code",
+        "keep": True, "message_id": "msg_1", "reply": reply}
     assert b"hunter2" not in turn["raw"] and b"transcript" not in turn["raw"]
     # Once for each kept message: a turn that follows none sends nothing.
     stop(run, repo, last_assistant_message="More.")
@@ -1994,8 +2123,8 @@ def test_a_turn_that_never_ended_never_files_a_later_reply_under_its_message(run
     assert not fake.calls("/turn")
     # And with a new session in between.
     prompt(run, repo, "Change calc.py")
-    run("hook", "session-start", stdin=event("SessionStart", repo, source="resume"), cwd=repo)
-    stop(run, repo, last_assistant_message="Resumed.")
+    run("hook", "session-start", stdin=event("SessionStart", repo, source="startup"), cwd=repo)
+    stop(run, repo, last_assistant_message="Started again.")
     assert not fake.calls("/turn")
     # A later turn's reply goes to its own message, named by the id the check gave it.
     prompt(run, repo, "Change gone.py")
@@ -2041,23 +2170,28 @@ def test_the_end_of_a_turn_waits_at_most_four_seconds_for_the_reply_to_be_taken(
     assert len(fake.calls("/turn")) == 1
 
 
-def test_no_reply_is_sent_when_the_report_just_before_found_the_server_out_of_reach(run, fake, repo):
+def test_the_end_of_a_turn_is_never_held_up_twice_by_a_server_that_does_not_answer(run, fake, repo):
+    """The reply goes first, carrying the work report: an older server takes the reply and is then sent the report on
+    its own, and one that didn't answer the first call is not called a second time."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     prompt(run, repo, "Change calc.py")
     (repo / "calc.py").write_text("changed\n")
-    # A report that takes too long: the turn's end is not held up a second time.
+    # A report that takes too long: the reply was taken first, and the turn's end waits for the report once.
     fake.delay["/work"] = 12
     done = stop(run, repo, last_assistant_message="Done.")
     assert done.stdout == "" and done.seconds < 10.5
-    assert fake.calls("/work") and not fake.calls("/turn")
-    # A report the server failed: the same.
+    assert [call["path"] for call in fake.requests if call["path"] in ("/turn", "/work")] == ["/turn", "/work"]
+    assert fake.calls("/turn")[-1]["body"]["work"]["files"][0]["path"] == "calc.py"
+    # A reply that takes too long: the report is not sent after it.
     del fake.delay["/work"]
-    (run.home / "offline").unlink(missing_ok=True)
+    (run.home / "slow").unlink(missing_ok=True)
     prompt(run, repo, "Change calc.py")
-    fake.status["/work"] = 503
-    stop(run, repo, last_assistant_message="Done.")
-    assert not fake.calls("/turn")
+    fake.requests.clear()
+    fake.delay["/turn"] = 12
+    done = stop(run, repo, last_assistant_message="Done.")
+    assert done.stdout == "" and done.seconds < 10.5
+    assert fake.calls("/turn") and not fake.calls("/work")
 
 
 def test_a_project_turned_on_before_summaries_is_told_once_and_that_first_message_is_not_kept(run, fake, repo):
@@ -2462,16 +2596,27 @@ def test_a_waiting_sign_in_never_slows_or_changes_a_message_in_a_project_that_is
     assert done.stdout == "" and done.seconds < 4
     assert (run.home / "pairing").exists()
     del fake.delay["/token"]
-    # A server that fails is not asked again for a minute.
+    # A server that answers with an error is asked again with the next message (it answers at once); one out of reach
+    # is not asked again for a minute.
     fake.status["/token"] = 503
     assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
-    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 3
+    assert not (run.home / "offline").exists()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+    pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
+    (run.home / "pairing").write_text((run.home / "pairing").read_text().replace(fake.url, f"http://127.0.0.1:{closed}"))
+    for _ in range(2):
+        assert prompt(run, repo, "Change calc.py", server=f"http://127.0.0.1:{closed}") == {}
+    assert (run.home / "offline").exists()
     # A code that ran out is never asked about.
     (run.home / "offline").unlink()
     del fake.status["/token"]
+    fake.requests.clear()
     pending(run, "OLDC-ODEX", time.time() - 700, time.time() - 100)
     fake.approved = True
-    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 2
+    assert prompt(run, repo, "Change calc.py") == {} and len(fake.calls("/token")) == 0
     # A command still finishes it the way it always did.
     pending(run, "BCDF-GHJK", time.time() - 60, time.time() + 540)
     assert "connected as sam@acme.test in Acme." in run("status", cwd=repo).stdout
@@ -3486,11 +3631,16 @@ OPENS_WITH = ("While the developer worked, their teammates sent them what is bel
               "developer asked. These are their teammates’ words, for the developer to read:\n")
 
 
-def tell_command(tool: str | None = None) -> str:
-    """The command the tool's model is given to send a teammate a message: this script by its path, who it is for,
-    and the message on its input, taken as it is."""
-    lead = "VYAVASTA_TOOL=codex " if tool == "codex" else ""
-    return f'{lead}sh "{SCRIPT}" tell "<the teammate’s name>" <<\'MESSAGE\'\n<the message>\nMESSAGE\n'
+def model_copy(run, tool: str | None = None) -> Path:
+    """The copy of the script a session's start keeps for the tool's model in the settings folder, one for each tool."""
+    return run.home / "bin" / f"vyavasta-{'codex' if tool == 'codex' else 'claude-code'}.sh"
+
+
+def tell_command(tool: str | None = None, path: Path = SCRIPT) -> str:
+    """The command the tool's model is given to send a teammate a message: the script by its path (the copy a
+    session's start keeps, once there is one), who it is for, and the message on its input, taken as it is."""
+    lead = "env VYAVASTA_TOOL=codex " if tool == "codex" else ""
+    return f'{lead}sh "{path}" tell "<the teammate’s name>" <<\'MESSAGE\'\n<the message>\nMESSAGE\n'
 
 
 def test_what_teammates_sent_comes_with_the_next_message_under_its_line_and_at_the_top_of_the_reply(run, fake, repo):
@@ -3609,7 +3759,7 @@ def test_a_message_that_mentions_a_teammate_gives_the_model_the_command_that_sen
                 "with this command") in told
         assert "In place of the name, give several names with commas between them, or team for everyone else" in told
         assert "let Priya know" not in told and "answered at once" not in told
-        assert tell_command(tool) in told
+        assert tell_command(tool, model_copy(run, tool)) in told
         assert told.count("Run it outside Codex’s sandbox") == (2 if tool == "codex" else 0)
 
 
@@ -3627,8 +3777,12 @@ def test_the_model_tells_a_teammate_with_the_message_on_the_commands_input_taken
                            "message there. Your thread with Rohan: http://127.0.0.1/?agent-chat=usr_m",
                  "url": "http://127.0.0.1/?agent-chat=usr_m", "waiting": None, "people": []}
     for tool in (None, "codex"):
-        done = run("tell", "Rohan", raw=(words + "\n").encode(), cwd=repo, tool=tool)
-        assert fake.calls("/tell")[-1]["body"] == {
+        # (Run in the session its tool names: Claude Code's from what the session's start left, Codex's thread.)
+        given = {"CODEX_THREAD_ID": "session-7"} if tool else {"VYAVASTA_SESSION": "session-7"}
+        done = run("tell", "Rohan", raw=(words + "\n").encode(), cwd=repo, tool=tool, extra=given)
+        body = dict(fake.calls("/tell")[-1]["body"])
+        assert re.fullmatch(r"[0-9a-f]{24}", body.pop("request_id"))
+        assert body == {
             "to": "Rohan", "text": words, "kind": "message", "intent": "tell", "session": "session-7",
             "remote": "https://github.com/acme/api.git", "branch": "main", "tool": tool or "claude-code"}
         # Told the teammate: under a header that names them, never their agent, with where they see it.
@@ -3954,9 +4108,9 @@ FOUND = {"status": "found", "words": ["refund", "window"], "matched": 3, "readab
     {"n": 2, "name": "draft.md", "uploaded_by": "you", "image": False, "text": "Refund window: open question."}]}
 
 
-def documents_command(tool: str | None = None) -> str:
-    """The command the tool's model is given to read the team's documents: this script by its path."""
-    return ("VYAVASTA_TOOL=codex " if tool == "codex" else "") + f'sh "{SCRIPT}" documents'
+def documents_command(tool: str | None = None, path: Path = SCRIPT) -> str:
+    """The command the tool's model is given to read the team's documents: the script by its path."""
+    return ("env VYAVASTA_TOOL=codex " if tool == "codex" else "") + f'sh "{path}" documents'
 
 
 def documents_said(tool: str | None = None) -> str:
@@ -4170,7 +4324,7 @@ def test_an_answer_that_drew_on_a_document_gives_the_model_the_commands_that_rea
     # A session's start says it in one line, by the same commands.
     for tool in (None, "codex"):
         told = start(run, repo, tool, "s9")["hookSpecificOutput"]["additionalContext"]
-        command = documents_command(tool)
+        command = documents_command(tool, model_copy(run, tool))
         assert (f"The team’s documents in Vyavasta can be read when the work needs them, by running {command} as the "
                 "ask command is run. On its own it lists them, followed by search \"<words>\" it searches them, and "
                 "followed by read <number> [part] it reads one.") in told
@@ -4421,9 +4575,10 @@ def test_the_sign_in_says_the_guide_was_emailed_only_when_it_was(run, fake, repo
     assert not (run.home / "guide-emailed").exists()
 
 
-def test_a_later_sign_in_that_sent_no_guide_says_nothing_of_it(run, fake, repo):
-    """The guide is emailed once: a sign-in after it, which the server says sent none, says nothing of a guide, and
-    neither does the other tool's first session after it, nor a server from before it said which sign-in sent it."""
+def test_a_later_sign_in_that_sent_no_guide_says_only_that_it_is_in_the_email(run, fake, repo):
+    """The guide is emailed once: a sign-in after it, which the server says sent none, says the guide is in the email
+    and never that it was emailed, and so does a server from before it said which sign-in sent it; the other tool's
+    first session after it says nothing of a guide being emailed."""
     fake.extra["/token"] = {"guide_emailed": True, "guide_emailed_now": True}
     run("sign-in", cwd=repo)
     fake.approved = True
@@ -4435,7 +4590,8 @@ def test_a_later_sign_in_that_sent_no_guide_says_nothing_of_it(run, fake, repo):
         run("sign-in", cwd=repo)
         fake.approved = True
         status = run("status", cwd=repo).stdout
-        assert "connected as sam@acme.test in Acme." in status and "emailed" not in status and "guide" not in status
+        assert "connected as sam@acme.test in Acme." in status and "emailed" not in status
+        assert "The guide to every command is in your email." in status
         assert "emailed" not in start(run, repo, "codex", f"s-{len(answer)}")["systemMessage"]
         run("sign-out", cwd=repo)
         fake.approved = False
@@ -4870,3 +5026,570 @@ def test_the_plugins_guidance_given_late_still_fits_with_a_full_inbox_and_a_long
     assert "── 1. From" not in told and "── 1. From Priya Raman" in said["systemMessage"]
     if tool is None:
         assert told.startswith("Vyavasta is connected for this developer.")
+
+
+# -- the plugin's network, sign-in and sessions ------------------------------------------------------------------------
+
+def closed_port() -> int:
+    """A port on this computer that nothing listens on."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+SIGNED_OUT = ("Vyavasta · nothing sent (you signed out on this computer) · Send “vyavasta sign in” to connect again. "
+              "Claude works as usual.")
+
+
+def test_signing_out_is_kept_to_until_the_developer_signs_in_again(run, fake, repo, tmp_path):
+    """Nothing starts signing in by itself after “vyavasta sign out”: no message, session or welcome sends the
+    computer's name or opens a page. “vyavasta sign in” does, and once it is approved the computer is connected."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    assert "until you send “vyavasta sign in”" in prompt(run, repo, "vyavasta sign out")["reason"]
+    fake.requests.clear()
+    for session in ("session-1", "session-2"):
+        assert prompt(run, repo, "Change calc.py", session=session)["systemMessage"] == SIGNED_OUT
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="session-3"), cwd=repo))
+    assert started["systemMessage"] == ("Vyavasta: you signed out on this computer, so nothing is checked. Send "
+                                        "“vyavasta sign in” to connect again. Claude works as usual.")
+    # A tool's first session after an update, in a project that is off, and turning another project on.
+    (run.home / "welcomed-codex").unlink(missing_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    welcome = start(run, elsewhere, "codex", "session-4")["systemMessage"]
+    assert "you signed out on this computer" in welcome
+    assert "you signed out on this computer" in run("on", cwd=elsewhere).stdout
+    assert "you signed out on this computer" in run("chat", cwd=repo).stdout
+    assert not fake.calls("/pair") and run.opened() == []
+    # Asked for, sign-in starts; approved, the next message connects, and the computer is signed in as before.
+    said = prompt(run, repo, "vyavasta sign in")["reason"]
+    assert "BCDF-GHJK" in said and len(fake.calls("/pair")) == 1 and run.opened() == ["http://127.0.0.1/connect"]
+    assert "Enter the code BCDF-GHJK" in prompt(run, repo, "Change calc.py")["systemMessage"]
+    fake.approved = True
+    assert "Connected as sam@acme.test in Acme." in prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert not (run.home / "signed-out").exists() and fake.calls("/check")
+
+
+def test_a_connection_ended_in_the_web_app_starts_no_sign_in_by_itself(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/check"] = 401
+    assert "connection to Vyavasta has ended" in prompt(run, repo, "Change calc.py")["systemMessage"]
+    del fake.status["/check"]
+    for _ in range(2):
+        assert prompt(run, repo, "Change calc.py")["systemMessage"] == (
+            "Vyavasta · nothing sent (this computer’s connection to Vyavasta has ended) · Send “vyavasta sign in” to "
+            "connect again. Claude works as usual.")
+    assert not fake.calls("/pair") and run.opened() == []
+
+
+def test_a_refusal_that_is_not_vyavastas_never_signs_the_computer_out(run, fake, repo):
+    """A page in between (a network's sign-in page, a proxy) that answers 401 is not Vyavasta ending the connection."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.page["/check"] = (401, b"<html><body>Sign in to the hotel network</body></html>")
+    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert "can’t be reached" in said and (run.home / "credentials").exists()
+    assert not (run.home / "signed-out").exists()
+
+
+def test_curl_reads_none_of_the_developers_settings_and_follows_no_redirect(run, fake, repo, tmp_path):
+    """A ~/.curlrc with “location” would send the message on to wherever a redirect points, and its 401 would sign the
+    developer out; with “dump-header” every answer would be unreadable. None of it applies."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (tmp_path / ".curlrc").write_text("location\ndump-header = -\nverbose\n")
+    other = Fake()
+    try:
+        fake.redirect["/check"] = f"{other.url}/api/v1/plugin/check"
+        said = prompt(run, repo, "Make add subtract")["systemMessage"]
+        assert "couldn’t check it just now" in said
+        assert other.requests == [] and (run.home / "credentials").exists()
+        del fake.redirect["/check"]
+        assert prompt(run, repo, "Make add subtract")["systemMessage"].endswith(fake.check["notice"])
+    finally:
+        other.server.shutdown()
+
+
+def curl_runs(tmp_path: Path, faster: dict[int, int] | None = None) -> tuple[str, Path]:
+    """A PATH whose curl writes down, one run to a line, the routes each run of it calls, then runs the real curl with
+    each limit in ``faster`` (seconds: seconds) made shorter, as if that much time had passed. The routes only: what
+    curl is told on its input holds the token."""
+    folder = tmp_path / "curl-runs"
+    folder.mkdir(exist_ok=True)
+    runs = tmp_path / "curl-runs.txt"
+    edits = " ".join(f"-e 's/^max-time = {was}$/max-time = {now}/'" for was, now in (faster or {}).items()) or "-e ''"
+    shim = folder / "curl"
+    shim.write_text(f"""#!/bin/sh
+told=$(cat)
+printf '%s\\n' "$told" | sed -n 's#^url = "[^"]*/api/v1/plugin\\([^"?]*\\).*#\\1#p' | tr '\\n' ' ' >> "{runs}"
+echo >> "{runs}"
+printf '%s\\n' "$told" | sed {edits} | exec "{shutil.which('curl')}" "$@"
+""")
+    shim.chmod(0o755)
+    return f"{folder}{os.pathsep}{os.environ['PATH']}", runs
+
+
+def test_a_server_that_takes_requests_and_never_answers_is_asked_a_quick_question_first(run, fake, repo, tmp_path):
+    """A read timeout: the request went out and no answer came. Each long call after it is made only once the server
+    answers a quick question at once (PROBE_SECONDS), in the same run of curl; while it doesn't, nothing more is sent.
+    A short call that runs out (a session's start, a turn's end) says nothing of it: under load it is only slow."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    # (The check's 75 seconds run out in 2 here.)
+    path, runs = curl_runs(tmp_path, {75: 2})
+    fake.delay["/me"] = 6
+    done = run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, extra={"PATH": path})
+    assert done.seconds < 6 and not (run.home / "slow").exists() and not (run.home / "offline").exists()
+    assert output(done)["systemMessage"].startswith("Vyavasta: the server took too long to answer just now")
+    del fake.delay["/me"]
+    fake.delay["/check"] = 5
+    said = prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"]
+    assert said == ("Vyavasta · sent: your message. · Vyavasta took too long to answer, so it wasn’t checked this time. "
+                    "Claude works as usual.")
+    assert (run.home / "slow").exists() and not (run.home / "offline").exists()
+    # Still nothing from it, not even to the quick question: nothing more is sent, after 4 seconds at most.
+    fake.delay["/hello"] = 6
+    fake.requests.clear()
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
+               extra={"PATH": path})
+    assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
+    assert output(done)["systemMessage"] == ("Vyavasta · nothing sent (Vyavasta’s server isn’t answering right now) · "
+                                             "Claude works as usual, and Vyavasta is tried again with your next message.")
+    assert (run.home / "slow").exists()
+    # It answers again: the quick question and the check go in one run of curl, and the calls after it are as usual.
+    del fake.delay["/hello"], fake.delay["/check"]
+    fake.requests.clear()
+    runs.write_text("")
+    assert prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"].endswith(fake.check["notice"])
+    assert [call["path"] for call in fake.requests] == ["/hello", "/check"] and runs.read_text() == "/hello /check \n"
+    assert not (run.home / "slow").exists()
+    fake.requests.clear()
+    prompt(run, repo, "Change calc.py")
+    assert [call["path"] for call in fake.requests] == ["/check"]
+
+
+def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
+    """Packets dropped on the way (a captive portal, a firewall, a VPN that isn't up): the connection times out with
+    nothing sent. The next minute's messages don't wait for it again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (run.home / "credentials").write_text(f"server=https://192.0.2.1\ntoken={TOKEN}\n")
+    first = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
+                server="https://192.0.2.1")
+    assert output(first)["systemMessage"] == ("Vyavasta · nothing sent (Vyavasta’s server can’t be reached) · Claude "
+                                              "works as usual, and Vyavasta is tried again in a minute.")
+    assert first.seconds < 8 and (run.home / "offline").exists() and not (run.home / "slow").exists()
+    second = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo,
+                 server="https://192.0.2.1")
+    assert output(second) == output(first) and second.seconds < 2
+
+
+def test_inside_codexs_sandbox_nothing_is_learnt_of_the_server(run, fake, repo):
+    """The network is off there by design: a command the model runs inside it never makes the next messages skip
+    Vyavasta."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    closed = closed_port()
+    (run.home / "credentials").write_text(f"server=http://127.0.0.1:{closed}\ntoken={TOKEN}\n")
+    for command in (("status",), ("check",), ("ask", "Who owns billing?")):
+        run(*command, cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}", extra={"CODEX_SANDBOX": "seatbelt"})
+    assert not (run.home / "offline").exists() and not (run.home / "slow").exists()
+    run("status", cwd=repo, tool="codex", server=f"http://127.0.0.1:{closed}")
+    assert (run.home / "offline").exists()
+
+
+def test_a_hook_told_to_stop_stops_at_once_and_takes_its_scratch_files_with_it(request, run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    sharing_on(run, fake, repo)
+    (repo / "calc.py").write_text(f"# {SECRET}\n")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    fake.delay["/check"] = 30
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "VYAVASTA_HOME": str(run.home),
+           "VYAVASTA_SERVER": fake.url, "TMPDIR": str(scratch)}
+    shell = request.node.callspec.params["run"]
+    hook = subprocess.Popen([shell, str(SCRIPT), "hook", "prompt"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env, cwd=repo)
+    hook.stdin.write(json.dumps(event("UserPromptSubmit", repo, prompt="Change calc.py")).encode())
+    hook.stdin.close()
+    for _ in range(100):
+        if fake.calls("/check"):
+            break
+        time.sleep(0.05)
+    folders = list(scratch.glob("vyavasta.*"))
+    assert len(folders) == 1 and folders[0].is_dir()
+    told = time.monotonic()
+    hook.terminate()
+    hook.wait(timeout=10)
+    assert time.monotonic() - told < 2 and not list(scratch.iterdir())
+    hook.stdout.close()
+    hook.stderr.close()
+
+
+def test_scratch_folders_a_killed_hook_left_are_removed_when_a_session_starts(run, fake, repo, tmp_path):
+    scratch = tmp_path / "scratch"
+    (scratch / "vyavasta.abc123").mkdir(parents=True)
+    (scratch / "vyavasta.abc123" / "check").write_text("the developer's words")
+    (scratch / "vyavasta.def456").mkdir()
+    (scratch / "someone-else.ghi789").mkdir()
+    old = time.time() - 2 * 3600
+    for name in ("vyavasta.abc123", "someone-else.ghi789"):
+        os.utime(scratch / name, (old, old))
+    run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo, extra={"TMPDIR": str(scratch)})
+    assert sorted(path.name for path in scratch.iterdir()) == ["someone-else.ghi789", "vyavasta.def456"]
+
+
+def test_links_devices_and_large_files_are_named_and_never_read(run, fake, repo, tmp_path):
+    """Only small regular files are opened to count their lines: an untracked link to a large file or to a device,
+    and a pipe, are listed by name with no count, and none can slow a hook down or hold it up."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    big = tmp_path / "big.csv"
+    with big.open("wb") as data:
+        data.truncate(300_000_000)
+    (repo / "data.csv").symlink_to(big)
+    (repo / "zero.txt").symlink_to("/dev/zero")
+    os.mkfifo(repo / "queue")
+    (repo / "queue-link").symlink_to(repo / "queue")
+    (repo / "note.txt").write_text("one\ntwo\n")
+    done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo)
+    assert done.seconds < 5
+    files = {entry["path"]: entry for entry in fake.calls("/work")[-1]["body"]["files"]}
+    assert files["note.txt"]["additions"] == 2
+    for name in ("data.csv", "zero.txt", "queue-link"):
+        assert files[name]["additions"] == 0, name
+    done = run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Write"), cwd=repo)
+    assert done.seconds < 5
+
+
+def test_a_repositorys_own_filters_never_run_and_the_developers_own_are_left_alone(run, fake, repo, tmp_path):
+    """A repository that came as a folder names its own filter programs, in its .git/config, a file it includes, or
+    for files named in .git/info/attributes: none of them runs. A filter the developer set up for every repository
+    (git-lfs's, say) is used as git always uses it."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    sharing_on(run, fake, repo)
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    def ran(name: str) -> str:
+        return f"sh -c 'touch {marks}/{name}; cat'"
+    git(repo, "config", "filter.evil.clean", ran("clean"))
+    git(repo, "config", "filter.evil.smudge", ran("smudge"))
+    git(repo, "config", "filter.evil.required", "true")
+    git(repo, "config", "--file", str(tmp_path / "included.cfg"), "filter.from include.clean", ran("included"))
+    git(repo, "config", "include.path", str(tmp_path / "included.cfg"))
+    git(repo, "config", "filter.mine.clean", ran("mine"))
+    # (The developer's own settings: the hooks run with HOME there.)
+    git(repo, "config", "--file", str(tmp_path / ".gitconfig"), "filter.mine.clean", ran("mine"))
+    (repo / ".gitattributes").write_text("calc.py filter=evil\nold.py filter=mine\n")
+    (repo / ".git" / "info" / "attributes").write_text("gone.py filter=from\\ include\n")
+    for name in ("calc.py", "old.py", "gone.py"):
+        (repo / name).write_text("changed\n")
+    prompt(run, repo, "Change calc.py")
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Write"), cwd=repo)
+    stop(run, repo, last_assistant_message="Done.")
+    assert sorted(path.name for path in marks.iterdir()) == ["mine"]
+    assert fake.calls("/check")[-1]["body"]["change"]["files"] >= 1
+
+
+def test_an_answer_that_is_not_vyavastas_is_never_told_as_checked(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.page["/check"] = (200, b"<!doctype html><html><body>App</body></html>")
+    assert prompt(run, repo, "Change calc.py")["systemMessage"] == (
+        "Vyavasta · sent: your message. · Vyavasta’s answer couldn’t be read, so your message wasn’t checked. Claude "
+        "works as usual.")
+    fake.page["/me"] = (200, b"<!doctype html><html><body>App</body></html>")
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert said == ("Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. Claude works "
+                    "as usual.")
+    # A hold whose way on isn't a string of the server's: going on prints valid JSON with nothing of it.
+    del fake.page["/check"]
+    for context in (None, {"a": 1}, 7):
+        fake.check = {"verdict": "held", "hold": True, "notice": "Priya said the export stays.",
+                      "anyway": {"context": context}}
+        prompt(run, repo, "Change calc.py")
+        went = prompt(run, repo, "Plan it anyway")
+        assert "additionalContext" not in json.dumps(went), context
+
+
+@pytest.mark.parametrize("status, said", [
+    (429, "Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for "
+          "a moment. Claude works as usual."),
+    (503, "Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. Claude works as "
+          "usual.")])
+def test_a_session_start_says_what_came_of_the_server_as_it_is(run, fake, repo, status, said):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/me"] = status
+    assert output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"] == said
+    assert not (run.home / "offline").exists()
+
+
+def tools_without(tmp_path: Path, *missing: str) -> str:
+    """A PATH with every program this computer has but those named."""
+    folder = tmp_path / ("bin-without-" + "-".join(missing))
+    folder.mkdir()
+    for place in os.environ["PATH"].split(os.pathsep):
+        if not os.path.isdir(place):
+            continue
+        for name in os.listdir(place):
+            target = os.path.join(place, name)
+            if name not in missing and not (folder / name).exists() and os.access(target, os.X_OK):
+                (folder / name).symlink_to(target)
+    return str(folder)
+
+
+def test_without_git_or_curl_the_plugin_says_so(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    nogit = tools_without(tmp_path, "git")
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo,
+                      extra={"PATH": nogit}))["systemMessage"]
+    assert "Vyavasta needs git, which isn’t installed here, so requests aren’t checked" in said
+    assert "isn’t a git repository" not in said
+    nocurl = tools_without(tmp_path, "curl")
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo,
+                      extra={"PATH": nocurl}))["systemMessage"]
+    assert said == "Vyavasta needs curl, which isn’t installed here, so nothing is checked. Claude works as usual."
+    assert prompt(run, repo, "Change calc.py", extra={"PATH": nocurl})["systemMessage"] == (
+        "Vyavasta · nothing sent (Vyavasta needs curl, which isn’t installed here) · Claude works as usual.")
+    assert not (run.home / "offline").exists()
+
+
+@pytest.mark.parametrize("source", ["compact", "resume", "clear"])
+def test_a_session_that_goes_on_keeps_its_turn_and_tells_the_model_again_without_greeting(run, fake, repo, source):
+    """A compaction can come in the middle of a turn: the message kept for the summary still gets its reply, the
+    developer isn't greeted again, nothing is fetched again, and the model, which lost what it was told, is told it
+    again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    first = output(run("hook", "session-start", stdin=event("SessionStart", repo, source="startup"), cwd=repo))
+    prompt(run, repo, "Change calc.py")
+    fake.requests.clear()
+    again = output(run("hook", "session-start", stdin=event("SessionStart", repo, source=source), cwd=repo))
+    assert "systemMessage" not in again
+    assert again["hookSpecificOutput"] == first["hookSpecificOutput"]
+    assert fake.requests == []
+    stop(run, repo, last_assistant_message="Done, after the compaction.")
+    (turn,) = fake.calls("/turn")
+    assert turn["body"]["reply"] == "Done, after the compaction."
+
+
+def test_a_newer_server_takes_the_report_the_question_the_inbox_and_the_reply_in_fewer_calls(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.combined = True
+    (repo / "calc.py").write_text("changed\n")
+    # A change request with changed files: the report goes with the check.
+    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert [call["path"] for call in fake.requests] == ["/check"]
+    assert fake.calls("/check")[0]["body"]["work"]["files"][0]["path"] == "calc.py"
+    assert "and 1 changed file’s name" in said
+    # The turn's end: the reply carries the report.
+    fake.requests.clear()
+    stop(run, repo, last_assistant_message="Done.")
+    assert [call["path"] for call in fake.requests] == ["/turn"] and fake.calls("/turn")[0]["body"]["work"]
+    # A question about the team: asked by the server with the check; a slow one waited for as before.
+    fake.check = QUESTION
+    fake.requests.clear()
+    said = prompt(run, repo, "What is Priya doing?")
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
+    assert [call["path"] for call in fake.requests] == ["/check"]
+    fake.slow, fake.asked_in_check = 1, 0
+    fake.requests.clear()
+    said = prompt(run, repo, "What is Priya doing?")
+    assert [call["path"] for call in fake.requests] == ["/check", "/ask"]
+    assert fake.calls("/ask")[0]["body"] == {"waiting": "msg_9", "tool": "claude-code"}
+    # A session's start: what teammates sent comes with /me.
+    fake.inbox = INBOX
+    fake.requests.clear()
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))
+    assert [call["path"] for call in fake.requests] == ["/me"] and "While you were away:" in started["systemMessage"]
+    assert fake.calls("/me")[0]["query"] == {"inbox": ["1"]}
+
+
+def test_a_call_dropped_after_it_went_out_is_sent_once_more_with_its_own_id(run, fake, repo):
+    """The server answers a repeat of a request_id as it answered the first and keeps nothing twice."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.combined = True
+    fake.drop["/check"] = 1
+    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert said.endswith(fake.check["notice"])
+    first, second = fake.calls("/check")
+    assert first["body"]["request_id"] == second["body"]["request_id"]
+    fake.drop["/tell"] = 1
+    run("tell", "Priya", "the", "fix", "is", "pushed", cwd=repo)
+    first, second = fake.calls("/tell")
+    assert first["body"]["request_id"] == second["body"]["request_id"]
+    # Each message has an id of its own.
+    prompt(run, repo, "Change old.py")
+    assert fake.calls("/check")[-1]["body"]["request_id"] != first["body"]["request_id"]
+
+
+def test_a_turn_that_ended_in_an_error_reports_its_work_and_no_reply(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change calc.py")
+    (repo / "calc.py").write_text("changed\n")
+    fake.requests.clear()
+    fake.extra["/work"] = {"conflict": CONFLICT}
+    done = run("hook", "stopped", stdin=event("StopFailure", repo, error="rate_limit",
+                                              last_assistant_message="API Error: Rate limited"), cwd=repo)
+    assert done.stdout == ""
+    assert [call["path"] for call in fake.requests] == ["/work"]
+    assert not list(run.home.glob("sessions/*/turn-waiting"))
+    # A conflict that report found waits to be told: the next turn's end says it.
+    assert output(stop(run, repo, last_assistant_message="Done."))["systemMessage"].startswith(CONFLICT["notice"])
+
+
+def test_codex_is_told_of_a_conflict_right_after_the_edit(run, fake, repo):
+    """Codex goes on after a hook stops it after an edit: the developer is shown what stands, and Codex's model is
+    given what to do in place of the edit's result."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/work"] = {"conflict": CONFLICT}
+    (repo / "calc.py").write_text("changed\n")
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="apply_patch"), cwd=repo, tool="codex")
+    said = output(run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="apply_patch"), cwd=repo,
+                      tool="codex"))
+    # (The edit was made: its result stands, and what Codex's model sees in its place says what to do.)
+    assert said["continue"] is False and "decision" not in said
+    assert said["reason"].startswith(CONFLICT["notice"])
+    assert said["reason"].endswith("The edit was made. Make no more edits: tell the developer what stands against the "
+                                   "change, and ask whether to continue or stop.")
+    assert said["stopReason"].endswith("Send “continue” to go on, or “stop” to leave the change where it is.")
+    # Told once.
+    assert run("hook", "edit-check", stdin=event("PostToolUse", repo), cwd=repo, tool="codex").stdout == ""
+
+
+def test_signing_in_again_says_the_guide_is_in_the_email_already(run, fake, repo):
+    fake.extra["/token"] = {"guide_emailed": True, "guide_emailed_now": False}
+    run("sign-in", cwd=repo)
+    fake.approved = True
+    status = run("status", cwd=repo).stdout
+    assert "The guide to every command is in your email." in status and "was emailed to you" not in status
+
+
+def unsent(run) -> list[Path]:
+    """The calls kept to go along with a later one, oldest first."""
+    return sorted((run.home / "unsent").glob("*.json")) if (run.home / "unsent").exists() else []
+
+
+def test_a_reply_that_could_not_be_sent_goes_along_with_the_next_message_once(run, fake, repo, tmp_path):
+    """A turn's end that fails or runs out keeps its reply on this computer, readable by the developer only, and the
+    next message's run of curl sends it after the check, with the same request_id, so that the server keeps it once."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change calc.py")
+    fake.status["/turn"] = 503
+    assert stop(run, repo, last_assistant_message="Changed calc.py.").stdout == ""
+    (failed,) = fake.calls("/turn")
+    (kept,) = unsent(run)
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o600 and stat.S_IMODE(kept.parent.stat().st_mode) == 0o700
+    assert json.loads(kept.read_text()) == failed["body"]
+    assert not list(run.home.glob("sessions/*/turn-waiting"))
+    del fake.status["/turn"]
+    path, runs = curl_runs(tmp_path)
+    fake.requests.clear()
+    prompt(run, repo, "Change old.py", extra={"PATH": path})
+    assert [call["path"] for call in fake.requests] == ["/check", "/turn"] and runs.read_text() == "/check /turn \n"
+    (again,) = fake.calls("/turn")
+    assert again["body"] == failed["body"] and again["body"]["message_id"] == "msg_1"
+    assert again["body"]["reply"] == "Changed calc.py." and unsent(run) == []
+    # Sent once: the next message sends only itself.
+    fake.requests.clear()
+    prompt(run, repo, "Change gone.py")
+    assert [call["path"] for call in fake.requests] == ["/check"]
+
+
+def test_what_is_kept_to_send_later_is_bounded_and_follows_the_developers_choices(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/turn"] = 503
+    for n in range(12):
+        prompt(run, repo, f"Change calc.py, step {n}")
+        stop(run, repo, last_assistant_message=f"Step {n}.")
+    # At most ten, the newest.
+    kept = unsent(run)
+    assert len(kept) == 10 and json.loads(kept[0].read_text())["reply"] == "Step 2."
+    del fake.status["/turn"]
+    # Kept too long (the server knows a request_id for an hour): given up, never sent.
+    old = kept[0].with_name("1000000000-" + kept[0].name.split("-", 1)[1])
+    kept[0].rename(old)
+    kept[0].with_suffix(".about").rename(old.with_suffix(".about"))
+    fake.requests.clear()
+    prompt(run, repo, "Change old.py")
+    assert fake.calls("/turn")[0]["body"]["reply"] == "Step 3."
+    assert not old.exists() and len(unsent(run)) == 8
+    # Summaries off: no reply goes any more; and signing out forgets the rest.
+    run("summaries", "off", cwd=repo)
+    fake.requests.clear()
+    prompt(run, repo, "Change old.py")
+    assert not fake.calls("/turn") and unsent(run) == []
+    run("summaries", "on", cwd=repo)
+    fake.status["/turn"] = 503
+    prompt(run, repo, "Change calc.py")
+    stop(run, repo, last_assistant_message="Done.")
+    assert len(unsent(run)) == 1
+    run("sign-out", cwd=repo)
+    assert unsent(run) == [] and not (run.home / "unsent").exists()
+
+
+def test_a_work_report_that_could_not_be_sent_goes_along_later_unless_a_newer_one_was_taken(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("changed\n")
+    fake.status["/work"] = 503
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"), cwd=repo)
+    (kept,) = unsent(run)
+    assert json.loads(kept.read_text())["files"][0]["path"] == "calc.py" and "-work-session-1" in kept.name
+    del fake.status["/work"]
+    # Another session's message takes it along.
+    path, runs = curl_runs(tmp_path)
+    fake.requests.clear()
+    prompt(run, repo, "Write the docs", session="session-2", extra={"PATH": path})
+    assert runs.read_text().startswith("/check /work \n") and unsent(run) == []
+    assert fake.calls("/work")[0]["body"]["session"] == "session-1"
+    # A newer report of the same session, taken, gives the kept one up.
+    fake.status["/work"] = 503
+    stop(run, repo, session="session-3", last_assistant_message="Done.")
+    assert len(unsent(run)) == 1
+    del fake.status["/work"]
+    fake.requests.clear()
+    stop(run, repo, session="session-3", last_assistant_message="Done.")
+    assert len(fake.calls("/work")) == 1 and unsent(run) == []
+
+
+@pytest.mark.parametrize("waiting, said", [
+    (2, "Vyavasta: teammates sent you 2 messages. They come with your next message, or send “vyavasta inbox” to read "
+        "them now."),
+    (1, "Vyavasta: a teammate sent you a message. It comes with your next message, or send “vyavasta inbox” to read it "
+        "now."),
+    (0, None)])
+def test_a_turns_end_says_when_teammates_messages_wait_and_marks_none_read(run, fake, repo, waiting, said):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/turn"] = {"inbox_waiting": waiting}
+    prompt(run, repo, "Change calc.py")
+    fake.requests.clear()
+    done = stop(run, repo, last_assistant_message="Done.")
+    assert output(done) == ({"systemMessage": said} if said else {})
+    assert [call["path"] for call in fake.requests] == ["/turn"]
+
+
+def test_a_turns_end_says_a_conflict_and_waiting_messages_in_one_line(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/turn"] = {"inbox_waiting": 3}
+    fake.extra["/work"] = {"conflict": CONFLICT}
+    prompt(run, repo, "Change calc.py")
+    (repo / "calc.py").write_text("changed\n")
+    said = output(stop(run, repo, last_assistant_message="Done."))["systemMessage"]
+    assert said.startswith(CONFLICT["notice"]) and "Send “continue” to go on" in said
+    assert said.endswith("\n\nVyavasta: teammates sent you 3 messages. They come with your next message, or send "
+                         "“vyavasta inbox” to read them now.")

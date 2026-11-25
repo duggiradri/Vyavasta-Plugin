@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook session-start",
+            "command": "env VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook session-start",
             "timeout": 15,
             "statusMessage": "Connecting to Vyavasta"
           }
@@ -18,9 +18,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook prompt",
+            "command": "env VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook prompt",
             "timeout": 270,
-            "statusMessage": "Checking against your team’s record"
+            "statusMessage": "Waiting for Vyavasta"
           }
         ]
       }
@@ -31,9 +31,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook edited",
+            "command": "env VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook edited",
             "async": true,
             "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook edit-check",
+            "timeout": 5
           }
         ]
       }
@@ -43,8 +53,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook stopped",
-            "timeout": 20
+            "command": "env VYAVASTA_TOOL=codex sh \"${PLUGIN_ROOT}/scripts/vyavasta.sh\" hook stopped",
+            "timeout": 20,
+            "statusMessage": "Sending your work to Vyavasta"
           }
         ]
       }

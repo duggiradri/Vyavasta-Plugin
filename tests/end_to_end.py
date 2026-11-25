@@ -141,17 +141,28 @@ def main() -> int:
         if not condition:
             failures.append(what)
 
+    # The file Claude Code gives a session's start to leave variables in, which it reads into every command the
+    # session runs after it (the model's own, and a slash command's).
+    claude_env = work / "claude-env"
+    claude_env.write_text("")
+
     def plugin(*command: str, stdin: dict | None = None, cwd: Path | None = None, typed: str | None = None,
                home_dir: Path | None = None) -> str:
         # (``typed``: what stands on the command's input as it is, as a message for a teammate does; ``home_dir``:
         # another person's settings folder, as on their own computer.)
+        given = {} if home_dir is not None else dict(
+            line.removeprefix("export ").split("=", 1) for line in claude_env.read_text().splitlines() if "=" in line)
+        if command[:2] == ("hook", "session-start"):
+            given = {"CLAUDE_ENV_FILE": str(claude_env)}
+        elif command[:1] == ("hook",):
+            given = {}
         done = subprocess.run(["sh", str(SCRIPT), *command],
                               input=typed if typed is not None else json.dumps(stdin) if stdin else "",
                               capture_output=True, text=True, cwd=cwd or work, timeout=120, env={
                                   "PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTA_HOME": str(home_dir or home),
                                   "VYAVASTA_SERVER": base, "CLAUDE_PROJECT_DIR": str(cwd or work),
                                   # Pages the plugin opens (sign-in, the session's chat) are not opened here.
-                                  "VYAVASTA_BROWSER": "true"})
+                                  "VYAVASTA_BROWSER": "true", **given})
         if done.returncode != 0:
             failures.append(f"{' '.join(command)} exited {done.returncode}: {done.stderr}")
         return done.stdout
@@ -230,13 +241,13 @@ def main() -> int:
                "after approving, Sam’s next ordinary message finishes connecting, says so, and goes through")
         guides = [mail for mail in sam.ok("GET", "/demo/inbox?email=sam@northwind.dev")
                   if mail["subject"] == "Vyavasta in Claude Code and Codex: your guide (keep this email)"]
-        # (The line says so where the server says which sign-in sent it, as a server since 0.6.0 does; with an older
-        # one it says nothing of a guide, never something untrue.)
+        # (The line says this sign-in sent the guide where the server says which sign-in sent it, as a server since
+        # 0.6.0 does; with an older one, which says only that a guide was sent, it says the guide is in the email.)
         tells_which = "guide_emailed_now" in (project / "src" / "mas_stealth" / "product" / "plugin_api.py").read_text()
-        expect(len(guides) == 1 and ("A guide to every command was emailed to you; it is worth keeping."
-                                     in said["systemMessage"]) == tells_which,
-               "the first connection brings the guide to every command by email, once, and the line says so where the "
-               "server says this sign-in sent it")
+        told = ("A guide to every command was emailed to you; it is worth keeping." if tells_which
+                else "The guide to every command is in your email.")
+        expect(len(guides) == 1 and told in said["systemMessage"],
+               "the first connection brings the guide to every command by email, once, and the line says so")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta how do I sign in?")
         expect(said.get("decision") == "block" and "You’re signed in as sam@northwind.dev" in said.get("reason", ""),
                "asking how to sign in is answered with help, which says Sam is signed in")
@@ -402,7 +413,10 @@ def main() -> int:
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Vyavasta, what is the refund window?")
         context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
         print("  the answer's context ends: " + context[-300:].replace("\n", " "))
-        expect(f'run sh "{SCRIPT}" documents to list them' in context and "read <number> [part]" in context
+        # (By the copy of the script a session's start keeps in the settings folder, whose path stays the same when
+        # the plugin is updated.)
+        expect(f'run sh "{home}/bin/vyavasta-claude-code.sh" documents to list them' in context
+               and "read <number> [part]" in context
                and "drew on the team’s documents" in context,
                "an answer of Vyavasta’s that drew on a document gives Claude the commands that read them")
         shared = plugin("shared", cwd=repo)
@@ -490,7 +504,7 @@ def main() -> int:
         context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
         # (Ganesh joined by invitation and gave no name: he is named as the rest of the app names him.)
         expect("decision" not in said and "The developer’s message mentions ganesh with “@”." in context
-               and f'sh "{SCRIPT}" tell "<the teammate’s name>" <<\'MESSAGE\'' in context,
+               and f'sh "{home}/bin/vyavasta-claude-code.sh" tell "<the teammate’s name>" <<\'MESSAGE\'' in context,
                "a message that asks for work and for a teammate to be told goes on to Claude, with the command that "
                "sends a teammate a message")
         # Claude does the work, then runs that command, the message on its input, taken as it is.
@@ -592,8 +606,12 @@ def main() -> int:
         expect("connection to Vyavasta has ended" in said.get("systemMessage", "") and not (home / "credentials").exists(),
                "the next request goes on unchecked, and the plugin says it was signed out")
         said = hook("session-start", "SessionStart", repo, source="startup")
-        expect("To connect, enter the code " in said.get("systemMessage", ""),
-               "the next session in the project starts signing in again by itself")
+        expect("connection to Vyavasta has ended" in said.get("systemMessage", "")
+               and "“vyavasta sign in”" in said.get("systemMessage", "") and not (home / "pairing").exists(),
+               "the next session in the project starts no sign-in by itself, and says how to connect again")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta sign in")
+        expect("enter the code " in said.get("reason", "") and (home / "pairing").exists(),
+               "“vyavasta sign in” starts it")
     finally:
         server.terminate()
         try:

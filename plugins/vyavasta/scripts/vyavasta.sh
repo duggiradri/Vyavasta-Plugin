@@ -39,7 +39,7 @@ VYAVASTA_BROWSER="${VYAVASTA_BROWSER:-${VYAVASTHA_BROWSER:-}}"
 VYAVASTA_SESSION="${VYAVASTA_SESSION:-${VYAVASTHA_SESSION:-}}"
 # Every git command here, through this one door: a repository's own settings never run a program on this computer
 # when the plugin reads it (one that came as a folder rather than a clone can name one, to watch its files or as its
-# hooks).
+# hooks; its filters are switched off by `quiet_filters`, and the diffs' own programs by DIFF_OPTIONS).
 git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # Nothing a command writes to its error output ever reaches the developer or the tool: each failure has its own
 # plain sentence instead.
@@ -63,16 +63,22 @@ WAY_IN_AGAIN="Send “vyavasta sign in” to connect again."
 # What a server that checks no request does instead (/me says `"checks": false`: the demo, or one with no model),
 # said wherever a line would otherwise say that requests are checked.
 UNCHECKED="This Vyavasta server doesn’t check requests, so ${AGENT} is shown what your team has said about each one instead."
-# This script, by its full path: what the tool's model is told to run to ask Vyavasta a question. (Its folder and name
-# are taken from the path it was run by with the shell's own words, not with programs: this runs before the check
-# after every edit, which then starts no program until it knows a conflict waits.)
+# This script, by its full path. (Its folder and name are taken from the path it was run by with the shell's own words,
+# not with programs: this runs before the check after every edit, which then starts no program until it knows a
+# conflict waits.)
 case "$0" in */*) SELF_DIR=${0%/*} ;; *) SELF_DIR=. ;; esac
 SELF="$(cd "${SELF_DIR:-/}" && pwd)/${0##*/}"
-case "$CLIENT" in codex) ASK_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
-# And what it is told to run to send a teammate a message: the same script, with who it is for and the words.
-case "$CLIENT" in codex) TELL_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" tell" ;; *) TELL_WITH="sh \"$SELF\" tell" ;; esac
-# And what it is told to run to list, search and read the team's documents: the same script, with “documents”.
-case "$CLIENT" in codex) DOCS_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" documents" ;; *) DOCS_WITH="sh \"$SELF\" documents" ;; esac
+# What the tool's model is told to run to ask Vyavasta a question, to send a teammate a message (the same script, with
+# who it is for and the words) and to list, search and read the team's documents (with “documents”): the script at
+# $1, run by sh, with the tool's name given for Codex through env, so that any login shell runs it. TOLD_SELF is $1.
+model_commands() {
+  case "$CLIENT" in codex) lead="env VYAVASTA_TOOL=codex " ;; *) lead="" ;; esac
+  ASK_WITH="${lead}sh \"$1\" ask"
+  TELL_WITH="${lead}sh \"$1\" tell"
+  DOCS_WITH="${lead}sh \"$1\" documents"
+  TOLD_SELF=$1
+}
+model_commands "$SELF"
 # How Codex's model is to run that command, said where it is given the command and again where the command finds
 # itself inside the sandbox: outside it, which Codex's model may ask for (the request is approved by the developer or
 # by Codex's own reviewer), and what to tell the developer when it is refused.
@@ -101,23 +107,43 @@ CREDENTIALS="$HOME_DIR/credentials"
 PENDING="$HOME_DIR/pairing"
 SESSIONS="$HOME_DIR/sessions"
 PROJECTS="$HOME_DIR/projects"
+UNSENT="$HOME_DIR/unsent"
 
-# The one check that runs after every edit in Claude Code: whether a conflict is waiting to be told. It costs a
-# file test when there is none, so it is answered as soon as the settings folder is known, before anything else
-# is set up.
+# The one check that runs after every edit, in both tools: whether a conflict is waiting to be told. It costs a file
+# test when there is none, so it is answered as soon as the settings folder is known, before anything else is set up.
+# Claude Code is stopped (conflict-stop); Codex, which goes on after a hook stops it there, shows the developer the
+# same, and its model is given what to do in place of the edit's result (conflict-block).
 if [ "${1:-}" = "hook" ] && [ "${2:-}" = "edit-check" ]; then
-  set -- "$SESSIONS"/*/conflict-stop
+  if [ "$CLIENT" = "codex" ]; then told=conflict-block; else told=conflict-stop; fi
+  set -- "$SESSIONS"/*/"$told"
   if [ ! -f "$1" ]; then cat >/dev/null; exit 0; fi
   id=$(head -c 65536 | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' | sed -n '1p')
   id=$(printf '%s' "$id" | cut -c1-80)
   [ -n "$id" ] || id="no-session"
-  if [ -f "$SESSIONS/$id/conflict-stop" ]; then
-    cat "$SESSIONS/$id/conflict-stop"
-    rm -f "$SESSIONS/$id/conflict-stop" "$SESSIONS/$id/conflict-say"
+  if [ -f "$SESSIONS/$id/$told" ]; then
+    cat "$SESSIONS/$id/$told"
+    rm -f "$SESSIONS/$id/conflict-stop" "$SESSIONS/$id/conflict-say" "$SESSIONS/$id/conflict-block"
   fi
   exit 0
 fi
 
+# The copy of this script that the tool's model is told to run, one for each tool, in the settings folder: made at a
+# session's start (`keep_model_copy`), its path stays the same when the tool updates the plugin and deletes the folder
+# of the version that runs. It is told wherever this script would be, while it is this very script; otherwise this
+# script's own path is.
+MODEL_COPY="$HOME_DIR/bin/vyavasta-$CLIENT.sh"
+case "${1:-} ${2:-}" in
+  "hook session-start"|"hook prompt"|ask\ *|tell\ *|documents\ *|docs\ *|settings\ *)
+    [ -f "$MODEL_COPY" ] && cmp -s "$SELF" "$MODEL_COPY" && model_commands "$MODEL_COPY" ;;
+esac
+# Writes that copy when it isn't this script already, all at once and readable by the developer only, and tells it
+# from then on. Quiet when it can't (the model is then told this script's own path).
+keep_model_copy() {
+  [ "$TOLD_SELF" != "$MODEL_COPY" ] || return 0
+  mkdir -p "$HOME_DIR/bin" && chmod 700 "$HOME_DIR/bin" && cp "$SELF" "$MODEL_COPY.$$" && chmod 600 "$MODEL_COPY.$$" \
+    && mv -f "$MODEL_COPY.$$" "$MODEL_COPY" && model_commands "$MODEL_COPY"
+  rm -f "$MODEL_COPY.$$"
+}
 # A file that is there once this tool has welcomed the developer on this computer. The sign-in and the settings are
 # one for both tools; the welcome is each tool's own, so the first session of each says it, whatever the other did
 # before. (A version before 0.5.3 kept one file for the computer, `welcomed`, which doesn't say which tool wrote it:
@@ -162,10 +188,11 @@ esac
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
 # How long one call for the answer to a question may take, and for how long in all calls go on waiting for an
-# answer that is not ready: the assistant may read the record and look things up, and no call stays open for long.
+# answer that is not ready, from the hook's start: the assistant may read the record and look things up, and after
+# about a minute the tool goes on, the answer left in the developer's chat in Vyavasta.
 ASK_SECONDS=55
 ASK_AGAIN=5
-WAIT_FOR=240
+WAIT_FOR=60
 REPORT_SECONDS=8
 QUICK_SECONDS=8
 # A session's start may take 15 seconds in all, so each call it makes is shorter than that.
@@ -178,6 +205,17 @@ TURN_SECONDS=4
 # again for this long.
 REPORT_EVERY=10
 OFFLINE_FOR=60
+# A call that may take longer than SLOW_SECONDS and that the server took and answered nothing to in time makes every
+# such call after it wait for a quick answer first (PROBE_SECONDS at most), until the server answers one or SLOW_FOR
+# seconds have passed.
+SLOW_SECONDS=10
+SLOW_FOR=600
+PROBE_SECONDS=4
+# A reply or a work report that couldn't be sent is kept for this long at most (the server knows a request_id for an
+# hour), at most this many at once, and goes along with a later call, which waits this long for it at most.
+UNSENT_FOR=3000
+UNSENT_MOST=10
+RIDE_SECONDS=4
 # How much of the uncommitted changes is sent at most, unless the server says otherwise, and the longest line.
 CHANGE_LINES=5000
 CHANGE_BYTES=600000
@@ -187,7 +225,8 @@ REPLY_CHARACTERS=4000
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 STARTED_AT=$(date +%s)
 
-TMP=$(mktemp -d 2>/dev/null || mktemp -d -t vyavasta 2>/dev/null)
+# The scratch folder, named so that one a killed hook left behind is known for the plugin's own (`sweep_scratch`).
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/vyavasta.XXXXXX" 2>/dev/null || mktemp -d 2>/dev/null || mktemp -d -t vyavasta 2>/dev/null)
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   # No folder for scratch files at all: a sandbox (Codex's keeps its model's commands to the workspace).
   TMP="$HOME_DIR/tmp.$$"
@@ -205,7 +244,20 @@ if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   }
 fi
 trap 'rm -rf "$TMP"' EXIT
-trap 'exit 0' INT TERM HUP
+# A hook told to stop (the tool's time for it ran out) stops at once, its call to the server with it (CURL, while one
+# runs), and its scratch files go with it.
+trap '[ -z "${CURL:-}" ] || kill "$CURL" 2>/dev/null; exit 0' INT TERM HUP
+# What this computer lacks of what the plugin needs, said as that wherever it would otherwise look like something else
+# (a folder outside git, a server out of reach).
+NOGIT=""; NOCURL=""
+command -v git >/dev/null 2>&1 || NOGIT=1
+command -v curl >/dev/null 2>&1 || NOCURL=1
+
+# Scratch folders a hook left behind when it was killed (one holds a message, or the changes, while its hook runs):
+# removed once they are an hour old, when a session starts.
+sweep_scratch() {
+  find "${TMPDIR:-/tmp}" -mindepth 1 -maxdepth 1 -type d -name 'vyavasta.??????' -mmin +60 -exec rm -rf {} + 2>/dev/null
+}
 
 # -- JSON, with awk ---------------------------------------------------------------------------------------
 
@@ -703,6 +755,10 @@ keep_credentials() {
   } > "$CREDENTIALS.new" && chmod 600 "$CREDENTIALS.new"
   mv -f "$CREDENTIALS.new" "$CREDENTIALS"
   forget_told
+  # Signed in again: whatever signed this computer out before is over.
+  rm -f "$HOME_DIR/signed-out"
+  # (And nothing kept to send for another connection goes with this one.)
+  rm -rf "$UNSENT"
 }
 
 # What each project last told the server about code sharing belongs to one connection: the server forgets it when
@@ -737,15 +793,45 @@ now() { date +%s; }
 offline() {
   [ -f "$HOME_DIR/offline" ] || return 1
   since=$(cat "$HOME_DIR/offline")
-  [ -n "$since" ] && [ $(( $(now) - since )) -lt "$OFFLINE_FOR" ]
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  [ $(( $(now) - since )) -lt "$OFFLINE_FOR" ]
+}
+
+# Whether a long call went unanswered a short while ago (SLOW_FOR): each long call after it waits for a quick answer
+# first (`api`), so a server that takes calls and never answers costs seconds, not minutes, each time.
+slow_lately() {
+  [ -f "$HOME_DIR/slow" ] || return 1
+  since=$(cat "$HOME_DIR/slow")
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  [ $(( $(now) - since )) -lt "$SLOW_FOR" ]
+}
+
+# This computer is signed out: by the developer here (`out`), or because its connection ended (`ended`: disconnected
+# on the web app's Coding tools page, or run out). The token is forgotten, and until the developer sends “vyavasta sign
+# in” nothing starts signing in by itself, sends the computer's name or opens a page (the file `signed-out` says which
+# of the two, and goes once a sign-in finishes).
+signed_out_here() {
+  rm -f "$CREDENTIALS"
+  rm -rf "$UNSENT"
+  forget_told
+  mkdir -p "$HOME_DIR" && printf '%s\n' "$1" > "$HOME_DIR/signed-out"
+}
+
+# Why this computer is signed out, as the middle of a sentence (“nothing sent (…)”), when it signed out or its
+# connection ended; nothing otherwise.
+out_said() {
+  [ -f "$HOME_DIR/signed-out" ] || return 0
+  case "$(cat "$HOME_DIR/signed-out")" in
+    ended) printf '%s' "this computer’s connection to Vyavasta has ended" ;;
+    *) printf '%s' "you signed out on this computer" ;;
+  esac
 }
 
 # -- projects, on and off -----------------------------------------------------------------------------------
 
 # Sets PROJECT (the git top-level folder of a folder, or the folder itself outside git) and PDIR, where this
 # computer keeps the project's choices: `on` (there when the plugin is on here), `sharing` (on or off; not there
-# when never chosen), `summaries` (on or off; not there when never chosen, which is on), `session` (the session a
-# message was last sent in).
+# when never chosen), `summaries` (on or off; not there when never chosen, which is on).
 project_of() {
   PROJECT=$(git_read -C "$1" rev-parse --show-toplevel 2>/dev/null)
   [ -n "$PROJECT" ] || PROJECT="$1"
@@ -801,43 +887,216 @@ repository_name() {
 
 # -- the server -----------------------------------------------------------------------------------------------
 
-# api METHOD PATH BODYFILE SECONDS: the answer's body in $TMP/answer and its status in STATUS ("000" when the
-# server couldn't be reached). SLOW is set when the server took too long. The token travels in curl's
-# configuration on stdin, never on its command line.
+# One call, as lines of curl's own configuration, read from its input: METHOD PATH BODYFILE OUTPUT SECONDS CONNECT
+# TOKEN (the token only when it is given). Each answer's status and how long it took to go out are written on a line
+# of their own.
+curl_op() {
+  printf 'url = "%s/api/v1/plugin%s"\nrequest = "%s"\n' "$SERVER" "$2" "$1"
+  if [ -n "$3" ]; then echo 'header = "Content-Type: application/json"'; config_path data-binary "@$3"; fi
+  config_path output "$4"
+  printf 'write-out = "%%{http_code} %%{time_pretransfer}\\n"\nmax-time = %s\nconnect-timeout = %s\n' "$5" "$6"
+  printf 'proto = "=https,http"\nmax-redirs = 0\nuser-agent = "vyavasta-%s/%s"\n' "$CLIENT" "$VERSION"
+  [ -z "$7" ] || printf 'header = "Authorization: Bearer %s"\n' "$7"
+}
+
+# A line of curl's configuration naming a file: its name in quotes, any quote or backslash in it escaped.
+config_path() {
+  case "$2" in
+    *[\"\\]*) printf '%s = "%s"\n' "$1" "$(printf '%s' "$2" | sed -e 's/[\\"]/\\&/g')" ;;
+    *) printf '%s = "%s"\n' "$1" "$2" ;;
+  esac
+}
+
+# api METHOD PATH BODYFILE SECONDS [keep]: the answer's body in $TMP/answer and its status in STATUS ("000" when no
+# answer from Vyavasta came). SLOW is set when no answer came in time to a request that reached the server, and WENT
+# when this request went out at all. The token and the files' names travel in curl's configuration on its input,
+# never on its command line. The body's file goes once the call is over (it holds the developer's words), unless
+# `keep` says that a wait sends it again.
+#
+# curl reads none of the developer's own settings (`-q`: no ~/.curlrc, whose `location` would send a message on to
+# wherever a redirect points), follows no redirect, and speaks https only (or http to this computer, as server_url
+# allows). Out of reach (nothing could be sent: no connection, no address, no secure connection), no call is made
+# for a minute (`offline`). A server that took a long call and answered nothing in time is asked a quick question
+# first, on the same connection, before each long call after it, and nothing more is sent while it doesn't answer
+# that (`slow_lately`). A server that answers with an error is answered with its error each time: one failing call
+# never silences the calls after it. Inside Codex's sandbox, where the network is off by design, a failure says
+# nothing of the server, and nothing is kept of it. A call kept from earlier goes along after this one, on the same
+# connection, when one was picked for it (RIDE, `pick_ride`).
 api() {
   STATUS=000
   SLOW=""
+  WENT=""
   true > "$TMP/answer"
-  if [ -n "${TOKEN:-}" ]; then auth="header = \"Authorization: Bearer $TOKEN\""; else auth=""; fi
+  ride="${RIDE:-}"
+  RIDE=""
+  # (Without curl nothing can be sent at all, which says nothing of the server: NOCURL says so.)
+  if [ -n "$NOCURL" ]; then [ "${5:-}" = "keep" ] || [ -z "$3" ] || rm -f "$3"; return 0; fi
+  most=$4
+  probe=""
+  if [ "$most" -gt "$SLOW_SECONDS" ] && [ -z "${HOLDING:-}" ] && slow_lately; then probe=1; fi
   # (Connecting never takes longer than the whole call may.)
   connect=5
-  [ "$4" -lt "$connect" ] && connect=$4
-  if [ -n "$3" ]; then
-    STATUS=$(printf '%s\n' "$auth" | curl -sS -K - -X "$1" --max-time "$4" --connect-timeout "$connect" \
-      -H "Content-Type: application/json" -H "User-Agent: vyavasta-$CLIENT/$VERSION" \
-      --data-binary "@$3" -o "$TMP/answer" -w '%{http_code}' "$SERVER/api/v1/plugin$2")
-  else
-    STATUS=$(printf '%s\n' "$auth" | curl -sS -K - -X "$1" --max-time "$4" --connect-timeout "$connect" \
-      -H "User-Agent: vyavasta-$CLIENT/$VERSION" \
-      -o "$TMP/answer" -w '%{http_code}' "$SERVER/api/v1/plugin$2")
-  fi
-  code=$?
+  [ "$most" -lt "$connect" ] && connect=$most
+  again=""
+  while :; do
+    true > "$TMP/written"
+    # One curl for all the calls made together, which stops at the first that fails, waited for in the background so
+    # that a hook told to stop stops at once (the trap at the top). (A curl older than 7.52 makes one call at a time.)
+    if [ -n "$probe" ] || [ -n "$ride" ]; then early="--fail-early"; else early=""; fi
+    {
+      if [ -n "$probe" ]; then curl_op GET /hello "" "$TMP/probe" "$PROBE_SECONDS" "$connect" ""; echo next; fi
+      curl_op "$1" "$2" "$3" "$TMP/answer" "$most" "$connect" "${TOKEN:-}"
+      if [ -n "$ride" ]; then echo next; curl_op POST "$RIDE_PATH" "$ride" "$TMP/ride-answer" "$RIDE_SECONDS" "$connect" "${TOKEN:-}"; fi
+    } | curl -q -sS $early -K - > "$TMP/written" &
+    CURL=$!
+    wait "$CURL"
+    code=$?
+    CURL=""
+    # One line for each call curl made, in order: the quick question first when there was one, then this call, then
+    # the one that went along with it. curl's code is the last call's.
+    heard=""; heard_went=""; STATUS=""; went=""; ride_status=""
+    {
+      [ -z "$probe" ] || read -r heard heard_went
+      read -r STATUS went
+      read -r ride_status ride_went
+    } < "$TMP/written"
+    probed_out=""
+    if [ -n "$probe" ] && { [ -z "$heard" ] || [ "$heard" = "000" ]; }; then
+      # No answer to the quick question: nothing more was sent.
+      probed_out=1; STATUS=""; went=$heard_went
+    elif [ -n "$probe" ]; then
+      # (Answered on this connection a moment before: this call went out on it.)
+      went=1
+    fi
+    [ -z "$ride_status" ] || code=0
+    # Whether the request went out: curl got as far as sending it (its time to that moment is above zero).
+    case "$went" in *[1-9]*) went=1 ;; *) went="" ;; esac
+    # The connection broke after the request went out: a call the server takes only once (it carries a request_id,
+    # first of all its fields) or one that only reads is made once more, at once.
+    case "$code" in
+      16|52|55|56|92)
+        if [ -z "$probed_out" ] && [ -n "$went" ] && [ -z "$again" ] && \
+            { [ -z "$3" ] || [ "$(head -c 14 "$3")" = '{"request_id":' ]; }; then
+          again=1; probe=""; ride=""
+          continue
+        fi ;;
+    esac
+    break
+  done
+  [ "${5:-}" = "keep" ] || [ -z "$3" ] || rm -f "$3"
   [ -n "$STATUS" ] || STATUS=000
-  if [ "$code" = "28" ]; then SLOW=1; STATUS=000; elif [ "$code" != "0" ]; then STATUS=000; fi
-  case "$STATUS" in
-    000) [ -n "$SLOW" ] || { mkdir -p "$HOME_DIR" && now > "$HOME_DIR/offline"; } ;;
-    5*) mkdir -p "$HOME_DIR" && now > "$HOME_DIR/offline" ;;
-    *) rm -f "$HOME_DIR/offline" ;;
-  esac
+  if [ "$code" != "0" ]; then
+    STATUS=000
+    [ "$code" = "28" ] && [ -n "$went" ] && SLOW=1
+  fi
+  [ -n "$probed_out" ] || WENT=$went
+  if [ -z "${CODEX_SANDBOX:-}" ]; then
+    case "$STATUS" in
+      000)
+        # (A wait the server holds open on purpose, or a short call, says nothing of whether it answers: only a long
+        # call, or the quick question after one, that went unanswered.)
+        if [ -n "$SLOW" ]; then
+          if [ -n "$probed_out" ] || { [ -z "${HOLDING:-}" ] && [ "$4" -gt "$SLOW_SECONDS" ]; }; then
+            mkdir -p "$HOME_DIR" && now > "$HOME_DIR/slow"
+          fi
+        elif [ -z "$went" ]; then mkdir -p "$HOME_DIR" && now > "$HOME_DIR/offline"; fi ;;
+      *) rm -f "$HOME_DIR/offline" "$HOME_DIR/slow" ;;
+    esac
+  fi
+  [ -z "$ride" ] || [ -z "$ride_status" ] || ride_settled "$ride_status"
   if [ "$STATUS" = "401" ] && [ -n "${TOKEN:-}" ]; then
-    # The connection ended (disconnected on the web app’s Coding tools page, or run out): this computer is signed out.
-    rm -f "$CREDENTIALS"
-    forget_told
-    TOKEN=""
+    if from_vyavasta; then
+      # The connection ended (disconnected on the web app’s Coding tools page, or run out): this computer is signed
+      # out, and stays so until the developer signs in again.
+      signed_out_here ended
+      TOKEN=""
+    else
+      # Refused by something on the way that isn't Vyavasta (a page in between): Vyavasta itself wasn't reached, and
+      # the connection is kept.
+      STATUS=000; WENT=""
+      [ -n "${CODEX_SANDBOX:-}" ] || now > "$HOME_DIR/offline"
+    fi
   fi
 }
 
+# Whether a refusal came from Vyavasta itself: its own JSON, with a `detail` that has a `code` (a page in between, such
+# as a proxy's or a network's sign-in page, answers otherwise).
+from_vyavasta() {
+  json_get "$TMP/answer" detail > "$TMP/detail"
+  case "$(json_get "$TMP/detail" code)" in \"?*\") return 0 ;; esac
+  return 1
+}
+
 answer() { json_get "$TMP/answer" "$1"; }
+
+# A request's own id, made once for each message or turn sent and sent again with it when it must be sent again (the
+# call broke after it went out, or it is sent again later from `unsent`): the server answers a repeat as it answered
+# the first and keeps nothing twice. An older server takes no notice of it. Put first in the body, where `api` and
+# `wait_on` find it.
+new_request_id() {
+  id=$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -cd '0-9a-f')
+  [ -n "$id" ] || id="r$(now)$$"
+  printf '%s' "$id"
+}
+
+# Calls that couldn't be sent, kept to go along with a later one: a turn's reply (by its request_id, which the server
+# knows for an hour, so a reply is never kept twice) and a session's work report (the last one only, given up once a
+# later report of that session is taken). Each is kept in UNSENT, readable by the developer only, with the server
+# and the project it belongs to, for UNSENT_FOR seconds at most, UNSENT_MOST at once, and all of them are forgotten
+# when this computer signs in or out. One goes along after a hook's call (`pick_ride`), on the same connection, only
+# while its project is on, and a reply only while summaries are on there. $1 is turn or work, $2 the request_id or the
+# session, $3 the body's file.
+keep_unsent() {
+  mkdir -p "$UNSENT" && chmod 700 "$UNSENT" || return 0
+  [ "$1" != "work" ] || rm -f "$UNSENT"/*-work-"$2".json "$UNSENT"/*-work-"$2".about
+  # (Named by when it was kept, and in what order within that second, so that the names sort oldest first.)
+  order=$(cat "$UNSENT/next" 2>/dev/null)
+  case "$order" in ''|*[!0-9]*) order=0 ;; esac
+  echo $(( (order + 1) % 1000000 )) > "$UNSENT/next"
+  kept="$UNSENT/$(now).$(printf '%06d' "$order")-$1-$2"
+  cp "$3" "$kept.json" && printf 'server=%s\nproject=%s\n' "$SERVER" "$PDIR" > "$kept.about" || return 0
+  set -- "$UNSENT"/*.about
+  over=$(( $# - UNSENT_MOST ))
+  for about in "$@"; do
+    [ "$over" -gt 0 ] || break
+    rm -f "${about%.about}.json" "$about"
+    over=$((over - 1))
+  done
+}
+
+# Picks the oldest kept call that may go along with the next one (RIDE, its body's file, and RIDE_PATH, its route),
+# once in a hook; a session's work report never goes with a report of that same session ($1), which is newer. Calls
+# kept too long, for a project that is off, or for a reply where summaries are off now, are given up.
+pick_ride() {
+  RIDE=""; RIDE_PATH=""; RIDE_KEPT=""
+  [ -z "${RODE:-}" ] && [ -d "$UNSENT" ] || return 0
+  RODE=1
+  for about in "$UNSENT"/*.about; do
+    [ -f "$about" ] || continue
+    kept=${about%.about}
+    name=$(basename "$kept")
+    at=${name%%-*}; at=${at%%.*}; rest=${name#*-}; kind=${rest%%-*}; whose=${rest#*-}
+    kept_project=$(sed -n 's/^project=//p' "$about")
+    case "$at" in ''|*[!0-9]*) rm -f "$kept.json" "$about"; continue ;; esac
+    if [ $(( $(now) - at )) -ge "$UNSENT_FOR" ] || [ ! -f "$kept_project/on" ] || \
+        { [ "$kind" = "turn" ] && [ "$(cat "$kept_project/summaries" 2>/dev/null)" = "off" ]; }; then
+      rm -f "$kept.json" "$about"; continue
+    fi
+    [ "$(sed -n 's/^server=//p' "$about")" = "$SERVER" ] && [ -f "$kept.json" ] || continue
+    [ "$kind" = "work" ] && [ "$whose" = "${1:-}" ] && continue
+    case "$kind" in turn|work) ;; *) continue ;; esac
+    RIDE="$kept.json"; RIDE_PATH="/$kind"; RIDE_KEPT=$kept
+    return 0
+  done
+}
+
+# What came of a kept call that went along ($1, its status): taken, or refused for good (it could never be taken), it
+# is done; otherwise it waits for the next.
+ride_settled() {
+  case "$1" in
+    2*|400|401|403|404|409|410|413|422) rm -f "$RIDE_KEPT.json" "$RIDE_KEPT.about" ;;
+  esac
+}
 
 # The server's own sentence for a refusal (``{"detail": {"message": …}}``), if it gave one, on one line.
 refusal() {
@@ -847,30 +1106,47 @@ refusal() {
   one_line "$said"
 }
 
-# Waits for an answer that was not ready, as long as one hook may: each call names the answer the one before was
-# waiting for. $1 is the path, $2 the body file to send again with "waiting" in it.
+# Waits for an answer that was not ready, for as long as WAIT_FOR allows from the hook's start: each call names the
+# answer the one before was waiting for, and none runs past that time. An answer still not ready by then is left as
+# the last call gave it (still being worked on, and where it will be), and the tool goes on. $1 is the path, $2 the
+# body file to send again with "waiting" in it (less its request_id: a wait asks again on purpose).
 wait_on() {
   tries=0
-  while [ "$STATUS" = "200" ] && [ "$(json_text "$(answer status)")" = "pending" ] && [ "$tries" -lt "$ASK_AGAIN" ] \
-      && [ $(( $(now) - STARTED_AT )) -lt "$WAIT_FOR" ]; do
+  while [ "$STATUS" = "200" ] && [ "$(json_text "$(answer status)")" = "pending" ] && [ "$tries" -lt "$ASK_AGAIN" ]; do
+    left=$(( WAIT_FOR - ($(now) - STARTED_AT) ))
+    # (A call much shorter than the server's own wait for the answer would only run out.)
+    [ "$left" -ge 10 ] || break
+    [ "$left" -le "$ASK_SECONDS" ] || left=$ASK_SECONDS
     waiting=$(answer waiting)
     case "$waiting" in \"*\") ;; *) break ;; esac
     if [ -n "$2" ]; then
-      sed -e 's/^{//' "$2" > "$TMP/rest"
+      sed -e 's/^{"request_id":"[^"]*",/{/' -e 's/^{//' "$2" > "$TMP/rest"
       printf '{"waiting":%s,' "$waiting" > "$TMP/waiting"
       cat "$TMP/rest" >> "$TMP/waiting"
     else
       printf '{"waiting":%s,"tool":"%s"}' "$waiting" "$CLIENT" > "$TMP/waiting"
     fi
-    api POST "$1" "$TMP/waiting" "$ASK_SECONDS"
+    cp "$TMP/answer" "$TMP/pending"
+    # (The server holds a wait open on purpose: one that runs out says nothing of how fast it answers.)
+    HOLDING=1
+    api POST "$1" "$TMP/waiting" "$left"
+    HOLDING=""
     tries=$((tries + 1))
+    if [ "$STATUS" = "000" ] && [ -n "$SLOW" ]; then
+      cp "$TMP/pending" "$TMP/answer"; STATUS=200; SLOW=""
+      break
+    fi
   done
 }
 
 # ask_vyavasta BODYFILE: puts a question to the developer's own assistant and waits for its answer, over as many
-# calls as it takes. Leaves the last answer in $TMP/answer.
+# calls as it takes. Leaves the last answer in $TMP/answer. (The first call may always take the server's own wait for
+# an answer, 40 seconds, with a margin: it is the one that asks.)
 ask_vyavasta() {
-  api POST /ask "$1" "$ASK_SECONDS"
+  left=$(( WAIT_FOR - ($(now) - STARTED_AT) ))
+  [ "$left" -ge 45 ] || left=45
+  [ "$left" -le "$ASK_SECONDS" ] || left=$ASK_SECONDS
+  api POST /ask "$1" "$left"
   wait_on /ask ""
 }
 
@@ -927,14 +1203,16 @@ finish_pairing() {
       rm -f "$PENDING"
       TOKEN=$(token_for "$SERVER")
       CONNECTED="Connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
-      # Whether the server emailed its person the guide to every command with this sign-in (`guide_emailed_now`; a
-      # server from before 0.6.0 doesn't say, and nothing is said of it): said here and in the other tool's first
-      # welcome, and only then, so it is never said untrue and never said again after a later sign-in.
+      # Whether the server emailed its person the guide to every command with this sign-in (`guide_emailed_now`):
+      # said here and in the other tool's first welcome, and only then, so it is never said untrue and never said again
+      # after a later sign-in. A sign-in the server says sent none, though one was sent before (`guide_emailed`; a
+      # server from before 0.6.0 says only that), says the guide is in the developer's email already.
       if [ "$(answer guide_emailed_now)" = "true" ]; then
         printf '%s\n' "$SERVER" > "$HOME_DIR/guide-emailed"
         CONNECTED="$CONNECTED $GUIDE_EMAILED"
       else
         rm -f "$HOME_DIR/guide-emailed"
+        [ "$(answer guide_emailed)" != "true" ] || CONNECTED="$CONNECTED The guide to every command is in your email."
       fi
       ;;
     404|410) rm -f "$PENDING" ;;
@@ -945,10 +1223,13 @@ finish_pairing() {
 # Starts connecting this computer: a pairing the developer approves in the browser, whose page is opened. A sign-in
 # still waiting is used as it is, and its page is not opened again (PAIR_AGAIN is then set). A page that isn't the
 # server's own isn't opened at all (PAIR_UNOPENED is then set). Sets PAIR_CODE and PAIR_PAGE, or fails with
-# PAIR_FAILED set to the reason.
+# PAIR_FAILED set to the reason. A computer that signed out, or whose connection ended, starts none unless the
+# developer asked to sign in (ASKED_SIGN_IN, set by “vyavasta sign in”).
 start_pairing() {
   PAIR_FAILED=""; PAIR_AGAIN=""; PAIR_UNOPENED=""
   if pending_waiting; then PAIR_AGAIN=1; return 0; fi
+  if [ -z "${ASKED_SIGN_IN:-}" ] && [ -f "$HOME_DIR/signed-out" ]; then PAIR_FAILED=$(out_said); return 1; fi
+  if [ -n "$NOCURL" ]; then PAIR_FAILED="Vyavasta needs curl, which isn’t installed here"; return 1; fi
   machine=$(hostname | cut -d. -f1)
   [ -n "$machine" ] || machine=$(uname -n)
   printf '{"machine":%s,"tool":"%s"}' "$(json_quote "$machine")" "$CLIENT" > "$TMP/pair"
@@ -1056,10 +1337,12 @@ unopened_said() { printf '%s' "It wasn’t opened, because $UNOPENED. Open it yo
 # -- the repository it is in ------------------------------------------------------------------------------------
 
 # Sets ROOT, REMOTE (the GitHub remote, without any user name or token in it) and BRANCH for a folder; fails when
-# the folder isn't in a git repository.
+# the folder isn't in a git repository, or git isn't installed (NOGIT).
 repository() {
+  [ -z "$NOGIT" ] || { ROOT=""; return 1; }
   ROOT=$(git_read -C "$1" rev-parse --show-toplevel) || return 1
   [ -n "$ROOT" ] || return 1
+  quiet_filters
   REMOTE=$(git_read -C "$ROOT" remote get-url origin)
   if [ -z "$REMOTE" ]; then
     first=$(git_read -C "$ROOT" remote | sed -n '1p')
@@ -1068,6 +1351,43 @@ repository() {
   REMOTE=$(printf '%s' "$REMOTE" | sed -E 's#^([A-Za-z+]+://)[^@/]*@#\1#')
   BRANCH=$(git_read -C "$ROOT" symbolic-ref --short -q HEAD)
   return 0
+}
+
+# The filters a repository's own settings name (its .git/config and its worktree's, with what they include) are
+# switched off for every git command here while the script runs: git runs a filter's program on each file it
+# compares, and a repository that came as a folder can name any program as one. A filter the developer set up for
+# every repository (each of its programs the one their global or system settings name, such as git-lfs's) is left as
+# it is. They are switched off as settings given on git's command line are, through its environment, so that any
+# name is passed as it is. (A git older than 2.31 takes no settings this way, and is left as it was.)
+quiet_filters() {
+  [ "${FILTERS_QUIET:-}" = "$ROOT" ] && return 0
+  FILTERS_QUIET=$ROOT
+  # The drivers the repository's own settings define, one to a line (no name holds a line break), by the scope git
+  # read each from.
+  git_read -C "$ROOT" config --show-scope --includes --name-only -z --get-regexp '^filter\..*\.(clean|smudge|process)$' \
+    | tr '\000' '\n' | awk 'NR % 2 == 1 { scope = $0; next }
+      scope == "local" || scope == "worktree" { sub(/\.[a-z]*$/, ""); if (!($0 in seen)) { seen[$0] = 1; print } }' \
+    > "$TMP/filters-here"
+  [ -s "$TMP/filters-here" ] || return 0
+  count=${GIT_CONFIG_COUNT:-0}
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  while IFS= read -r driver; do
+    own=1
+    for part in clean smudge process; do
+      here=$(git_read -C "$ROOT" config --includes --get "$driver.$part")
+      mine=$(git_read config --global --includes --get "$driver.$part" || git_read config --system --includes --get "$driver.$part")
+      [ "$here" = "$mine" ] || own=""
+    done
+    [ -z "$own" ] || continue
+    for part in clean smudge process; do
+      export "GIT_CONFIG_KEY_$count=$driver.$part" "GIT_CONFIG_VALUE_$count="
+      count=$((count + 1))
+    done
+    export "GIT_CONFIG_KEY_$count=$driver.required" "GIT_CONFIG_VALUE_$count=false"
+    count=$((count + 1))
+  done < "$TMP/filters-here"
+  GIT_CONFIG_COUNT=$count
+  export GIT_CONFIG_COUNT
 }
 
 # -- what changed in the working tree ---------------------------------------------------------------------------
@@ -1080,9 +1400,10 @@ BIG_FILE=1000000
 # At most this many new files are looked at; any more are left out as past the limit.
 NEW_FILES=2000
 # git's own options for every listing and diff here, the same each time so its lists agree: rename detection, and
-# nothing an outside program or filter does. (Each also treats a file over BIG_FILE as one that isn't text, so it is
+# nothing an outside program or filter does. A submodule counts by the commit it is at: git never looks inside it,
+# where its own settings could run a program. (Each also treats a file over BIG_FILE as one that isn't text, so it is
 # never compared line by line.)
-DIFF_OPTIONS="-M --no-ext-diff --no-textconv"
+DIFF_OPTIONS="-M --no-ext-diff --no-textconv --ignore-submodules=dirty"
 
 # Which paths look like keys or credentials, or are written by machines: by name only, in any letter case.
 CLASSIFY='
@@ -1166,7 +1487,8 @@ scan_tree() {
   SCANNED=1
   SCAN_INDEX=""
   HEAD_SHA=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
-  true > "$TMP/add"; true > "$TMP/big"; true > "$TMP/left-untracked"; true > "$TMP/added"
+  true > "$TMP/add"; true > "$TMP/big"; true > "$TMP/left-untracked"; true > "$TMP/added"; true > "$TMP/countable"
+  true > "$TMP/links"
   git_read -C "$ROOT" ls-files --others --exclude-standard -z -- . "$OWN_SETTINGS" | tr '\000' '\001' \
     | awk -v ADD="$TMP/add" -v LEFT="$TMP/left-untracked" -v MOST="$NEW_FILES" "$CLASSIFY"'
       BEGIN { RS = "\001"; added = 0 }
@@ -1176,13 +1498,28 @@ scan_tree() {
         if (w == "" && added >= MOST) w = "limit"
         if (w == "") { print $0 > ADD; added++ } else printf "%s\t%s%c", w, $0, 1 > LEFT }'
   if [ -s "$TMP/add" ]; then
-    # Their sizes, from the file system alone: every character escaped for xargs, so any name is passed as it is.
+    # Which of them are regular files no larger than BIG_FILE, from the file system alone (every character escaped
+    # for xargs, so any name is passed as it is): only those are ever read here, to count their lines. A link is
+    # given to git like them, which reads where it points and never what is there; a larger file is left out as past
+    # the limit; a device or a pipe is listed by its name alone, as a file that isn't text. So nothing in the folder
+    # can slow a hook down or hold it up.
     (cd "$ROOT" && sed -e 's#^#./#' -e 's/./\\&/g' "$TMP/add" \
-      | xargs sh -c 'exec find "$@" -prune -type f -size +'"$BIG_FILE"'c -print' sh) > "$TMP/big"
-    awk -v LEFT="$TMP/left-untracked" '
-      FILENAME == ARGV[1] { big[substr($0, 3)] = 1; next }
-      ($0 in big) { printf "limit\t%s%c", $0, 1 >> LEFT; next }
-      { print }' "$TMP/big" "$TMP/add" > "$TMP/added"
+      | xargs sh -c 'exec find "$@" -prune -type f -size -'"$((BIG_FILE + 1))"'c -print' sh) > "$TMP/small"
+    awk -v REST="$TMP/rest-untracked" '
+      FILENAME == ARGV[1] { small[substr($0, 3)] = 1; next }
+      ($0 in small) { print; next }
+      { print > REST }' "$TMP/small" "$TMP/add" > "$TMP/countable"
+    cp "$TMP/countable" "$TMP/added"
+    if [ -s "$TMP/rest-untracked" ]; then
+      (cd "$ROOT" && sed -e 's#^#./#' -e 's/./\\&/g' "$TMP/rest-untracked" | xargs sh -c \
+        'exec find "$@" -prune \( -type f -exec printf "big\t%s\n" {} + -o -type l -exec printf "link\t%s\n" {} + \)' sh) \
+        > "$TMP/big"
+      awk -v LEFT="$TMP/left-untracked" -v LINKS="$TMP/links" '
+        FILENAME == ARGV[1] { k = index($0, "\t"); kind[substr($0, k + 3)] = substr($0, 1, k - 1); next }
+        kind[$0] == "link" { print > LINKS; print; next }
+        { printf "%s\t%s%c", ((kind[$0] == "big") ? "limit" : "binary"), $0, 1 >> LEFT }' "$TMP/big" "$TMP/rest-untracked" \
+        >> "$TMP/added"
+    fi
   fi
   # git reads a copy of the developer's index, never their own: comparing the working tree, it may rewrite an index
   # whose times look stale even when told to take no optional lock. (Its times kept, so git tells a file changed
@@ -1203,11 +1540,12 @@ scan_tree() {
 
 # git's own list of what changed in the working tree and the index since the last commit, as a JSON array of
 # paths, statuses and line counts, written to $TMP/files without its brackets. Nothing of any file is sent. A new
-# file git didn't compare has its lines counted here (each is under BIG_FILE, and at most 200 are counted); one left
-# out by name or size is listed with no counts. NFILES is how many there are.
+# file git didn't compare has its lines counted here (each is a regular file under BIG_FILE, and at most 200 are
+# counted); a link, and one left out by name or size, is listed with no counts. NFILES is how many there are.
 changed_files() {
   scan_tree
-  tr '\n' '\001' < "$TMP/added" > "$TMP/added-list"
+  tr '\n' '\001' < "$TMP/countable" > "$TMP/added-list"
+  tr '\n' '\001' < "$TMP/links" > "$TMP/links-list"
   (cd "$ROOT" && awk -v COUNT="$TMP/files-count" "$AWK_ESCAPE$SCAN_AWK"'
     function lines(path,   count, line) {
       count = 0; RS = "\n"
@@ -1226,6 +1564,7 @@ changed_files() {
     FILENAME == ARGV[1] { scan_record($0); next }
     FILENAME == ARGV[2] { k = index($0, "\t"); if (k) more[++extra] = substr($0, k + 1); next }
     FILENAME == ARGV[3] { if ($0 != "") small[++smalls] = $0; next }
+    FILENAME == ARGV[4] { if ($0 != "") link[++links] = $0; next }
     END {
       for (e = 1; e <= n; e++) {
         s = st[e]
@@ -1234,9 +1573,10 @@ changed_files() {
       }
       # New files git was not asked to compare: counted here, or listed by name only.
       for (e = 1; e <= smalls; e++) if (!(small[e] in seen)) show(small[e], "added", (counted++ < 200) ? lines(small[e]) : 0, 0)
+      for (e = 1; e <= links; e++) show(link[e], "added", 0, 0)
       for (e = 1; e <= extra; e++) show(more[e], "added", 0, 0)
       printf "%d\n", shown > COUNT
-    }' "$TMP/scan" "$TMP/left-untracked" "$TMP/added-list") > "$TMP/files-raw"
+    }' "$TMP/scan" "$TMP/left-untracked" "$TMP/added-list" "$TMP/links-list") > "$TMP/files-raw"
   clean_utf8 "$TMP/files-raw" "$TMP/files"
   NFILES=$(cat "$TMP/files-count")
   [ -n "$NFILES" ] || NFILES=0
@@ -1520,13 +1860,18 @@ keep_conflict() {
 Send “continue” to go on, or “stop” to leave the change where it is."
   printf '{"continue":false,"stopReason":%s}\n' "$(json_quote "$told")" > "$1/conflict-stop"
   printf '{"systemMessage":%s}\n' "$(json_quote "$told")" > "$1/conflict-say"
+  printf '{"continue":false,"stopReason":%s,"reason":%s}\n' "$(json_quote "$told")" \
+    "$(json_quote "$(json_text "$(field "$conflict" notice)")
+
+The edit was made. Make no more edits: tell the developer what stands against the change, and ask whether to continue or stop.")" \
+    > "$1/conflict-block"
   return 0
 }
 
 close_conflict() {
   cat "$1/conflict-id" >> "$1/conflicts-closed"
   echo >> "$1/conflicts-closed"
-  rm -f "$1/conflict" "$1/conflict-id" "$1/conflict-stop" "$1/conflict-say" "$1/conflict-prompt"
+  rm -f "$1/conflict" "$1/conflict-id" "$1/conflict-stop" "$1/conflict-say" "$1/conflict-block" "$1/conflict-prompt"
 }
 
 # Tells the server what the developer chose about the session's conflict.
@@ -1615,24 +1960,36 @@ hook_session_start() {
   true > "$dir/unguided"
   folder=$(input_folder)
   project_of "$folder"
+  # How the session started: afresh, or as the same conversation going on, resumed, cleared or compacted (a compaction
+  # can come in the middle of a turn). Going on, a message of the session still waits for its reply, the developer is
+  # not greeted again, and nothing is fetched again: the tool's model, which lost what it was told, is told it again.
+  source=$(json_text "$(json_get "$TMP/input" source)")
+  case "$source" in resume|clear|compact) again=1 ;; *) again="" ;; esac
+  sweep_scratch
+  keep_model_copy
+  # The commands Claude's model runs in this session belong to it: its id is left for them in the file Claude Code
+  # reads into each of their environments (CLAUDE_ENV_FILE), once.
+  if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ "$(basename "$dir")" != "no-session" ]; then
+    told="export VYAVASTA_SESSION=$(basename "$dir")"
+    grep -qxF "$told" "$CLAUDE_ENV_FILE" || printf '%s\n' "$told" >> "$CLAUDE_ENV_FILE"
+  fi
   if ! project_on; then
-    welcome "$dir"
+    [ "$source" = "compact" ] || welcome "$dir"
     return
   fi
   # The first session after the plugin was installed or updated opens with the banner, and after an update with what
   # is new: once, before whatever the session's start says.
   BANNER=""
-  if greeting_due; then
+  if [ -z "$again" ] && greeting_due; then
     if [ -f "$WELCOMED" ]; then BANNER="$(banner)
 $WHATS_NEW
 "; else BANNER="$(banner)
 "; fi
     mark_greeted
   fi
-  basename "$dir" > "$PDIR/session"
-  # A new session has no message of its own waiting for its reply.
-  rm -f "$dir/turn-waiting"
-  summaries_note
+  # A new session has no message of its own waiting for its reply (one that goes on keeps it, to be kept with it).
+  SUMMARIES_NOTE=""
+  if [ -z "$again" ]; then rm -f "$dir/turn-waiting"; summaries_note; fi
   # Where the tree stood when the session began, to tell later whether anything of it was kept.
   if repository "$folder"; then
     [ -f "$dir/start" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD > "$dir/start"
@@ -1641,11 +1998,15 @@ $WHATS_NEW
   find "$SESSIONS" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
   offline || finish_pairing
   if [ -z "$TOKEN" ]; then
+    # (Signed out in the middle of work: the next message says so.)
+    [ "$source" = "compact" ] && return
     # Signed out in a project that is on: sign-in starts by itself, once, here (the session's first message then
     # doesn't start it again); one still waiting is told again, with its code.
     if pending_waiting; then
       PAIR_AGAIN=1
       say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      say "${BANNER}Vyavasta: $(out_said), so nothing is checked. $WAY_IN_AGAIN ${AGENT} works as usual.$SUMMARIES_NOTE"
     elif ! offline && start_pairing; then
       true > "$dir/said-sign-in"
       say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
@@ -1654,13 +2015,28 @@ $WHATS_NEW
     fi
     return
   fi
-  api GET /me "" "$QUICK_SECONDS"
+  # Going on, connected as before: nothing is asked of the server, and the developer is not greeted again (what /me
+  # said of the server's checks when a session last started is kept, for what the tool's model is told).
+  quiet=""
+  [ -n "$again" ] && [ -z "$CONNECTED" ] && quiet=1
+  if [ -n "$quiet" ]; then
+    STATUS=200
+    checks=$(sed -n "s#^$SERVER ##p" "$HOME_DIR/checks" | sed -n '1p')
+  else
+    # (A server that can sends what teammates sent the developer with this answer, as /inbox?told=1 would: one call
+    # less. An older one sends none, and /inbox is asked below.)
+    api GET "/me?inbox=1" "" "$QUICK_SECONDS"
+    json_get "$TMP/answer" inbox > "$TMP/me-inbox"
+    checks=$(answer checks)
+    # (An answer that isn't Vyavasta's, such as a page in between, names nobody: it is no sign-in.)
+    [ "$STATUS" != "200" ] || [ -n "$(answer email)" ] || STATUS=unread
+    [ "$STATUS" != "200" ] || { mkdir -p "$HOME_DIR" && printf '%s %s\n' "$SERVER" "$checks" > "$HOME_DIR/checks"; }
+  fi
   case "$STATUS" in
     200)
-      remember_me
+      [ -n "$quiet" ] || remember_me
       if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
       else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
-      checks=$(answer checks)
       greeting="${BANNER}Vyavasta: $who $(reach_said "$(answer repositories)" "$checks")"
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
@@ -1672,8 +2048,10 @@ $WHATS_NEW
       # given a few of them, after its own instructions, to open its first reply with, and the developer reads under
       # the session's first line how many came (shown once, never twice).
       away=""
-      api GET "/inbox?told=1" "" "$QUICK_SECONDS"
-      if [ "$STATUS" = "200" ]; then
+      if [ -n "$quiet" ]; then :
+      elif [ "$(head -c 1 "$TMP/me-inbox")" = "{" ]; then cp "$TMP/me-inbox" "$TMP/answer"
+      else api GET "/inbox?told=1" "" "$QUICK_SECONDS"; fi
+      if [ "$STATUS" = "200" ] && [ -z "$quiet" ]; then
         items=$(answer items)
         if [ -n "$items" ] && [ "$items" != "[]" ]; then
           listing=$(render_inbox "$items" "$(answer more)" model capped)
@@ -1687,12 +2065,23 @@ $(arrived_context "$listing" "While the developer was away" "your first reply in
       fi
       # The developer is told they are connected; the tool's model is told what Vyavasta is here for, how to ask it
       # what the plugin did not already ask for them, and how to send a teammate a message for the developer.
-      printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
-        "$(json_quote "$greeting")" "$(json_quote "$(guidance_said "$checks")$away")"
+      context="$(guidance_said "$checks")$away"
+      if [ -n "$quiet" ]; then
+        printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' "$(json_quote "$context")"
+      else
+        printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
+          "$(json_quote "$greeting")" "$(json_quote "$context")"
+      fi
       rm -f "$dir/unguided"
       ;;
     401) say "${BANNER}Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
-    *) say "${BANNER}Vyavasta: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
+    429) say "${BANNER}Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for a moment. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
+    5*) say "${BANNER}Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
+    unread) say "${BANNER}Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
+    *)
+      if [ -n "$NOCURL" ]; then say "${BANNER}Vyavasta needs curl, which isn’t installed here, so nothing is checked. ${AGENT} works as usual.$SUMMARIES_NOTE"
+      elif [ -n "$SLOW" ]; then say "${BANNER}Vyavasta: the server took too long to answer just now, so some requests may go unchecked for a while. ${AGENT} works as usual.$SUMMARIES_NOTE"
+      else say "${BANNER}Vyavasta: the server can’t be reached right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE"; fi ;;
   esac
 }
 
@@ -1718,6 +2107,8 @@ $WHATS_NEW$foot"
     elif pending_waiting; then
       PAIR_AGAIN=1
       say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      say "${top}Vyavasta is installed, and sends nothing, because $(out_said). $WAY_IN_AGAIN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
     elif ! offline && start_pairing; then
       true > "$1/said-sign-in"
       say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
@@ -1748,7 +2139,9 @@ summaries_note() {
 # What a session in this folder does, for the line a session starts with. $1 is /me's list of repositories, $2 its
 # `checks` (false where the server checks no request).
 reach_said() {
-  if [ -z "${ROOT:-}" ]; then
+  if [ -n "$NOGIT" ]; then
+    echo "Vyavasta needs git, which isn’t installed here, so requests aren’t checked; questions about your team are still answered."
+  elif [ -z "${ROOT:-}" ]; then
     echo "This folder isn’t a git repository, so requests here aren’t checked; questions about your team are still answered."
   elif [ -z "${REMOTE:-}" ]; then
     echo "This repository has no copy on GitHub, so requests here aren’t checked; questions about your team are still answered."
@@ -2120,7 +2513,6 @@ hook_prompt() {
   case "$lead" in [Vv][Yy][Aa][Vv][Aa][Ss][Tt]*) parse_typed "$text" ;; esac
   if [ -n "$TYPED" ]; then
     # The plugin's own commands, answered here whether or not it is on, and never sent to the model.
-    if project_on; then basename "$dir" > "$PDIR/session"; basename "$dir" > "$HOME_DIR/session"; fi
     said=$(command_"$TYPED" "$TYPED_ARG")
     # After “vyavasta on”, Codex's model is given the plugin's guidance with the answer, in a session that began
     # without it (only Codex keeps it: `command_on` leaves it in $TMP/on-guidance under Codex).
@@ -2147,9 +2539,6 @@ hook_prompt() {
     return
   fi
   case "$words" in /*) return ;; esac
-  # The session a question asked by the tool's model belongs to (``ask``): the one a message was last sent in.
-  basename "$dir" > "$HOME_DIR/session"
-  basename "$dir" > "$PDIR/session"
   CONFLICT_CONTEXT=""
   if [ -f "$dir/conflict-id" ]; then
     if repository "$HERE"; then :; else REMOTE=""; fi
@@ -2289,12 +2678,22 @@ handle_message() {
   keep=false
   keep_this && keep=true
   summaries_note
+  # (Without curl nothing can be sent: said as that, never as a server out of reach.)
+  if [ -n "$NOCURL" ]; then
+    OUT_LINE=$(nothing_line "Vyavasta needs curl, which isn’t installed here" "${AGENT} works as usual.")
+    emit; return
+  fi
   finish_pairing
   if [ -z "$TOKEN" ]; then
     # Signed out: sign-in starts by itself on the first message of a session (unless the session's start began it),
-    # and never again in it; one still waiting is told again with its code, and its page isn't opened again.
+    # and never again in it; one still waiting is told again with its code, and its page isn't opened again. A
+    # computer that signed out, or whose connection ended, starts none: the developer signs in when they choose.
+    why="you aren’t signed in"
     if pending_waiting; then
       outcome="Enter the code $PAIR_CODE on the sign-in page ($PAIR_PAGE) to connect. Once you approve, your next message finishes connecting. ${AGENT} works as usual until then."
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      why=$(out_said)
+      outcome="$WAY_IN_AGAIN ${AGENT} works as usual."
     elif [ ! -f "$dir/said-sign-in" ]; then
       true > "$dir/said-sign-in"
       if start_pairing; then
@@ -2309,7 +2708,7 @@ handle_message() {
     else
       outcome="$WAY_IN ${AGENT} works as usual."
     fi
-    OUT_LINE=$(nothing_line "you aren’t signed in" "$outcome")
+    OUT_LINE=$(nothing_line "$why" "$outcome")
     emit; return
   fi
   # A folder that is no repository has nothing to check, and a question about the team can still be asked from it.
@@ -2331,12 +2730,21 @@ handle_message() {
       consent=" Send “vyavasta share code on” to also send your uncommitted changes for the check: teammates see only a summary, and key, ignored, machine-written and non-text files never go. This is asked only once."
     fi
   fi
+  # A server that can takes the work report that would follow the check with the check itself, and asks a question
+  # about the team as soon as the check finds the message is one (`ask_now`): one or two calls fewer. An older server
+  # leaves both aside, and they are sent on their own below.
+  carried=""
+  if [ "$NFILES" -gt 0 ] && work_report "$dir" bare; then carried=1; fi
   {
-    printf '{"request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s' "$prompt" \
-      "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep"
+    printf '{"request_id":"%s","request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s,"ask_now":true' \
+      "$(new_request_id)" "$prompt" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" \
+      "$CLIENT" "$keep"
     if [ -n "$shared" ]; then printf ',"change":'; cat "$TMP/change"; fi
+    if [ -n "$carried" ]; then printf ',"work":'; cat "$TMP/report"; fi
     printf '}'
   } > "$TMP/check"
+  # (A reply or a report kept from earlier goes along after it.)
+  pick_ride
   api POST /check "$TMP/check" "$CHECK_SECONDS"
   if [ -n "$shared" ] && [ "$STATUS" = "200" ]; then cksum < "$TMP/change" > "$dir/change-sum"; fi
   case "$STATUS" in
@@ -2348,14 +2756,21 @@ handle_message() {
       OUT_LINE=$(line "your message" "" "Vyavasta had too many requests just now, so it wasn’t checked. ${AGENT} works as usual.")
       emit; return ;;
     000)
-      if [ -n "$SLOW" ]; then
+      # (Said as sent only when it went out.)
+      if [ -n "$SLOW" ] && [ -n "$WENT" ]; then
         OUT_LINE=$(line "your message" "" "Vyavasta took too long to answer, so it wasn’t checked this time. ${AGENT} works as usual.")
+      elif [ -n "$SLOW" ]; then
+        OUT_LINE=$(nothing_line "Vyavasta’s server isn’t answering right now" "${AGENT} works as usual, and Vyavasta is tried again with your next message.")
+      elif [ -n "$WENT" ]; then
+        OUT_LINE=$(line "your message" "" "Vyavasta’s answer was cut off, so it wasn’t checked this time. ${AGENT} works as usual.")
       else
         OUT_LINE=$(nothing_line "Vyavasta’s server can’t be reached" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
       fi
       emit; return ;;
     5*)
-      OUT_LINE=$(nothing_line "Vyavasta’s server isn’t working right now" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
+      # (It reached the server, which failed. An error from a server that answers is no reason to stop trying: the next
+      # message tries again.)
+      OUT_LINE=$(line "your message" "" "Vyavasta’s server isn’t working right now, so it wasn’t checked. ${AGENT} works as usual, and Vyavasta is tried again with your next message.")
       emit; return ;;
     # (Refused for what was sent, such as a branch name longer than the server takes: it would be refused again.)
     4*)
@@ -2366,6 +2781,12 @@ handle_message() {
       emit; return ;;
   esac
   cp "$TMP/answer" "$TMP/checked"
+  # An answer that isn't Vyavasta's (a page in between, or one cut short) says nothing of the message: it is never
+  # told as checked.
+  if [ -z "$(json_text "$(answer verdict)")" ]; then
+    OUT_LINE=$(line "your message" "" "Vyavasta’s answer couldn’t be read, so your message wasn’t checked. ${AGENT} works as usual.")
+    emit; return
+  fi
   LINE_MARK="$dir/lined"
   if [ "$(json_text "$(answer verdict)")" = "teammate" ]; then
     # A message that is, whole, for one teammate: it starts with “@” and their name (“@priya the fix is pushed”). The
@@ -2424,9 +2845,17 @@ handle_message() {
       not_sent="${not_sent:+$not_sent; }$left"
     fi
   fi
-  # The names of changed files go with a work report, in a repository Vyavasta reads.
-  if [ "$NFILES" -gt 0 ] && [ "$verdict" != "not_connected" ] && [ -n "$REMOTE" ]; then
-    report_work "$dir" changing
+  # The names of changed files go with a work report, in a repository Vyavasta reads: taken with the check by a server
+  # that can (what it answered of the report is what /work would have), else sent on their own.
+  if [ -n "$carried" ] && [ "$(answer work_recorded)" = "true" ]; then
+    json_get "$TMP/checked" work_answer > "$TMP/answer"
+    [ -s "$TMP/answer" ] || printf '{"recorded":true,"status":"%s"}' "$state" > "$TMP/answer"
+    now > "$dir/reported"
+    work_taken "$dir"
+    REPORTED=1
+  else carried=""; fi
+  if [ "$NFILES" -gt 0 ] && [ -n "$REMOTE" ] && { [ -n "$carried" ] || [ "$verdict" != "not_connected" ]; }; then
+    [ -n "$carried" ] || report_work "$dir" changing
     if [ "$REPORTED" = "1" ] && { [ -z "$shared" ] || [ "$was_shared" = "off" ]; }; then
       sent="$sent and $(plural "$NFILES" "changed file’s name" "changed files’ names")"
       # (Said in the session's first line: it doesn't change from one message to the next.)
@@ -2440,9 +2869,17 @@ handle_message() {
     # answer is given to the tool's model to pass on. When no answer comes, the model has the message as it is.
     # A message put to the team is never also taken for a question about using the plugin.
     GUIDE=""
-    printf '{"question":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s}' "$prompt" \
-      "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep" > "$TMP/ask"
-    ask_vyavasta "$TMP/ask"
+    json_get "$TMP/checked" asked > "$TMP/asked"
+    if [ "$(head -c 1 "$TMP/asked")" = "{" ]; then
+      # Asked by the server with the check: its answer is the first call's, and the wait goes on from it.
+      cp "$TMP/asked" "$TMP/answer"
+      STATUS=200
+      wait_on /ask ""
+    else
+      printf '{"question":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s}' "$prompt" \
+        "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" "$CLIENT" "$keep" > "$TMP/ask"
+      ask_vyavasta "$TMP/ask"
+    fi
     sent=$(printf '%s' "$sent" | sed 's/^your message/your question/')
     # Whether the question and its answer are summed up for teammates: as the project's summaries say (the chat in
     # Vyavasta keeps them either way).
@@ -2467,7 +2904,8 @@ handle_message() {
       # A server that checks no request (the demo, or one with no model): never told as checked, notice or not.
       not_checked) outcome="${notice:-Not checked: this Vyavasta server doesn’t check requests.}" ;;
       not_connected)
-        if [ -z "$ROOT" ]; then outcome="This folder isn’t a git repository, so nothing was checked. Questions about your team are still answered here."
+        if [ -n "$NOGIT" ]; then outcome="Vyavasta needs git, which isn’t installed here, so nothing was checked. Questions about your team are still answered here."
+        elif [ -z "$ROOT" ]; then outcome="This folder isn’t a git repository, so nothing was checked. Questions about your team are still answered here."
         elif [ -z "$REMOTE" ]; then outcome="This folder has no copy on GitHub, so nothing was checked. Questions about your team are still answered here."
         else outcome="${notice:-Vyavasta doesn’t read this repository for you, so nothing was checked.}"; fi ;;
       *) outcome="${notice:-Checked against your team’s record.}" ;;
@@ -2483,7 +2921,9 @@ handle_message() {
       # Held, as the web app holds a plan: the model isn't sent the request, and the developer is told why and how
       # to go on. What going on tells the model is kept for this session until then.
       answer anyway > "$TMP/anyway"
-      json_get "$TMP/anyway" context > "$dir/held"
+      # (Only a string of the server's is kept, written again as one: nothing else goes into what the tool reads.)
+      held=$(json_get "$TMP/anyway" context)
+      case "$held" in \"*) json_quote "$(json_text "$held")" > "$dir/held" ;; *) rm -f "$dir/held" ;; esac
       # The notice below says what stands, so the line only says which kind of hold it is.
       if [ "$verdict" = "held" ]; then held_said="On hold; see below."
       else held_said="On hold: what your team has said doesn’t settle this request; see below."; fi
@@ -2501,7 +2941,7 @@ $OUT_CONTEXT}"
     # Something the team said stands against the change already made: the message waits until the developer
     # chooses, and is kept to pass on if they continue.
     json_text "$prompt" > "$dir/conflict-prompt"
-    rm -f "$dir/conflict-stop" "$dir/conflict-say"
+    rm -f "$dir/conflict-stop" "$dir/conflict-say" "$dir/conflict-block"
     OUT_LINE=$(line "$sent" "$not_sent" "Paused: something your team has said stands against the changes already made on your computer. Your message waits until you answer." "$kept_said")
     OUT_REASON="$(json_text "$(field "$(cat "$dir/conflict")" notice)")
 
@@ -2596,12 +3036,39 @@ tell_sharing() {
 # sent) as the session's work. Sets REPORTED to 1 when the server took it. $1 is the session folder.
 report_work() {
   REPORTED=""
+  work_report "$1" || return
+  pick_ride "$(basename "$1")"
+  api POST /work "$TMP/report" "$REPORT_SECONDS" keep
+  work_sent "$1"
+}
+
+# What follows a work report sent on its own, from its status: taken (`work_taken`), or kept to go along with a later
+# call when the server didn't answer, failed or was busy (`keep_unsent`), with the files' names only: changes go with
+# the next report, which finds them not sent yet. $1 is the session folder.
+work_sent() {
+  now > "$1/reported"
+  if [ "$STATUS" = "200" ]; then
+    work_taken "$1"
+  elif send_later; then
+    [ -z "$with_change" ] || work_report "$1" bare
+    keep_unsent work "$(basename "$1")" "$TMP/report"
+  fi
+  rm -f "$TMP/report"
+}
+
+# Whether a call that wasn't taken is to be sent again later: no answer came, the server failed, or it was busy.
+send_later() { case "$STATUS" in 000|5*|429) return 0 ;; esac; return 1; }
+
+# The session's work report as it stands, in $TMP/report: git's list of changed files, and with code sharing on the
+# changes when they moved since they were last sent (unless $2 is "bare": a check that carries the changes itself
+# carries the report). Fails when there is nothing to tell. $1 is the session folder.
+work_report() {
   [ -f "$TMP/files" ] || changed_files
   state=$(work_state "$1")
   # A session that has nothing open and nothing changed has nothing to tell.
-  [ "$state" != "changing" ] && [ ! -f "$1/open" ] && return
+  [ "$state" != "changing" ] && [ ! -f "$1/open" ] && return 1
   with_change=""
-  if [ "$(sharing)" = "on" ]; then
+  if [ "$(sharing)" = "on" ] && [ "${2:-}" != "bare" ]; then
     [ -f "$TMP/change" ] || build_change
     if [ "$(cksum < "$TMP/change")" != "$(cat "$1/change-sum")" ]; then with_change=1; fi
   fi
@@ -2611,10 +3078,14 @@ report_work() {
     if [ -n "$with_change" ]; then printf ',"change":'; cat "$TMP/change"; fi
     printf '}'
   } > "$TMP/report"
-  api POST /work "$TMP/report" "$REPORT_SECONDS"
-  now > "$1/reported"
-  [ "$STATUS" = "200" ] || return
+}
+
+# What follows a work report the server took, from what it answered of it ($TMP/answer): REPORTED, the changes as last
+# sent, whether the session's work is still open, and code sharing turned off in the web app. $1 is the session folder.
+work_taken() {
   REPORTED=1
+  # (A report of this session kept from earlier is older than this one: it is given up.)
+  rm -f "$UNSENT"/*-work-"$(basename "$1")".json "$UNSENT"/*-work-"$(basename "$1")".about
   [ -n "$with_change" ] && cksum < "$TMP/change" > "$1/change-sum"
   if [ "$(answer recorded)" = "true" ]; then
     case "$(json_text "$(answer status)")" in
@@ -2629,8 +3100,11 @@ report_work() {
 
 # After an edit (``edited``, at most every REPORT_EVERY seconds) and when the tool stops (``stopped``): git's list
 # of changed files goes to the server, which keeps the session's work for teammates to see. When the tool stops
-# after a message that was kept for the developer's summary, its last reply goes to the same chat. Nothing is
-# printed, except when the tool stops while a conflict found in the change waits to be told.
+# after a message that was kept for the developer's summary, its last reply goes to the same chat, in the same call
+# as the report where the server takes both at once (one call less at every turn's end; an older server is sent the
+# report on its own after it). A turn that ended in an error (Claude Code's StopFailure) sends its report and no
+# reply: what it would give as one is the error. Nothing is printed, except when the tool stops while a conflict
+# found in the change waits to be told.
 hook_report() {
   dir=$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")
   folder=$(input_folder)
@@ -2640,22 +3114,66 @@ hook_report() {
     last=$(cat "$dir/reported")
     [ -n "$last" ] && [ $(( $(now) - last )) -lt "$REPORT_EVERY" ] && return
   fi
+  # Whether the turn's reply goes to the session's chat.
+  turn=""
+  failed=""
+  [ "$1" = "stopped" ] && [ "$(json_text "$(json_get "$TMP/input" hook_event_name)")" = "StopFailure" ] && failed=1
+  if [ "$1" = "stopped" ] && [ -f "$dir/turn-waiting" ]; then
+    if [ "$(summaries)" = "off" ] || [ -n "$failed" ]; then rm -f "$dir/turn-waiting"
+    else turn=1; fi
+  fi
   STATUS=""
+  REPORTED=""
   if [ -n "$TOKEN" ] && repository "$folder" && ! offline; then
     changed_files
-    report_work "$dir"
+    if [ -z "$turn" ]; then report_work "$dir"
+    elif work_report "$dir"; then
+      send_turn "$dir" "$folder" work
+      turn=""
+      if [ "$STATUS" = "200" ] && [ "$(answer work_recorded)" = "true" ]; then
+        # Taken with the reply: what the server answered of the report is what /work would have (one that says only
+        # that it kept it has kept it as it was told).
+        json_get "$TMP/turned" work_answer > "$TMP/answer"
+        [ -s "$TMP/answer" ] || printf '{"recorded":true,"status":"%s"}' "$state" > "$TMP/answer"
+        now > "$dir/reported"
+        work_taken "$dir"
+      else
+        # (An older server: the report on its own, after the reply. One that didn't answer is not called twice: the
+        # report is kept to go along with a later call, as the reply is.)
+        if [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then api POST /work "$TMP/report" "$REPORT_SECONDS" keep; fi
+        work_sent "$dir"
+      fi
+    fi
     [ "$REPORTED" = "1" ] && keep_conflict "$dir"
   fi
   # (A report just now that found the server out of reach, or too slow to answer, is not followed by a second
   # call: the end of a turn is never held up twice.)
-  if [ "$1" = "stopped" ] && [ -f "$dir/turn-waiting" ]; then
-    if [ "$(summaries)" = "off" ]; then rm -f "$dir/turn-waiting"
-    elif [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then send_turn "$dir" "$folder"; fi
+  if [ -n "$turn" ] && [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! offline; then send_turn "$dir" "$folder"; fi
+  # What the developer is shown at a turn's end: a conflict found in the change, and teammates' messages that wait for
+  # them. (A turn that ended in an error shows nothing: what a conflict says waits for the next edit or message.)
+  if [ "$1" = "stopped" ] && [ -z "$failed" ]; then
+    shown=""
+    if [ -f "$dir/conflict-say" ]; then
+      shown=$(json_text "$(json_get "$dir/conflict-say" systemMessage)")
+      rm -f "$dir/conflict-say" "$dir/conflict-stop" "$dir/conflict-block"
+    fi
+    waiting=$(waiting_said)
+    [ -z "$waiting" ] || shown="${shown:+$shown
+
+}$waiting"
+    [ -z "$shown" ] || say "$shown"
   fi
-  if [ "$1" = "stopped" ] && [ -f "$dir/conflict-say" ]; then
-    cat "$dir/conflict-say"
-    rm -f "$dir/conflict-say" "$dir/conflict-stop"
-  fi
+}
+
+# Teammates' messages that wait for the developer and that their coding tool wasn't given yet, as the server counted
+# them when it took the turn's reply (INBOX_WAITING, from its `inbox_waiting`; an older server says nothing of them):
+# who sent them and when they come, in one line. Nothing is marked read.
+waiting_said() {
+  case "${INBOX_WAITING:-}" in
+    ''|*[!0-9]*|0) ;;
+    1) printf '%s' "Vyavasta: a teammate sent you a message. It comes with your next message, or send “vyavasta inbox” to read it now." ;;
+    *) printf '%s' "Vyavasta: teammates sent you $INBOX_WAITING messages. They come with your next message, or send “vyavasta inbox” to read them now." ;;
+  esac
 }
 
 # The tool's last reply of the turn, from the Stop hook's input, as a JSON string of at most REPLY_CHARACTERS
@@ -2697,22 +3215,38 @@ reply_json() {
 }
 
 # Sends the turn's reply to the session's chat, as the answer to the message kept this turn (named by its id when
-# the server gave one). Quiet, and never longer than TURN_SECONDS. $1 is the session folder, $2 the folder the tool
-# works in.
+# the server gave one). Quiet, and never longer than TURN_SECONDS, or REPORT_SECONDS when it carries the session's
+# work report ($3 is "work": $TMP/report, as `work_report` left it). Leaves the answer in $TMP/turned too, and how
+# many of teammates' messages wait for the developer in INBOX_WAITING. A reply the server didn't take is kept, by its
+# request_id, to go along with a later call (`keep_unsent`), when it names its message. $1 is the session folder, $2
+# the folder the tool works in.
 send_turn() {
   if repository "$2"; then :; else REMOTE=""; BRANCH=""; fi
   kept_id=$(cat "$1/turn-waiting")
-  {
-    printf '{"session":%s,"remote":%s,"branch":%s,"tool":"%s","keep":true' \
-      "$(json_quote "$(basename "$1")")" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
-    [ -n "$kept_id" ] && printf ',"message_id":%s' "$(json_quote "$kept_id")"
-    printf ',"reply":'
-    reply_json
-    printf '}'
-  } > "$TMP/turn"
-  api POST /turn "$TMP/turn" "$TURN_SECONDS"
-  # Tried again at the next stop only when the server couldn't be reached.
-  [ "$STATUS" = "000" ] || rm -f "$1/turn-waiting"
+  rm -f "$1/turn-waiting"
+  turn_id=$(new_request_id)
+  reply_json > "$TMP/reply-json"
+  turn_body "$1" "${3:-}" > "$TMP/turn"
+  if [ "${3:-}" = "work" ]; then api POST /turn "$TMP/turn" "$REPORT_SECONDS"; else api POST /turn "$TMP/turn" "$TURN_SECONDS"; fi
+  cp "$TMP/answer" "$TMP/turned"
+  INBOX_WAITING=""
+  [ "$STATUS" != "200" ] || INBOX_WAITING=$(json_get "$TMP/turned" inbox_waiting)
+  if send_later && [ -n "$kept_id" ] && [ "$(cat "$TMP/reply-json")" != '""' ]; then
+    turn_body "$1" "" > "$TMP/turn"
+    keep_unsent turn "$turn_id" "$TMP/turn"
+  fi
+}
+
+# The body of a turn's end: its request_id (turn_id), the session ($1), the reply (as `reply_json` left it) to the
+# message kept (kept_id), and with "work" in $2 the session's work report.
+turn_body() {
+  printf '{"request_id":"%s","session":%s,"remote":%s,"branch":%s,"tool":"%s","keep":true' "$turn_id" \
+    "$(json_quote "$(basename "$1")")" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
+  [ -n "$kept_id" ] && printf ',"message_id":%s' "$(json_quote "$kept_id")"
+  [ "$2" = "work" ] && { printf ',"work":'; cat "$TMP/report"; }
+  printf ',"reply":'
+  cat "$TMP/reply-json"
+  printf '}'
 }
 
 # -- the commands ------------------------------------------------------------------------------------------------
@@ -2723,12 +3257,16 @@ command_here() {
   project_of "$HERE"
 }
 
-# The session a command run outside a hook belongs to: the one a message was last sent in from this project.
+# The session a command belongs to: in a hook, the hook's own; run outside one, the one its tool says it runs in.
+# Codex gives its model's commands their thread's id (CODEX_SESSION_ID, else CODEX_THREAD_ID), the session id its
+# hooks are given; in Claude Code a session's start leaves its id for the commands that follow (VYAVASTA_SESSION, in
+# CLAUDE_ENV_FILE). Never another window's or another project's: where nothing says which, none is sent, and the
+# server keeps it apart from every session's chat. Named as the hooks name a session's folder, so both speak of one.
 command_session() {
   if [ -n "${SESSION:-}" ]; then printf '%s' "$SESSION"; return; fi
-  if [ -n "${VYAVASTA_SESSION:-}" ]; then printf '%s' "$VYAVASTA_SESSION"; return; fi
-  [ -f "$PDIR/session" ] && { cat "$PDIR/session"; return; }
-  cat "$HOME_DIR/session"
+  given="${VYAVASTA_SESSION:-}"
+  [ -n "$given" ] || [ "$CLIENT" != "codex" ] || given="${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-}}"
+  printf '%s' "$given" | tr -cd 'A-Za-z0-9_-' | cut -c1-80
 }
 
 # The line a command gives when it needs the server and can't have it: signed out, the connection ended, or the
@@ -2739,6 +3277,8 @@ need_token() {
     if pending_waiting; then
       PAIR_AGAIN=1
       echo "You aren’t signed in to Vyavasta on this computer yet. To connect, $(code_said). Once you approve, send this again."
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      echo "Nothing was sent, because $(out_said). $WAY_IN_AGAIN"
     else
       echo "You aren’t signed in to Vyavasta on this computer. $WAY_IN"
     fi
@@ -2751,7 +3291,8 @@ not_reached() {
     401) echo "This computer’s connection to Vyavasta has ended. $WAY_IN_AGAIN" ;;
     429) echo "Vyavasta had too many requests just now. Try again in a minute." ;;
     000)
-      if [ -n "$SLOW" ]; then echo "Vyavasta took too long to answer. Try again in a moment."
+      if [ -n "$NOCURL" ]; then echo "Vyavasta needs curl, which isn’t installed here. Install it, and on Windows use Git for Windows, which brings it."
+      elif [ -n "$SLOW" ]; then echo "Vyavasta took too long to answer. Try again in a moment."
       elif [ "$CLIENT" = "codex" ] && [ -z "${IN_HOOK:-}" ]; then echo "Vyavasta can’t be reached from here. Codex runs the commands its model starts in a closed-off space that can’t reach the internet: send it as a message instead, such as “vyavasta status”."
       else echo "Vyavasta’s server can’t be reached right now. Check your internet connection, or try again in a minute."; fi ;;
     5*) echo "Vyavasta’s server isn’t working right now. Try again in a minute." ;;
@@ -2771,7 +3312,9 @@ command_sign_in() {
       return
     fi
   fi
-  # A sign-in still waiting is told again, never started a second time.
+  # A sign-in still waiting is told again, never started a second time. (Asked for, it starts on a computer that
+  # signed out too.)
+  ASKED_SIGN_IN=1
   if ! start_pairing; then
     echo "Couldn’t start connecting to Vyavasta at $SERVER: ${PAIR_FAILED%.}."
     [ "$STATUS" = "000" ] && echo "Check the address and your connection. To use another server, set VYAVASTA_SERVER before starting ${TOOL}."
@@ -2788,17 +3331,19 @@ command_sign_in() {
   echo "${lasts_said:+$lasts_said }$(finish_said)"
 }
 
+# Signing out is kept to: nothing starts signing in again by itself, and nothing is sent, until the developer sends
+# “vyavasta sign in” (`signed_out_here`).
 command_sign_out() {
   rm -f "$PENDING"
   if [ -z "$TOKEN" ]; then
-    rm -f "$CREDENTIALS"
-    echo "Not signed in to Vyavasta on this computer."
+    signed_out_here out
+    echo "Not signed in to Vyavasta on this computer, and nothing starts signing in by itself until you send “vyavasta sign in”."
     return
   fi
   api POST /signout "" "$QUICK_SECONDS"
-  rm -f "$CREDENTIALS" "$HOME_DIR/guide-emailed"
-  forget_told
-  echo "Signed out of Vyavasta on this computer. Requests are no longer checked, and nothing is sent from this computer."
+  signed_out_here out
+  rm -f "$HOME_DIR/guide-emailed"
+  echo "Signed out of Vyavasta on this computer. Requests are no longer checked, and nothing is sent from this computer until you send “vyavasta sign in”."
 }
 
 command_on() {
@@ -2811,7 +3356,6 @@ command_on() {
   fi
   mark_greeted
   if [ -n "${SESSION:-}" ]; then
-    printf '%s\n' "$SESSION" > "$PDIR/session"
     if repository "$HERE"; then
       [ -f "$SESSIONS/$SESSION/start" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD > "$SESSIONS/$SESSION/start"
     fi
@@ -2821,7 +3365,9 @@ command_on() {
   finish_pairing
   if repository "$HERE"; then :; else ROOT=""; REMOTE=""; fi
   if [ -z "$TOKEN" ]; then
-    if start_pairing; then
+    if [ -f "$HOME_DIR/signed-out" ] && ! pending_waiting; then
+      echo "It sends nothing until you sign in again, because $(out_said). $WAY_IN_AGAIN"
+    elif start_pairing; then
       # The page is open already: the session's first message doesn't open it a second time.
       [ -n "${SESSION:-}" ] && mkdir -p "$SESSIONS/$SESSION" && true > "$SESSIONS/$SESSION/said-sign-in"
       lasts_said=$(code_lasts_said)
@@ -2860,7 +3406,9 @@ command_on() {
 # Whether Vyavasta reads this project's repository. $1, when given, is /me's list of repositories, and $2 its
 # `checks` (false where the server checks no request).
 repo_said() {
-  if [ -z "$ROOT" ]; then
+  if [ -n "$NOGIT" ]; then
+    echo "Vyavasta needs git, which isn’t installed here, so changes here aren’t checked. Questions about your team are answered here all the same."
+  elif [ -z "$ROOT" ]; then
     echo "This folder isn’t a git repository, so changes here aren’t checked. Questions about your team are answered here all the same."
   elif [ -z "$REMOTE" ]; then
     echo "This repository has no copy on GitHub, so changes here aren’t checked. Questions about your team are answered here all the same."
@@ -3007,7 +3555,7 @@ command_settings() {
   else echo "- Summaries: off. Send “vyavasta summaries on” to turn them on."; fi
   if [ -n "$TOKEN" ]; then echo "- Signed in as: $(person "$(saved email)") in $(person "$(saved workspace)"). Send “vyavasta sign out” to sign out."
   else echo "- Signed in as: nobody. $WAY_IN"; fi
-  echo "- Server: $SERVER. To use another, run “sh $SELF use-server <address>” in a terminal, or set VYAVASTA_SERVER."
+  echo "- Server: $SERVER. To use another, run “sh $TOLD_SELF use-server <address>” in a terminal, or set VYAVASTA_SERVER."
 }
 
 # Help: what Vyavasta does here in two lines, the three steps to start with the state of each, then every command,
@@ -3248,7 +3796,8 @@ command_check() {
   else
     echo "Problem: signed in as $(person "$(saved email)"), but that couldn’t be checked while the server is out of reach."
   fi
-  if ! repository "$HERE"; then
+  if [ -n "$NOGIT" ]; then :
+  elif ! repository "$HERE"; then
     echo "Problem: this folder isn’t a git repository, so changes here can’t be checked. Questions about your team still work."
   elif [ -z "$REMOTE" ]; then
     echo "Problem: this repository has no copy on GitHub (no remote), so changes here can’t be checked. Add one with “git remote add origin <address>”."
@@ -3644,7 +4193,8 @@ tell() {
   fi
   if repository "$HERE"; then :; else REMOTE=""; BRANCH=""; fi
   {
-    printf '{"to":%s,"text":%s,"kind":"message"' "$(json_quote "$1")" "$(json_quote "$2")"
+    printf '{"request_id":"%s","to":%s,"text":%s,"kind":"message"' "$(new_request_id)" "$(json_quote "$1")" \
+      "$(json_quote "$2")"
     # (Several at once: the list the server gave, its names each a JSON string, sent back as it came.)
     [ -n "${TELL_MANY:-}" ] && printf ',"to_many":%s' "$TELL_MANY"
     [ -n "${3:-}" ] && printf ',"reply_to":%s' "$(json_quote "$3")"
@@ -3652,8 +4202,9 @@ tell() {
     printf ',"session":%s,"remote":%s,"branch":%s,"tool":"%s"}' "$(json_quote "$(command_session)")" \
       "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$CLIENT"
   } > "$TMP/tell"
-  api POST /tell "$TMP/tell" "$ASK_SECONDS"
+  api POST /tell "$TMP/tell" "$ASK_SECONDS" keep
   wait_on /tell "$TMP/tell"
+  rm -f "$TMP/tell"
   if [ "$STATUS" = "000" ] && [ -z "$SLOW" ] && [ -z "${IN_HOOK:-}" ] && [ "$CLIENT" = "codex" ]; then
     # Out of reach at once, run by Codex's model: inside its sandbox, which Codex says of a command it runs there
     # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so.
