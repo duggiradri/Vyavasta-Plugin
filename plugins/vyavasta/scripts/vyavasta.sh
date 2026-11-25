@@ -63,13 +63,19 @@ WAY_IN_AGAIN="Send “vyavasta sign in” to connect again."
 # What a server that checks no request does instead (/me says `"checks": false`: the demo, or one with no model),
 # said wherever a line would otherwise say that requests are checked.
 UNCHECKED="This Vyavasta server doesn’t check requests, so ${AGENT} is shown what your team has said about each one instead."
-# This script, by its full path: what the tool's model is told to run to ask Vyavasta a question.
+# This script, by its full path.
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-case "$CLIENT" in codex) ASK_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" ask" ;; *) ASK_WITH="sh \"$SELF\" ask" ;; esac
-# And what it is told to run to send a teammate a message: the same script, with who it is for and the words.
-case "$CLIENT" in codex) TELL_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" tell" ;; *) TELL_WITH="sh \"$SELF\" tell" ;; esac
-# And what it is told to run to list, search and read the team's documents: the same script, with “documents”.
-case "$CLIENT" in codex) DOCS_WITH="VYAVASTA_TOOL=codex sh \"$SELF\" documents" ;; *) DOCS_WITH="sh \"$SELF\" documents" ;; esac
+# What the tool's model is told to run to ask Vyavasta a question, to send a teammate a message (the same script, with
+# who it is for and the words) and to list, search and read the team's documents (with “documents”): the script at
+# $1, run by sh, with the tool's name given for Codex through env, so that any login shell runs it. TOLD_SELF is $1.
+model_commands() {
+  case "$CLIENT" in codex) lead="env VYAVASTA_TOOL=codex " ;; *) lead="" ;; esac
+  ASK_WITH="${lead}sh \"$1\" ask"
+  TELL_WITH="${lead}sh \"$1\" tell"
+  DOCS_WITH="${lead}sh \"$1\" documents"
+  TOLD_SELF=$1
+}
+model_commands "$SELF"
 # How Codex's model is to run that command, said where it is given the command and again where the command finds
 # itself inside the sandbox: outside it, which Codex's model may ask for (the request is approved by the developer or
 # by Codex's own reviewer), and what to tell the developer when it is refused.
@@ -98,6 +104,23 @@ CREDENTIALS="$HOME_DIR/credentials"
 PENDING="$HOME_DIR/pairing"
 SESSIONS="$HOME_DIR/sessions"
 PROJECTS="$HOME_DIR/projects"
+# The copy of this script that the tool's model is told to run, one for each tool, in the settings folder: made at a
+# session's start (`keep_model_copy`), its path stays the same when the tool updates the plugin and deletes the folder
+# of the version that runs. It is told wherever this script would be, while it is this very script; otherwise this
+# script's own path is.
+MODEL_COPY="$HOME_DIR/bin/vyavasta-$CLIENT.sh"
+case "${1:-} ${2:-}" in
+  "hook session-start"|"hook prompt"|ask\ *|tell\ *|documents\ *|docs\ *|settings\ *)
+    [ -f "$MODEL_COPY" ] && cmp -s "$SELF" "$MODEL_COPY" && model_commands "$MODEL_COPY" ;;
+esac
+# Writes that copy when it isn't this script already, all at once and readable by the developer only, and tells it
+# from then on. Quiet when it can't (the model is then told this script's own path).
+keep_model_copy() {
+  [ "$TOLD_SELF" != "$MODEL_COPY" ] || return 0
+  mkdir -p "$HOME_DIR/bin" && chmod 700 "$HOME_DIR/bin" && cp "$SELF" "$MODEL_COPY.$$" && chmod 600 "$MODEL_COPY.$$" \
+    && mv -f "$MODEL_COPY.$$" "$MODEL_COPY" && model_commands "$MODEL_COPY"
+  rm -f "$MODEL_COPY.$$"
+}
 # A file that is there once this tool has welcomed the developer on this computer. The sign-in and the settings are
 # one for both tools; the welcome is each tool's own, so the first session of each says it, whatever the other did
 # before. (A version before 0.5.3 kept one file for the computer, `welcomed`, which doesn't say which tool wrote it:
@@ -630,8 +653,7 @@ out_said() {
 
 # Sets PROJECT (the git top-level folder of a folder, or the folder itself outside git) and PDIR, where this
 # computer keeps the project's choices: `on` (there when the plugin is on here), `sharing` (on or off; not there
-# when never chosen), `summaries` (on or off; not there when never chosen, which is on), `session` (the session a
-# message was last sent in).
+# when never chosen), `summaries` (on or off; not there when never chosen, which is on).
 project_of() {
   PROJECT=$(git_read -C "$1" rev-parse --show-toplevel 2>/dev/null)
   [ -n "$PROJECT" ] || PROJECT="$1"
@@ -1608,25 +1630,36 @@ hook_session_start() {
   dir=$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")
   folder=$(input_folder)
   project_of "$folder"
+  # How the session started: afresh, or as the same conversation going on, resumed, cleared or compacted (a compaction
+  # can come in the middle of a turn). Going on, a message of the session still waits for its reply, the developer is
+  # not greeted again, and nothing is fetched again: the tool's model, which lost what it was told, is told it again.
+  source=$(json_text "$(json_get "$TMP/input" source)")
+  case "$source" in resume|clear|compact) again=1 ;; *) again="" ;; esac
   sweep_scratch
+  keep_model_copy
+  # The commands Claude's model runs in this session belong to it: its id is left for them in the file Claude Code
+  # reads into each of their environments (CLAUDE_ENV_FILE), once.
+  if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ "$(basename "$dir")" != "no-session" ]; then
+    told="export VYAVASTA_SESSION=$(basename "$dir")"
+    grep -qxF "$told" "$CLAUDE_ENV_FILE" || printf '%s\n' "$told" >> "$CLAUDE_ENV_FILE"
+  fi
   if ! project_on; then
-    welcome "$dir"
+    [ "$source" = "compact" ] || welcome "$dir"
     return
   fi
   # The first session after the plugin was installed or updated opens with the banner, and after an update with what
   # is new: once, before whatever the session's start says.
   BANNER=""
-  if greeting_due; then
+  if [ -z "$again" ] && greeting_due; then
     if [ -f "$WELCOMED" ]; then BANNER="$(banner)
 $WHATS_NEW
 "; else BANNER="$(banner)
 "; fi
     mark_greeted
   fi
-  basename "$dir" > "$PDIR/session"
-  # A new session has no message of its own waiting for its reply.
-  rm -f "$dir/turn-waiting"
-  summaries_note
+  # A new session has no message of its own waiting for its reply (one that goes on keeps it, to be kept with it).
+  SUMMARIES_NOTE=""
+  if [ -z "$again" ]; then rm -f "$dir/turn-waiting"; summaries_note; fi
   # Where the tree stood when the session began, to tell later whether anything of it was kept.
   if repository "$folder"; then
     [ -f "$dir/start" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD > "$dir/start"
@@ -1635,6 +1668,8 @@ $WHATS_NEW
   find "$SESSIONS" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
   offline || finish_pairing
   if [ -z "$TOKEN" ]; then
+    # (Signed out in the middle of work: the next message says so.)
+    [ "$source" = "compact" ] && return
     # Signed out in a project that is on: sign-in starts by itself, once, here (the session's first message then
     # doesn't start it again); one still waiting is told again, with its code.
     if pending_waiting; then
@@ -1650,13 +1685,28 @@ $WHATS_NEW
     fi
     return
   fi
-  api GET /me "" "$QUICK_SECONDS"
+  # Going on, connected as before: nothing is asked of the server, and the developer is not greeted again (what /me
+  # said of the server's checks when a session last started is kept, for what the tool's model is told).
+  quiet=""
+  [ -n "$again" ] && [ -z "$CONNECTED" ] && quiet=1
+  if [ -n "$quiet" ]; then
+    STATUS=200
+    checks=$(sed -n "s#^$SERVER ##p" "$HOME_DIR/checks" | sed -n '1p')
+  else
+    # (A server that can sends what teammates sent the developer with this answer, as /inbox?told=1 would: one call
+    # less. An older one sends none, and /inbox is asked below.)
+    api GET "/me?inbox=1" "" "$QUICK_SECONDS"
+    json_get "$TMP/answer" inbox > "$TMP/me-inbox"
+    checks=$(answer checks)
+    # (An answer that isn't Vyavasta's, such as a page in between, names nobody: it is no sign-in.)
+    [ "$STATUS" != "200" ] || [ -n "$(answer email)" ] || STATUS=unread
+    [ "$STATUS" != "200" ] || { mkdir -p "$HOME_DIR" && printf '%s %s\n' "$SERVER" "$checks" > "$HOME_DIR/checks"; }
+  fi
   case "$STATUS" in
     200)
-      remember_me
+      [ -n "$quiet" ] || remember_me
       if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
       else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
-      checks=$(answer checks)
       greeting="${BANNER}Vyavasta: $who $(reach_said "$(answer repositories)" "$checks")"
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
@@ -1665,8 +1715,10 @@ $WHATS_NEW
       # What teammates told the developer, or asked of them, while they were away, each told once: they read it under
       # the session's first line, and the tool's model is given it to open its first reply with.
       away=""
-      api GET "/inbox?told=1" "" "$QUICK_SECONDS"
-      if [ "$STATUS" = "200" ]; then
+      if [ -n "$quiet" ]; then :
+      elif [ "$(head -c 1 "$TMP/me-inbox")" = "{" ]; then cp "$TMP/me-inbox" "$TMP/answer"
+      else api GET "/inbox?told=1" "" "$QUICK_SECONDS"; fi
+      if [ "$STATUS" = "200" ] && [ -z "$quiet" ]; then
         items=$(answer items)
         if [ -n "$items" ] && [ "$items" != "[]" ]; then
           listing=$(render_inbox "$items" "$(answer more)")
@@ -1687,9 +1739,13 @@ $listing"
       else checked="each request for one is checked against the record before it reaches you."; fi
       # The developer is told they are connected; the tool's model is told what Vyavasta is here for, how to ask it
       # what the plugin did not already ask for them, and how to send a teammate a message for the developer.
-      printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
-        "$(json_quote "$greeting")" \
-        "$(json_quote "${away}Vyavasta is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavasta answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavasta before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" .$sandboxed $(tell_how) $(docs_how) Changes to the code are yours to make on this computer; $checked Messages that start with “vyavasta” are the developer’s commands to the plugin, which answers them itself.")"
+      context="${away}Vyavasta is connected for this developer. It keeps their team’s record: what teammates said, decided and promised, and what each of them is working on, read from the sources the team connected. When the developer’s message asks about the team, Vyavasta answers it before the message reaches you, and you are given the answer to pass on. For anything else you need to know about the team (what a teammate is doing, what was decided, who said what, whether someone else is changing the same code), ask Vyavasta before any other source such as email or chat tools, by running this command with the question in plain words: $ASK_WITH \"<the question>\" .$sandboxed $(tell_how) $(docs_how) Changes to the code are yours to make on this computer; $checked Messages that start with “vyavasta” are the developer’s commands to the plugin, which answers them itself."
+      if [ -n "$quiet" ]; then
+        printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' "$(json_quote "$context")"
+      else
+        printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
+          "$(json_quote "$greeting")" "$(json_quote "$context")"
+      fi
       ;;
     401) say "${BANNER}Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
     429) say "${BANNER}Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for a moment. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
@@ -2039,7 +2095,6 @@ hook_prompt() {
   case "$(printf '%.80s' "$text" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')" in vyavasta*|vyavastha*) parse_typed "$text" ;; esac
   if [ -n "$TYPED" ]; then
     # The plugin's own commands, answered here whether or not it is on, and never sent to the model.
-    if project_on; then basename "$dir" > "$PDIR/session"; basename "$dir" > "$HOME_DIR/session"; fi
     answered_here "$(command_"$TYPED" "$TYPED_ARG")"
     return
   fi
@@ -2060,9 +2115,6 @@ hook_prompt() {
     return
   fi
   case "$words" in /*) return ;; esac
-  # The session a question asked by the tool's model belongs to (``ask``): the one a message was last sent in.
-  basename "$dir" > "$HOME_DIR/session"
-  basename "$dir" > "$PDIR/session"
   CONFLICT_CONTEXT=""
   if [ -f "$dir/conflict-id" ]; then
     if repository "$HERE"; then :; else REMOTE=""; fi
@@ -2539,12 +2591,16 @@ command_here() {
   project_of "$HERE"
 }
 
-# The session a command run outside a hook belongs to: the one a message was last sent in from this project.
+# The session a command belongs to: in a hook, the hook's own; run outside one, the one its tool says it runs in.
+# Codex gives its model's commands their thread's id (CODEX_SESSION_ID, else CODEX_THREAD_ID), the session id its
+# hooks are given; in Claude Code a session's start leaves its id for the commands that follow (VYAVASTA_SESSION, in
+# CLAUDE_ENV_FILE). Never another window's or another project's: where nothing says which, none is sent, and the
+# server keeps it apart from every session's chat. Named as the hooks name a session's folder, so both speak of one.
 command_session() {
   if [ -n "${SESSION:-}" ]; then printf '%s' "$SESSION"; return; fi
-  if [ -n "${VYAVASTA_SESSION:-}" ]; then printf '%s' "$VYAVASTA_SESSION"; return; fi
-  [ -f "$PDIR/session" ] && { cat "$PDIR/session"; return; }
-  cat "$HOME_DIR/session"
+  given="${VYAVASTA_SESSION:-}"
+  [ -n "$given" ] || [ "$CLIENT" != "codex" ] || given="${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-}}"
+  printf '%s' "$given" | tr -cd 'A-Za-z0-9_-' | cut -c1-80
 }
 
 # The line a command gives when it needs the server and can't have it: signed out, the connection ended, or the
@@ -2632,7 +2688,6 @@ command_on() {
   fi
   mark_greeted
   if [ -n "${SESSION:-}" ]; then
-    printf '%s\n' "$SESSION" > "$PDIR/session"
     if repository "$HERE"; then
       [ -f "$SESSIONS/$SESSION/start" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD > "$SESSIONS/$SESSION/start"
     fi
@@ -2829,7 +2884,7 @@ command_settings() {
   else echo "- Summaries: off. Send “vyavasta summaries on” to turn them on."; fi
   if [ -n "$TOKEN" ]; then echo "- Signed in as: $(person "$(saved email)") in $(person "$(saved workspace)"). Send “vyavasta sign out” to sign out."
   else echo "- Signed in as: nobody. $WAY_IN"; fi
-  echo "- Server: $SERVER. To use another, run “sh $SELF use-server <address>” in a terminal, or set VYAVASTA_SERVER."
+  echo "- Server: $SERVER. To use another, run “sh $TOLD_SELF use-server <address>” in a terminal, or set VYAVASTA_SERVER."
 }
 
 # Help: what Vyavasta does here in two lines, the three steps to start with the state of each, then every command,

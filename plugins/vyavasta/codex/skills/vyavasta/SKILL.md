@@ -84,6 +84,11 @@ can send it themselves with `vyavasta tell <name>: <their words>`. Do not look f
 to reach a teammate unless the developer names one. The teammate sees the message in Vyavasta at once, and in their
 own coding tool with their next message there, and answers it themselves.
 
+When a command of the plugin’s cannot be found. The commands the plugin gives you run a copy of its script in its
+settings folder, which stays where it is when Codex updates the plugin. If one still fails because its file is
+missing, run nothing else of the plugin’s and look for no other copy of it: tell the developer, in one sentence, to
+start a new session, and to approve Vyavasta’s hooks there if Codex asks.
+
 When the plugin is not running. Codex runs a plugin’s hooks only after the developer has reviewed and trusted them,
 and after every update of the plugin, which Codex installs by itself, it runs none of them until the developer
 reviews them again. Until then Vyavasta does nothing in Codex: nothing is checked, answered or summed up. A message

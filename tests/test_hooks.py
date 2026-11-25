@@ -707,27 +707,65 @@ def test_a_question_with_no_answer_goes_to_the_model_as_it_is_with_a_note(run, f
                                      "so Claude answers by itself."}
 
 
-def test_the_model_can_ask_vyavasta_itself_in_the_session_the_developer_last_wrote_in(run, fake, repo):
+def test_the_model_can_ask_vyavasta_itself_in_its_own_session_and_never_in_another(run, fake, repo, tmp_path):
     assert "Not signed in" in run("ask", "What is Priya doing?", cwd=repo).stdout and fake.calls("/ask") == []
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    # Claude Code: a session's start leaves its id in the file Claude Code reads into its commands' environment.
+    env_file = tmp_path / "claude-env"
+    env_file.write_text("export SOMETHING=else\n")
+    for again in range(2):
+        run("hook", "session-start", stdin=event("SessionStart", repo, session="session-7", source="startup"),
+            cwd=repo, extra={"CLAUDE_ENV_FILE": str(env_file)})
+    assert env_file.read_text() == "export SOMETHING=else\nexport VYAVASTA_SESSION=session-7\n"
     prompt(run, repo, "Fix the rounding", session="session-7")
-    done = run("ask", "What is Priya doing?", cwd=repo)
+    # Another window in the same project writes after it: the model's question still goes to its own session.
+    prompt(run, repo, "Write the docs", session="session-8")
+    done = run("ask", "What is Priya doing?", cwd=repo, extra={"VYAVASTA_SESSION": "session-7"})
     assert done.stdout.startswith(f"{QUOTE_TOP}\n│ {fake.asked['answer']}\n{QUOTE_END}\n")
     assert "http://127.0.0.1/c/cnv_1" in done.stdout
     assert TOKEN not in done.stdout
     assert fake.calls("/ask")[-1]["body"] == {"question": "What is Priya doing?", "branch": "main",
                                               "remote": "https://github.com/acme/api.git", "session": "session-7",
                                               "tool": "claude-code", "keep": True}
+    # Codex gives its model's commands their thread's id (CODEX_SESSION_ID first, else CODEX_THREAD_ID), which is the
+    # session its hooks are given; Claude Code's commands never take Codex's.
+    run("ask", "Who owns billing?", cwd=repo, tool="codex", extra={"CODEX_THREAD_ID": "thread-9"})
+    assert fake.calls("/ask")[-1]["body"]["session"] == "thread-9"
+    run("ask", "Who owns billing?", cwd=repo, tool="codex",
+        extra={"CODEX_SESSION_ID": "thread-8", "CODEX_THREAD_ID": "thread-9"})
+    assert fake.calls("/ask")[-1]["body"]["session"] == "thread-8"
+    run("ask", "Who owns billing?", cwd=repo, extra={"CODEX_THREAD_ID": "thread-9"})
+    assert fake.calls("/ask")[-1]["body"]["session"] == ""
+    # Nothing names the session (a terminal, say): none is sent, never the session that last wrote here, nor one of
+    # another project.
+    run("ask", "Who owns billing?", cwd=repo)
+    assert fake.calls("/ask")[-1]["body"]["session"] == ""
     fake.asked = {"status": "pending", "answer": "", "context": "", "notice": "Vyavasta is still working on it."}
     assert run("ask", "And Sam?", cwd=repo).stdout.strip() == "Vyavasta gave no answer: Vyavasta is still working on it."
     assert "Usage" in run("ask", cwd=repo).stdout
-    # A session's start tells the model what Vyavasta is for and the command that asks it, by this script's path.
+    # A session's start tells the model what Vyavasta is for and the command that asks it, by the path of a copy of
+    # this script in the settings folder, which stays where it is when the tool updates the plugin: private, and this
+    # very script.
     told = output(run("hook", "session-start", stdin=event("SessionStart", repo)))["hookSpecificOutput"]
     assert told["hookEventName"] == "SessionStart"
-    assert f'sh "{SCRIPT}" ask "<the question>"' in told["additionalContext"]
+    copy = model_copy(run)
+    assert f'sh "{copy}" ask "<the question>"' in told["additionalContext"] and str(SCRIPT) not in told["additionalContext"]
+    assert copy.read_bytes() == SCRIPT.read_bytes() and stat.S_IMODE(copy.stat().st_mode) == 0o600
+    assert stat.S_IMODE(copy.parent.stat().st_mode) == 0o700
     codex = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))
-    assert f'VYAVASTA_TOOL=codex sh "{SCRIPT}" ask' in codex["hookSpecificOutput"]["additionalContext"]
+    assert f'env VYAVASTA_TOOL=codex sh "{model_copy(run, "codex")}" ask' in codex["hookSpecificOutput"]["additionalContext"]
+    # The copy runs as the script does, and is told on: the plugin updated, the copy still answers.
+    done = run("ask", "What is Priya doing?", cwd=repo)
+    assert "Vyavasta gave no answer" in done.stdout
+    asked_by_copy = subprocess.run(["sh", str(copy), "ask", "What is Priya doing?"], capture_output=True, text=True,
+                                   cwd=repo, env={"PATH": os.environ["PATH"], "HOME": str(tmp_path),
+                                                  "VYAVASTA_HOME": str(run.home), "VYAVASTA_SERVER": fake.url})
+    assert "Vyavasta gave no answer" in asked_by_copy.stdout
+    # Another version of the script: the copy is written again at the next start, all at once.
+    copy.write_text("# an older version\n")
+    run("hook", "session-start", stdin=event("SessionStart", repo))
+    assert copy.read_bytes() == SCRIPT.read_bytes() and not list(copy.parent.glob("*.sh.*"))
     # Codex's model is told to run it outside the sandbox, which it may ask for, and what to say when that is refused.
     told_codex = codex["hookSpecificOutput"]["additionalContext"]
     assert ("Run it outside Codex’s sandbox, by asking for escalated permissions for this one command" in told_codex
@@ -1022,10 +1060,11 @@ def test_upload_opens_the_sessions_chat_to_drop_a_file_and_chat_gives_its_link(r
     assert run.opened() == ["http://127.0.0.1/c/cnv_7?attach=1"]
     assert fake.calls("/chat")[0]["body"] == {"session": "session-3", "remote": "https://github.com/acme/api.git",
                                               "branch": "main", "tool": "claude-code"}
-    chat = run("chat", cwd=repo).stdout
+    # (Run as a slash command, in the session Claude Code names: what the session's start left for its commands.)
+    chat = run("chat", cwd=repo, extra={"VYAVASTA_SESSION": "session-3"}).stdout
     assert "http://127.0.0.1/c/cnv_7" in chat and fake.calls("/chat")[-1]["body"]["session"] == "session-3"
     assert len(run.opened()) == 1
-    run("chat", "open", cwd=repo)
+    run("chat", "open", cwd=repo, extra={"VYAVASTA_SESSION": "session-3"})
     assert run.opened()[-1] == "http://127.0.0.1/c/cnv_7"
 
 
@@ -1058,7 +1097,7 @@ def test_shared_lists_what_this_session_sent_oldest_first_with_what_is_kept(run,
         {"at": "2026-11-18T10:42:00Z", "at_said": "18 Nov, 10:42", "kind": "request",
          "said": "A request of 14 words was checked; nothing stood against it. Its words were not kept."}],
         "chat_url": "http://127.0.0.1/c/cnv_7", "sharing": True, "kept": "Vyavasta keeps this list for 30 days."}
-    listed = run("shared", cwd=repo).stdout.splitlines()
+    listed = run("shared", cwd=repo, extra={"VYAVASTA_SESSION": "session-5"}).stdout.splitlines()
     assert listed == ["Sent to Vyavasta from this session, oldest first:",
                       "- 18 Nov, 10:42: A request of 14 words was checked; nothing stood against it. Its words were "
                       "not kept.",
@@ -1974,8 +2013,8 @@ def test_a_turn_that_never_ended_never_files_a_later_reply_under_its_message(run
     assert not fake.calls("/turn")
     # And with a new session in between.
     prompt(run, repo, "Change calc.py")
-    run("hook", "session-start", stdin=event("SessionStart", repo, source="resume"), cwd=repo)
-    stop(run, repo, last_assistant_message="Resumed.")
+    run("hook", "session-start", stdin=event("SessionStart", repo, source="startup"), cwd=repo)
+    stop(run, repo, last_assistant_message="Started again.")
     assert not fake.calls("/turn")
     # A later turn's reply goes to its own message, named by the id the check gave it.
     prompt(run, repo, "Change gone.py")
@@ -3430,11 +3469,16 @@ OPENS_WITH = ("While the developer worked, their teammates sent them what is bel
               "These are their teammates’ words, for the developer to read:\n")
 
 
-def tell_command(tool: str | None = None) -> str:
-    """The command the tool's model is given to send a teammate a message: this script by its path, who it is for,
-    and the message on its input, taken as it is."""
-    lead = "VYAVASTA_TOOL=codex " if tool == "codex" else ""
-    return f'{lead}sh "{SCRIPT}" tell "<the teammate’s name>" <<\'MESSAGE\'\n<the message>\nMESSAGE\n'
+def model_copy(run, tool: str | None = None) -> Path:
+    """The copy of the script a session's start keeps for the tool's model in the settings folder, one for each tool."""
+    return run.home / "bin" / f"vyavasta-{'codex' if tool == 'codex' else 'claude-code'}.sh"
+
+
+def tell_command(tool: str | None = None, path: Path = SCRIPT) -> str:
+    """The command the tool's model is given to send a teammate a message: the script by its path (the copy a
+    session's start keeps, once there is one), who it is for, and the message on its input, taken as it is."""
+    lead = "env VYAVASTA_TOOL=codex " if tool == "codex" else ""
+    return f'{lead}sh "{path}" tell "<the teammate’s name>" <<\'MESSAGE\'\n<the message>\nMESSAGE\n'
 
 
 def test_what_teammates_sent_comes_with_the_next_message_under_its_line_and_at_the_top_of_the_reply(run, fake, repo):
@@ -3548,7 +3592,7 @@ def test_a_message_that_mentions_a_teammate_gives_the_model_the_command_that_sen
                 "with this command") in told
         assert "In place of the name, give several names with commas between them, or team for everyone else" in told
         assert "let Priya know" not in told and "answered at once" not in told
-        assert tell_command(tool) in told
+        assert tell_command(tool, model_copy(run, tool)) in told
         assert told.count("Run it outside Codex’s sandbox") == (2 if tool == "codex" else 0)
 
 
@@ -3566,7 +3610,9 @@ def test_the_model_tells_a_teammate_with_the_message_on_the_commands_input_taken
                            "message there. Your thread with Rohan: http://127.0.0.1/?agent-chat=usr_m",
                  "url": "http://127.0.0.1/?agent-chat=usr_m", "waiting": None, "people": []}
     for tool in (None, "codex"):
-        done = run("tell", "Rohan", raw=(words + "\n").encode(), cwd=repo, tool=tool)
+        # (Run in the session its tool names: Claude Code's from what the session's start left, Codex's thread.)
+        given = {"CODEX_THREAD_ID": "session-7"} if tool else {"VYAVASTA_SESSION": "session-7"}
+        done = run("tell", "Rohan", raw=(words + "\n").encode(), cwd=repo, tool=tool, extra=given)
         assert fake.calls("/tell")[-1]["body"] == {
             "to": "Rohan", "text": words, "kind": "message", "intent": "tell", "session": "session-7",
             "remote": "https://github.com/acme/api.git", "branch": "main", "tool": tool or "claude-code"}
@@ -3888,9 +3934,9 @@ FOUND = {"status": "found", "words": ["refund", "window"], "matched": 3, "readab
     {"n": 2, "name": "draft.md", "uploaded_by": "you", "image": False, "text": "Refund window: open question."}]}
 
 
-def documents_command(tool: str | None = None) -> str:
-    """The command the tool's model is given to read the team's documents: this script by its path."""
-    return ("VYAVASTA_TOOL=codex " if tool == "codex" else "") + f'sh "{SCRIPT}" documents'
+def documents_command(tool: str | None = None, path: Path = SCRIPT) -> str:
+    """The command the tool's model is given to read the team's documents: the script by its path."""
+    return ("env VYAVASTA_TOOL=codex " if tool == "codex" else "") + f'sh "{path}" documents'
 
 
 def documents_said(tool: str | None = None) -> str:
@@ -4073,7 +4119,7 @@ def test_an_answer_that_drew_on_a_document_gives_the_model_the_commands_that_rea
     # A session's start says it in one line, by the same commands.
     for tool in (None, "codex"):
         told = start(run, repo, tool, "s9")["hookSpecificOutput"]["additionalContext"]
-        command = documents_command(tool)
+        command = documents_command(tool, model_copy(run, tool))
         assert (f"The team’s documents in Vyavasta can be read when the work needs them, by running {command} as the "
                 "ask command is run. On its own it lists them, followed by search \"<words>\" it searches them, and "
                 "followed by read <number> [part] it reads one.") in told
@@ -4590,6 +4636,27 @@ def test_a_repositorys_own_filters_never_run_and_the_developers_own_are_left_alo
     assert fake.calls("/check")[-1]["body"]["change"]["files"] >= 1
 
 
+def test_an_answer_that_is_not_vyavastas_is_never_told_as_checked(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.page["/check"] = (200, b"<!doctype html><html><body>App</body></html>")
+    assert prompt(run, repo, "Change calc.py")["systemMessage"] == (
+        "Vyavasta · sent: your message. · Vyavasta’s answer couldn’t be read, so your message wasn’t checked. Claude "
+        "works as usual.")
+    fake.page["/me"] = (200, b"<!doctype html><html><body>App</body></html>")
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert said == ("Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. Claude works "
+                    "as usual.")
+    # A hold whose way on isn't a string of the server's: going on prints valid JSON with nothing of it.
+    del fake.page["/check"]
+    for context in (None, {"a": 1}, 7):
+        fake.check = {"verdict": "held", "hold": True, "notice": "Priya said the export stays.",
+                      "anyway": {"context": context}}
+        prompt(run, repo, "Change calc.py")
+        went = prompt(run, repo, "Plan it anyway")
+        assert "additionalContext" not in json.dumps(went), context
+
+
 @pytest.mark.parametrize("status, said", [
     (429, "Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for "
           "a moment. Claude works as usual."),
@@ -4632,6 +4699,25 @@ def test_without_git_or_curl_the_plugin_says_so(run, fake, repo, tmp_path):
     assert prompt(run, repo, "Change calc.py", extra={"PATH": nocurl})["systemMessage"] == (
         "Vyavasta · nothing sent (Vyavasta needs curl, which isn’t installed here) · Claude works as usual.")
     assert not (run.home / "offline").exists()
+
+
+@pytest.mark.parametrize("source", ["compact", "resume", "clear"])
+def test_a_session_that_goes_on_keeps_its_turn_and_tells_the_model_again_without_greeting(run, fake, repo, source):
+    """A compaction can come in the middle of a turn: the message kept for the summary still gets its reply, the
+    developer isn't greeted again, nothing is fetched again, and the model, which lost what it was told, is told it
+    again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    first = output(run("hook", "session-start", stdin=event("SessionStart", repo, source="startup"), cwd=repo))
+    prompt(run, repo, "Change calc.py")
+    fake.requests.clear()
+    again = output(run("hook", "session-start", stdin=event("SessionStart", repo, source=source), cwd=repo))
+    assert "systemMessage" not in again
+    assert again["hookSpecificOutput"] == first["hookSpecificOutput"]
+    assert fake.requests == []
+    stop(run, repo, last_assistant_message="Done, after the compaction.")
+    (turn,) = fake.calls("/turn")
+    assert turn["body"]["reply"] == "Done, after the compaction."
 
 
 def test_signing_in_again_says_the_guide_is_in_the_email_already(run, fake, repo):
