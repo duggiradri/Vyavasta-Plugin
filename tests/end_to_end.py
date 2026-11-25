@@ -275,6 +275,9 @@ def main() -> int:
                "the plugin answers “vyavasta on” itself")
         expect("Vyavasta reads northwind/customer-platform for you" in reason and "Code sharing is off" in reason,
                "and says the repository is read and code sharing is off")
+        expect("Teammates who also read northwind/customer-platform in Vyavasta see which files you change here" in reason
+               and "When you and a teammate change the same file, both of you are told" in reason,
+               "and what teammates see of the work, and that both are told when they change the same file")
 
         step("SessionStart")
         said = hook("session-start", "SessionStart", repo, source="startup")
@@ -588,6 +591,57 @@ def main() -> int:
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta open settings")
         expect(said.get("decision") == "block" and f"{base}/settings" in said.get("reason", ""),
                "“vyavasta open settings” is answered by the plugin with the settings page of this server")
+
+        # (A server from before same-file warnings tells nothing of them: the step is left out against one.)
+        if "_same_files" in (project / "src" / "mas_stealth" / "product" / "plugin_api.py").read_text():
+            step("The same file: Ganesh, with his own plugin and clone, changes a file Sam is changing, and both are told")
+            ganesh_home, theirs = work / "ganesh-home", work / "ganesh-clone"
+            signing = plugin("sign-in", home_dir=ganesh_home)
+            found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", signing)
+            if found:
+                ganesh.ok("POST", "/plugin/pairings/approve", {"code": found.group(1), "approve": True})
+            (theirs / "api").mkdir(parents=True)
+            for command in (["init", "-q", "--initial-branch=main"], ["remote", "add", "origin", REMOTE]):
+                subprocess.run(["git", "-C", str(theirs), *command], check=True)
+            (theirs / "api" / "serializers.py").write_text("FIELDS = ['id', 'customer_plan', 'subscription_tier']\n")
+            subprocess.run(["git", "-C", str(theirs), "add", "--all"], check=True)
+            subprocess.run(["git", "-C", str(theirs), "commit", "-q", "-m", "Initial"], check=True, env=environment)
+            subprocess.run(["git", "-C", str(theirs), "checkout", "-q", "-b", "plan-field"], check=True)
+            turned_on = plugin("on", cwd=theirs, home_dir=ganesh_home)
+            expect("When you and a teammate change the same file, both of you are told, as a heads-up" in turned_on,
+                   "“vyavasta on” tells Ganesh what teammates see and that both are told when they change the same file")
+
+            def ganesh_hook(name: str, event: str, **fields) -> dict:
+                stdin = {"session_id": "ganesh-session", "transcript_path": str(work / "ganesh.jsonl"),
+                         "cwd": str(theirs), "permission_mode": "default", "hook_event_name": event, **fields}
+                printed = plugin("hook", name, stdin=stdin, cwd=theirs, home_dir=ganesh_home)
+                said = json.loads(printed) if printed.strip() else {}
+                print(f"  Ganesh’s {event} printed: {json.dumps(said, ensure_ascii=False)[:700]}")
+                return said
+
+            (theirs / "api" / "serializers.py").write_text("FIELDS = ['id', 'plan']\n")
+            expect(ganesh_hook("edited", "PostToolUse", tool_name="Edit") == {},
+                   "the report after Ganesh’s edit prints nothing")
+            said = ganesh_hook("edit-check", "PostToolUse", tool_name="Edit")
+            told = said.get("systemMessage", "")
+            details = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+            expect(told.startswith("Vyavasta: Sam Rivera is also changing api/serializers.py in "
+                                   "northwind/customer-platform, on their own computer and not committed yet.")
+                   and "decision" not in said and "continue" not in said,
+                   "the check after his next edit tells Ganesh who else is changing the file, and stops nothing")
+            expect("│ Sam Rivera is changing northwind/customer-platform with Claude Code on their own computer, on "
+                   "the branch drop-customer-plan." in details and "heads-up, never in the way of the change" in details,
+                   "and Ganesh’s Claude is given who, where, on which branch and that it is a heads-up")
+            expect(ganesh_hook("edit-check", "PostToolUse", tool_name="Edit") == {}, "once")
+            said = hook("prompt", "UserPromptSubmit", repo, prompt="Add a docstring to the serializer")
+            line = said.get("systemMessage", "")
+            expect("\n\nVyavasta: ganesh is also changing api/serializers.py in northwind/customer-platform, on their "
+                   "own computer and not committed yet. A heads-up only: nothing is held." in line,
+                   "Sam is told with his next message, under its line")
+            expect("on the branch plan-field." in said.get("hookSpecificOutput", {}).get("additionalContext", ""),
+                   "and Sam’s Claude is given Ganesh’s branch and the rest")
+            said = hook("prompt", "UserPromptSubmit", repo, prompt="And one for the view")
+            expect("is also changing" not in said.get("systemMessage", ""), "told once: the next message says nothing")
 
         step("Sam commits; Claude stops again")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Drop customer_plan"], check=True,

@@ -36,7 +36,10 @@ See what is shared
 - `vyavasta upload`: opens that chat so the developer can drop in a file for their next question.
 
 Otherwise, from a project that is on, each message’s words, the repository and branch, and changed files’ names are
-sent.
+sent. Teammates who read the same repository see which files the developer changes (with code sharing on, also a
+short summary of what the change does, never the code), and when the developer and a teammate change the same file,
+both are told once, as a heads-up that holds nothing: you are then given who, which files, on which branch, since
+when and what their change does, to tell the developer exactly when they ask.
 
 Teammates
 - `vyavasta team`: what each teammate is working on, from the summaries they share with the team.

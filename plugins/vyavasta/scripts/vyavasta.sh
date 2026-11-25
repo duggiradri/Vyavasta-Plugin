@@ -109,23 +109,35 @@ SESSIONS="$HOME_DIR/sessions"
 PROJECTS="$HOME_DIR/projects"
 UNSENT="$HOME_DIR/unsent"
 
-# The one check that runs after every edit, in both tools: whether a conflict is waiting to be told. It costs a file
-# test when there is none, so it is answered as soon as the settings folder is known, before anything else is set up.
-# Claude Code is stopped (conflict-stop). Codex goes on after a hook stops it there, and in its code mode (an edit made
-# inside a script it runs, the way its own models edit) keeps the edit's own result for its model whatever a hook
-# said in its place: only a block reaches its model there, as the error of that edit, which also ends the script. So
-# Codex is given a block (conflict-block), whose reason, shown to the developer under Codex's heading “Blocked by
-# hook” too, says what stands and that the edit was made, and tells its model to make no more edits and ask.
+# The one check that runs after every edit, in both tools: whether a conflict, or teammates changing the same files,
+# is waiting to be told. It costs a file test for each when there is none, so it is answered as soon as the settings
+# folder is known, before anything else is set up, and starts no program until one is there.
+#
+# A conflict: Claude Code is stopped (conflict-stop). Codex goes on after a hook stops it there, and in its code mode
+# (an edit made inside a script it runs, the way its own models edit) keeps the edit's own result for its model
+# whatever a hook said in its place: only a block reaches its model there, as the error of that edit, which also ends
+# the script. So Codex is given a block (conflict-block), whose reason, shown to the developer under Codex's heading
+# “Blocked by hook” too, says what stands and that the edit was made, and tells its model to make no more edits and ask.
+#
+# Teammates changing the same files (overlap-edit, from the report after an edit): a heads-up, never a stop or a
+# block, in either tool. The developer reads its line (a hook's note); the tool's model is given the details beside
+# the edit's result. Claude Code passes them on. Codex passes them on for an edit made with its own tool, but not in
+# its code mode, where nothing but a block reaches its model: so under Codex the details are given again with the next
+# message (overlap-context stays). A conflict waiting comes first, and the heads-up waits for the edit after it.
 if [ "${1:-}" = "hook" ] && [ "${2:-}" = "edit-check" ]; then
   if [ "$CLIENT" = "codex" ]; then told=conflict-block; else told=conflict-stop; fi
-  set -- "$SESSIONS"/*/"$told"
-  if [ ! -f "$1" ]; then cat >/dev/null; exit 0; fi
+  for waiting in "$SESSIONS"/*/"$told" "$SESSIONS"/*/overlap-edit; do [ -f "$waiting" ] && break; done
+  if [ ! -f "$waiting" ]; then cat >/dev/null; exit 0; fi
   id=$(head -c 65536 | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p' | sed -n '1p')
   id=$(printf '%s' "$id" | cut -c1-80)
   [ -n "$id" ] || id="no-session"
   if [ -f "$SESSIONS/$id/$told" ]; then
     cat "$SESSIONS/$id/$told"
     rm -f "$SESSIONS/$id/conflict-stop" "$SESSIONS/$id/conflict-say" "$SESSIONS/$id/conflict-block"
+  elif [ -f "$SESSIONS/$id/overlap-edit" ]; then
+    cat "$SESSIONS/$id/overlap-edit"
+    rm -f "$SESSIONS/$id/overlap-edit" "$SESSIONS/$id/overlap-line"
+    [ "$CLIENT" = "codex" ] || rm -f "$SESSIONS/$id/overlap-context"
   fi
   exit 0
 fi
@@ -183,7 +195,7 @@ guide_said() {
     printf '“vyavasta help” shows the commands any time.'
   fi
 }
-WHATS_NEW="line under each message is short after the first of a session. “vyavasta login”, “vyavasta turn on”, “vyavasta: status” and the like are commands too, and a mistyped one says which command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all. The end of a turn says when some are waiting. After “vyavasta sign out”, nothing signs in by itself until you send “vyavasta sign in”."
+WHATS_NEW="line under each message is short after the first of a session. “vyavasta login”, “vyavasta turn on”, “vyavasta: status” and the like are commands too, and a mistyped one says which command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all. The end of a turn says when some are waiting. After “vyavasta sign out”, nothing signs in by itself until you send “vyavasta sign in”. When you and a teammate change the same file, both of you are told, as a heads-up that holds nothing: teammates who read the same repository see which files you change."
 case "$CLIENT" in
   claude-code) WHATS_NEW="New in $VERSION: slash commands such as /vyavasta:status answer at once, with no turn of Claude. The $WHATS_NEW" ;;
   *) WHATS_NEW="New in $VERSION: the $WHATS_NEW" ;;
@@ -1167,7 +1179,7 @@ keep_unsent() {
 # kept too long, for a project that is off, or for a reply where summaries are off now, are given up. None is picked
 # before the time in `after`, when a kept call that went along was answered nothing in time (`ride_settled`).
 pick_ride() {
-  RIDE=""; RIDE_PATH=""; RIDE_KEPT=""
+  RIDE=""; RIDE_PATH=""; RIDE_KEPT=""; RIDE_WHOSE=""
   [ -z "${RODE:-}" ] && [ -d "$UNSENT" ] || return 0
   RODE=1
   after=$(cat "$UNSENT/after" 2>/dev/null)
@@ -1187,6 +1199,8 @@ pick_ride() {
     [ "$kind" = "work" ] && [ "$whose" = "${1:-}" ] && continue
     case "$kind" in turn|work) ;; *) continue ;; esac
     RIDE="$kept.json"; RIDE_PATH="/$kind"; RIDE_KEPT=$kept
+    # (A work report's session, whose folder keeps what its answer tells of teammates changing the same files.)
+    [ "$kind" = "work" ] && RIDE_WHOSE=$(printf '%s' "$whose" | tr -cd 'A-Za-z0-9_-' | cut -c1-80)
     return 0
   done
 }
@@ -1195,12 +1209,18 @@ pick_ride() {
 # could never be taken), it is done; otherwise it waits for a later call. One answered nothing in time (the server may
 # be slow to take it just now, such as a turn's end under load) holds every kept call back for RIDE_AFTER seconds
 # (`after`): the messages in that time go without one, and are never held up by it. It goes along again after that,
-# and a reply the server took already is known by its request_id and kept once.
+# and a reply the server took already is known by its request_id and kept once. A work report taken may tell of
+# teammates changing the same files: kept for its own session, which may be another one, to show with that session's
+# next message or turn's end (never at another session's edits: `keep_overlap` without “edit”).
 ride_settled() {
   case "$1" in
     2*|400|401|403|404|409|410|413|422) rm -f "$RIDE_KEPT.json" "$RIDE_KEPT.about" ;;
     000) [ "${2:-}" != "28" ] || echo $(( $(now) + RIDE_AFTER )) > "$UNSENT/after" ;;
   esac
+  case "$1" in
+    2*) [ -n "${RIDE_WHOSE:-}" ] && [ -d "$SESSIONS/$RIDE_WHOSE" ] && keep_overlap "$TMP/ride-answer" "$SESSIONS/$RIDE_WHOSE" ;;
+  esac
+  return 0
 }
 
 # The server's own sentence for a refusal (``{"detail": {"message": …}}``), if it gave one, on one line.
@@ -1991,6 +2011,39 @@ decide_conflict() {
   api POST /conflict "$TMP/decided" "$QUICK_SECONDS"
 }
 
+# Teammates changing the same files as this session's work, as the server tells it, once (its `overlap`, from 0.6.0:
+# `notice`, one line for the developer, and `context`, the details for the tool's model, which say it is a heads-up
+# and never in the way). $1 is the answer it may come in: a check's, or a work report's however the report went (on
+# its own, with a check, with a turn's end, or along with a later call). Kept in the session's folder ($2) until it is
+# shown: the line, after any earlier one not shown yet (`overlap-line`), and the details, the newest of which tell of
+# every teammate changing the same files now (`overlap-context`); and with $3 “edit” (a report after an edit, whose
+# hook prints nothing) what the check after the next edit prints (`overlap-edit`): a note and the details, never a stop
+# or a block. Fails when the answer tells none, as every answer of an older server does.
+keep_overlap() {
+  json_get "$1" overlap > "$TMP/overlap"
+  case "$(head -c 1 "$TMP/overlap")" in "{") ;; *) return 1 ;; esac
+  overlap_said=$(one_line "$(json_text "$(json_get "$TMP/overlap" notice)")")
+  [ -n "$overlap_said" ] || return 1
+  overlap_said="Vyavasta: $overlap_said"
+  [ -s "$2/overlap-line" ] && overlap_said="$(cat "$2/overlap-line")
+$overlap_said"
+  printf '%s' "$overlap_said" > "$2/overlap-line"
+  json_text "$(json_get "$TMP/overlap" context)" > "$2/overlap-context"
+  if [ "${3:-}" = "edit" ]; then
+    printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":%s}}\n' \
+      "$(json_quote "$overlap_said")" "$(json_quote "$(fitted "$(cat "$2/overlap-context")")")" > "$2/overlap-edit"
+  fi
+  return 0
+}
+
+# What waits to be shown of teammates changing the same files in a session ($1): OVERLAP_LINE, under a message's own
+# line, and OVERLAP_CONTEXT, for the tool's model after what Vyavasta found; `emit` takes each away once it is shown.
+pending_overlap() {
+  OVERLAP_DIR=$1
+  OVERLAP_LINE=$(cat "$1/overlap-line" 2>/dev/null)
+  OVERLAP_CONTEXT=$(cat "$1/overlap-context" 2>/dev/null)
+}
+
 # -- the hooks -----------------------------------------------------------------------------------------------------
 
 # The input's folder: the tool's cwd, else the project folder it says.
@@ -2693,10 +2746,18 @@ hook_prompt() {
   fi
   words=$(plain_words "$text")
   if [ "$words" = "$(plain_words "$PHRASE")" ] && [ -s "$dir/held" ]; then
-    # The developer chose to go on with the request that was held: the model is shown it, with what stood in the way.
+    # The developer chose to go on with the request that was held: the model is shown it, with what stood in the way,
+    # and the details of teammates changing the same files that came with it (the developer read their line then).
+    going=$(cat "$dir/held")
+    if [ -s "$dir/overlap-context" ]; then
+      going=$(json_quote "$(fitted "$(json_text "$going")
+
+$(cat "$dir/overlap-context")")")
+      rm -f "$dir/overlap-context"
+    fi
     printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
       "$(json_quote "Vyavasta: going ahead. ${AGENT} was shown your request, what stands in the way, and that you chose to go on.")" \
-      "$(cat "$dir/held")"
+      "$going"
     rm -f "$dir/held"
     return
   fi
@@ -2835,6 +2896,7 @@ handle_message() {
   [ -f "$dir/lined" ] && LINE_SHORT=1
   OUT_LINE=""; OUT_CONTEXT=""; OUT_REASON=""
   ARRIVED_LINE=""; ARRIVED_CONTEXT=""; TELL_GUIDE=""; DOCS_GUIDE=""; SESSION_GUIDE=""
+  OVERLAP_LINE=""; OVERLAP_CONTEXT=""; OVERLAP_DIR=""
   # Whether this message is kept for the developer's summary is settled before they are told what summaries do: the
   # message whose line first tells them is never kept.
   keep=false
@@ -2974,6 +3036,9 @@ handle_message() {
   if [ -f "$dir/unguided" ]; then
     SESSION_GUIDE=$(guidance_said "$(kept_checks)")
   fi
+  # Teammates changing the same files as this session's work, as the check's answer tells it (a report it carried
+  # tells it in that report's answer, below); shown with what waits of it already.
+  keep_overlap "$TMP/checked" "$dir"
   # What teammates sent the developer since they were last told comes with the check, each once: they read it under
   # the message's line, and the tool's model is given it to open its reply with.
   arrived
@@ -3031,6 +3096,9 @@ handle_message() {
     fi
     keep_conflict "$dir" && new_conflict=1
   fi
+  # Teammates changing the same files, as this message's check and work report told it, and what waits of it from an
+  # earlier report: under this message's line, and the details for the tool's model (`emit`).
+  pending_overlap "$dir"
   cp "$TMP/checked" "$TMP/answer"
   if [ "$(answer ask)" = "true" ]; then
     # A question for the developer's own assistant in Vyavasta: asked there, in this session's chat, and the
@@ -3148,13 +3216,29 @@ then_said() {
 # them: never fewer than characters.)
 CONTEXT_BYTES=9000
 CONTEXT_CUT="[Cut here: the rest of what Vyavasta found is longer than ${TOOL} takes from a plugin at once.]"
+# What the tool's model is given ($1), cut where a character ends to CONTEXT_BYTES when it is longer, saying so, so that
+# the tool passes on all that is given rather than a preview of it.
+fitted() {
+  if [ "${#1}" -le "$CONTEXT_BYTES" ]; then printf '%s' "$1"; return; fi
+  printf '%s' "$1" | LC_ALL=C awk -v MOST="$CONTEXT_BYTES" -v NOTE="$CONTEXT_CUT" "$WORDS_AWK"'
+    BEGIN { RS = "\001" }
+    NR == 1 { printf "%s\n%s", headpart($0, MOST - length(NOTE) - 1), NOTE }'
+}
 emit() {
   # (That a message was cut to what Vyavasta takes is said where it was sent, never on a line that says nothing was.)
   case "$OUT_LINE" in ""|"$NOTHING_SENT ("*) ;; *) [ -z "${CUT_NOTE:-}" ] || OUT_LINE=$(then_said "$OUT_LINE" "$CUT_NOTE") ;; esac
   [ -n "$OUT_LINE" ] && [ -n "${SUMMARIES_NOTE:-}" ] && OUT_LINE=$(then_said "$OUT_LINE" "$SUMMARIES_NOTE")
   # (A line after a check gave the session's whole account: its later lines are short.)
   [ -n "$OUT_LINE" ] && [ -n "${LINE_MARK:-}" ] && true > "$LINE_MARK"
-  # What arrived from teammates is read under the line, whatever came of the message itself.
+  # Teammates changing the same files are read under the line, a heads-up whatever came of the message itself; and
+  # then what arrived from teammates.
+  overlap_shown=""
+  if [ -n "$OUT_LINE" ] && [ -n "${OVERLAP_LINE:-}" ]; then
+    OUT_LINE="$OUT_LINE
+
+$OVERLAP_LINE"
+    overlap_shown=1
+  fi
   [ -n "${ARRIVED_LINE:-}" ] && OUT_LINE="${OUT_LINE:+$OUT_LINE
 
 }$ARRIVED_LINE"
@@ -3171,6 +3255,15 @@ emit() {
   [ -n "$plugin_said" ] && OUT_CONTEXT="$plugin_said${OUT_CONTEXT:+
 
 $OUT_CONTEXT}"
+  # (The details of teammates changing the same files go to the tool's model only with a message that reaches it: a
+  # message held, or paused by a conflict, keeps them for the next one.)
+  overlap_given=""
+  if [ -n "${OVERLAP_CONTEXT:-}" ] && [ -z "$OUT_REASON" ]; then
+    OUT_CONTEXT="${OUT_CONTEXT:+$OUT_CONTEXT
+
+}$OVERLAP_CONTEXT"
+    overlap_given=1
+  fi
   # (What arrived goes in whole only while all of it stays within CONTEXT_BYTES; past that, the tool's model is told
   # only that messages came, which the developer reads under the line in any case.)
   if [ -n "${ARRIVED_CONTEXT:-}" ] && [ $(( ${#OUT_CONTEXT} + ${#ARRIVED_CONTEXT} )) -gt "$CONTEXT_BYTES" ]; then
@@ -3181,11 +3274,7 @@ $OUT_CONTEXT}"
 }$ARRIVED_CONTEXT"
   # (And should what Vyavasta found be longer still, it is cut where a character ends, the plugin's own instructions
   # first, so that the tool passes on all that is given rather than a preview of it.)
-  if [ "${#OUT_CONTEXT}" -gt "$CONTEXT_BYTES" ]; then
-    OUT_CONTEXT=$(printf '%s' "$OUT_CONTEXT" | LC_ALL=C awk -v MOST="$CONTEXT_BYTES" -v NOTE="$CONTEXT_CUT" "$WORDS_AWK"'
-      BEGIN { RS = "\001" }
-      NR == 1 { printf "%s\n%s", headpart($0, MOST - length(NOTE) - 1), NOTE }')
-  fi
+  [ "${#OUT_CONTEXT}" -le "$CONTEXT_BYTES" ] || OUT_CONTEXT=$(fitted "$OUT_CONTEXT")
   if [ -n "$OUT_REASON" ]; then
     if [ -n "$OUT_LINE" ]; then
       printf '{"systemMessage":%s,"decision":"block","reason":%s}\n' "$(json_quote "$OUT_LINE")" "$(json_quote "$OUT_REASON")"
@@ -3199,6 +3288,12 @@ $OUT_CONTEXT}"
     [ -n "${SESSION_GUIDE:-}" ] && rm -f "$dir/unguided"
   elif [ -n "$OUT_LINE" ]; then
     say "$OUT_LINE"
+  fi
+  # What of teammates changing the same files was shown is not shown again: the line once read, the details once
+  # given, and the check after an edit has nothing left to print.
+  if [ -n "${OVERLAP_DIR:-}" ]; then
+    [ -z "$overlap_shown" ] || rm -f "$OVERLAP_DIR/overlap-line" "$OVERLAP_DIR/overlap-edit"
+    [ -z "$overlap_given" ] || rm -f "$OVERLAP_DIR/overlap-context"
   fi
 }
 
@@ -3265,11 +3360,13 @@ work_report() {
 }
 
 # What follows a work report the server took, from what it answered of it ($TMP/answer): REPORTED, the changes as last
-# sent, whether the session's work is still open, and code sharing turned off in the web app. $1 is the session folder.
+# sent, whether the session's work is still open, code sharing turned off in the web app, and teammates changing the
+# same files (`keep_overlap`; after an edit, AFTER_EDIT says so). $1 is the session folder.
 work_taken() {
   REPORTED=1
   # (A report of this session kept from earlier is older than this one: it is given up.)
   rm -f "$UNSENT"/*-work-"$(basename "$1")".json "$UNSENT"/*-work-"$(basename "$1")".about
+  keep_overlap "$TMP/answer" "$1" "${AFTER_EDIT:-}"
   [ -n "$with_change" ] && cksum < "$TMP/change" > "$1/change-sum"
   if [ "$(answer recorded)" = "true" ]; then
     case "$(json_text "$(answer status)")" in
@@ -3298,6 +3395,9 @@ hook_report() {
     last=$(cat "$dir/reported")
     [ -n "$last" ] && [ $(( $(now) - last )) -lt "$REPORT_EVERY" ] && return
   fi
+  # (A report after an edit prints nothing: teammates changing the same files that its answer tells of are told by
+  # the check after the next edit, `overlap-edit`, as well as with the turn's end and the next message.)
+  [ "$1" = "edited" ] && AFTER_EDIT=edit
   # Whether the turn's reply goes to the session's chat.
   turn=""
   failed=""
@@ -3342,13 +3442,21 @@ hook_report() {
   # (A report just now that found the server out of reach, or too slow to answer, is not followed by a second
   # call: the end of a turn is never held up twice.)
   if [ -n "$turn" ] && [ -n "$TOKEN" ] && [ "$STATUS" != "000" ] && ! held_off; then send_turn "$dir" "$folder"; fi
-  # What the developer is shown at a turn's end: a conflict found in the change, and teammates' messages that wait for
-  # them. (A turn that ended in an error shows nothing: what a conflict says waits for the next edit or message.)
+  # What the developer is shown at a turn's end: a conflict found in the change, teammates changing the same files
+  # (whose details the tool's model is given with the next message: at a turn's end, anything given it would start
+  # another turn), and teammates' messages that wait for them. (A turn that ended in an error shows nothing: what a
+  # conflict or teammates changing the same files say waits for the next edit or message.)
   if [ "$1" = "stopped" ] && [ -z "$failed" ]; then
     shown=""
     if [ -f "$dir/conflict-say" ]; then
       shown=$(json_text "$(json_get "$dir/conflict-say" systemMessage)")
       rm -f "$dir/conflict-say" "$dir/conflict-stop" "$dir/conflict-block"
+    fi
+    if [ -s "$dir/overlap-line" ]; then
+      shown="${shown:+$shown
+
+}$(cat "$dir/overlap-line")"
+      rm -f "$dir/overlap-line" "$dir/overlap-edit"
     fi
     waiting=$(waiting_said)
     [ -z "$waiting" ] || shown="${shown:+$shown
@@ -3632,6 +3740,9 @@ command_on() {
     else
       echo "Code sharing is off: your changed files’ names are sent, not your uncommitted changes. Send “vyavasta share code on” to also send them."
     fi
+    # What teammates see of this work, and that both are told when they change the same file: said where the
+    # developer turns it on, unless Vyavasta doesn't read the repository for them (then nothing of it is kept).
+    [ "${REPO_READ:-}" = "no" ] || teammates_see_said "$(repository_name "$REMOTE")"
   fi
   # This answer tells what summaries do, so no later line tells it again.
   summaries_said
@@ -3641,8 +3752,9 @@ command_on() {
 }
 
 # Whether Vyavasta reads this project's repository. $1, when given, is /me's list of repositories, and $2 its
-# `checks` (false where the server checks no request).
+# `checks` (false where the server checks no request). REPO_READ says “no” where it is known not to.
 repo_said() {
+  REPO_READ=""
   if [ -n "$NOGIT" ]; then
     echo "Vyavasta needs git, which isn’t installed here, so changes here aren’t checked. Questions about your team are answered here all the same."
   elif [ -z "$ROOT" ]; then
@@ -3653,8 +3765,14 @@ repo_said() {
     name=$(repository_name "$REMOTE")
     if lists_repository "$1" "$name" && [ "${2:-}" = "false" ]; then echo "Vyavasta reads $name for you. $UNCHECKED"
     elif lists_repository "$1" "$name"; then echo "Vyavasta reads $name for you: requests here are checked against your team’s record."
-    else echo "Vyavasta doesn’t read $name for you, so changes here aren’t checked. Connect it with GitHub in Vyavasta’s Sources."; fi
+    else echo "Vyavasta doesn’t read $name for you, so changes here aren’t checked. Connect it with GitHub in Vyavasta’s Sources."; REPO_READ=no; fi
   fi
+}
+
+# What teammates see of the work in this project's repository ($1), and that the developer and a teammate are both
+# told when they change the same file, in plain words, for the answer to “vyavasta on”.
+teammates_see_said() {
+  echo "Teammates who also read $1 in Vyavasta see which files you change here as you work, and with code sharing on a short summary of what the change does, never the code (Vyavasta’s Settings can turn this off). When you and a teammate change the same file, both of you are told, as a heads-up: nothing is held."
 }
 
 # What summaries do in this project, and how to change that, in one line.
@@ -3702,7 +3820,7 @@ command_share_on() {
   if [ -n "$SHARING_NOTICE" ]; then echo "$SHARING_NOTICE"
   else
     echo "Code sharing is on for $name: your uncommitted changes (up to $(thousands "$limit_lines") lines) now go to Vyavasta with each message and after each edit, and Vyavasta’s check reads them."
-    echo "Teammates who can already see this work see a short summary of what the change does, never the code. Vyavasta keeps only the latest changes of each session, for 7 days at most."
+    echo "Teammates who can already see this work see which files you change and a short summary of what the change does, never the code. When you and a teammate change the same file, both of you are told, as a heads-up. Vyavasta keeps only the latest changes of each session, for 7 days at most."
   fi
   echo "Never sent from this computer: files git ignores, key and password files (such as .env or .pem), machine-written files such as lock files and build output, and files that aren’t text."
   project_on || echo "Vyavasta is off in this project, so nothing is sent until you send “vyavasta on”."
@@ -3814,7 +3932,7 @@ command_help() {
   if project_on; then here="It is on here."; else here="It is off here now."; fi
   cat <<EOF
 Vyavasta connects ${TOOL} to your team’s record. Where it is on, it checks each request against what your team has said and decided before ${AGENT} changes code.
-It also sums each session up for teammates under categories you control, answers your questions about the team, and carries messages between you and your teammates.
+It also sums each session up for teammates under categories you control, answers your questions about the team, and carries messages between you and your teammates. When you and a teammate change the same file, both of you are told once, as a heads-up that holds nothing, and ${AGENT} is given who, which files, on which branch and since when.
 Start here
 1. Sign in: send “vyavasta sign in”. $signed
 2. Turn it on in this project: send “vyavasta on”. $here
@@ -3855,7 +3973,7 @@ guide_context() {
     codex) also="" ;;
     *) also=" In Claude Code most of these are also slash commands, such as /vyavasta:sign-in, /vyavasta:on and /vyavasta:help, which the developer can run instead." ;;
   esac
-  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. To tell a teammate something, the developer starts a message with “@” and the teammate’s name, then the words (“@priya the fix is pushed”), and the plugin sends it as written; “@team” and the words reach everyone else in the workspace, and several names at the start reach each of them; “vyavasta ask <name>: <question>” asks a teammate’s agent. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
+  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. To tell a teammate something, the developer starts a message with “@” and the teammate’s name, then the words (“@priya the fix is pushed”), and the plugin sends it as written; “@team” and the words reach everyone else in the workspace, and several names at the start reach each of them; “vyavasta ask <name>: <question>” asks a teammate’s agent. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Teammates who read the same repository see which files the developer changes (with code sharing on, a short summary of the change, never the code), and when the developer and a teammate change the same file both of them are told once, as a heads-up that holds nothing. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
 }
 
 # Whether a message asks how to use the plugin itself: it is short (GUIDE_LONGEST), asks something (a question mark,

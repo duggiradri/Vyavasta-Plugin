@@ -414,7 +414,8 @@ def whats_new(tool: str = "Claude Code") -> str:
             "command it nearly is. A message that starts with “@” and a name no teammate has says that nobody got it. "
             "Teammates’ messages come a few at a time with your next message, and “vyavasta inbox” shows them all. The "
             "end of a turn says when some are waiting. After “vyavasta sign out”, nothing signs in by itself until you "
-            "send “vyavasta sign in”.")
+            "send “vyavasta sign in”. When you and a teammate change the same file, both of you are told, as a heads-up "
+            "that holds nothing: teammates who read the same repository see which files you change.")
 
 
 def greeted() -> str:
@@ -1130,8 +1131,9 @@ def test_turning_code_sharing_on_says_what_is_sent_and_never_sent_and_tells_the_
     said = run("share-code", "on", cwd=repo).stdout.splitlines()
     assert said[0] == ("Code sharing is on for acme/api: your uncommitted changes (up to 5,000 lines) now go to "
                        "Vyavasta with each message and after each edit, and Vyavasta’s check reads them.")
-    assert said[1].startswith("Teammates who can already see this work see a short summary of what the change does, "
-                              "never the code.") and "7 days" in said[1] and said[2] == never
+    assert said[1].startswith("Teammates who can already see this work see which files you change and a short summary "
+                              "of what the change does, never the code. When you and a teammate change the same file, "
+                              "both of you are told, as a heads-up.") and "7 days" in said[1] and said[2] == never
 
 
 def test_with_sharing_on_the_check_carries_one_diff_of_the_working_tree_against_github(run, fake, repo, tmp_path):
@@ -1312,6 +1314,195 @@ def test_a_conflict_that_comes_with_a_check_pauses_the_message_until_the_develop
     going = prompt(run, repo, "continue")
     assert "Their request, sent before they were asked: Remove the export" in \
         going["hookSpecificOutput"]["additionalContext"]
+
+
+# -- teammates changing the same files --------------------------------------------------------------------------------
+
+# What the server tells, once, of teammates changing the same files as the session's work (its `overlap`, from 0.6.0,
+# with a check's answer and with a work report's), as it words it; and the line the developer reads of it.
+OVERLAP = {"id": "ovl_1",
+           "notice": "Priya Raman is also changing calc.py in acme/api, on their own computer and not committed yet. "
+                     "A heads-up only: nothing is held.",
+           "context": "Teammates are changing some of the same files as this session’s work in acme/api, on their own "
+                      "computers and not committed yet. This is a heads-up, never in the way of the change: nothing is "
+                      f"held.\n{QUOTE_TOP}\n│ Priya Raman is changing acme/api with Claude Code on their own computer, "
+                      f"on the branch retries.\n│ The same files as this session’s work (1): calc.py.\n{QUOTE_END}"}
+HEADS_UP = "Vyavasta: " + OVERLAP["notice"]
+
+
+def heads_up_after_an_edit() -> dict:
+    """What the check after an edit prints of it, in both tools: a note and the details, never a stop or a block."""
+    return {"systemMessage": HEADS_UP,
+            "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": OVERLAP["context"]}}
+
+
+@pytest.mark.parametrize("tool, edit", [(None, "Edit"), ("codex", "apply_patch")])
+def test_teammates_changing_the_same_file_are_told_at_the_next_edit_and_nothing_stops(run, fake, repo, tool, edit):
+    """The report after an edit runs in the background and prints nothing; where its answer tells of teammates
+    changing the same files, the check after the next edit says it: a note for the developer and the details beside
+    the edit's result for the model, in either tool, never a stop or a block. Claude Code passes the details on to
+    Claude; Codex in its code mode does not (only a block reaches its model there), so under Codex they come again with
+    the next message. The developer, who read the line, is not told it twice."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("changed = True\n")
+    fake.extra["/work"] = {"overlap": OVERLAP}
+    assert run("hook", "edited", stdin=event("PostToolUse", repo, tool_name=edit), cwd=repo, tool=tool).stdout == ""
+    said = output(run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name=edit), cwd=repo, tool=tool))
+    assert said == heads_up_after_an_edit()
+    # Once: not at the next edit, nor at the turn's end, nor under the next message's line.
+    assert run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name=edit), cwd=repo, tool=tool).stdout == ""
+    fake.extra.clear()
+    assert stop(run, repo, tool=tool).stdout == ""
+    said = prompt(run, repo, "Change old.py", tool=tool)
+    assert HEADS_UP not in said["systemMessage"] and "\n\n" not in said["systemMessage"]
+    given = fake.check["context"] + ("\n\n" + OVERLAP["context"] if tool == "codex" else "")
+    assert said["hookSpecificOutput"]["additionalContext"] == given
+    # Given once.
+    assert prompt(run, repo, "Change gone.py", tool=tool)["hookSpecificOutput"]["additionalContext"] == \
+        fake.check["context"]
+
+
+def test_a_conflict_waiting_comes_first_and_the_heads_up_at_the_edit_after_it(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("changed = True\n")
+    fake.extra["/work"] = {"overlap": OVERLAP, "conflict": CONFLICT}
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"))
+    assert output(run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="Edit")))["continue"] is False
+    assert output(run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="Edit"))) == \
+        heads_up_after_an_edit()
+    # Another session's edits are told nothing of this one's, and leave it waiting.
+    (repo / "calc.py").write_text("changed again\n")
+    fake.extra = {"/work": {"overlap": OVERLAP}}
+    run("hook", "edited", stdin=event("PostToolUse", repo, session="session-2", tool_name="Edit"))
+    fake.extra.clear()
+    assert run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="Edit")).stdout == ""
+    assert output(run("hook", "edit-check", stdin=event("PostToolUse", repo, session="session-2",
+                                                        tool_name="Edit"))) == heads_up_after_an_edit()
+
+
+def test_a_message_whose_check_tells_it_shows_it_under_its_line_and_gives_the_model_the_details(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.extra["/check"] = {"overlap": OVERLAP, "inbox": {"items": ARRIVED[:1], "count": 1, "more": 0}}
+    for tool in (None, "codex"):
+        said = prompt(run, repo, "Fix the rounding", tool=tool)
+        line, context = said["systemMessage"], said["hookSpecificOutput"]["additionalContext"]
+        # The message's own line, then the heads-up, then what arrived from teammates.
+        own, heads_up, arrived = line.split("\n\n", 2)
+        assert own.startswith("Vyavasta · sent") and heads_up == HEADS_UP and arrived.startswith("🔔 New from")
+        # For the model: what the check found, then the details, then what arrived.
+        assert context.startswith(fake.check["context"] + "\n\n" + OVERLAP["context"] + "\n\n" + OPENS_WITH)
+    # A newer server's check that carries the report tells it in that report's answer: shown the same way.
+    fake.extra = {"/work": {"overlap": OVERLAP}}
+    fake.combined = True
+    (repo / "calc.py").write_text("changed\n")
+    said = prompt(run, repo, "Fix the rounding")
+    assert fake.calls("/check")[-1]["body"]["work"] and not fake.calls("/work")
+    assert said["systemMessage"].endswith("\n\n" + HEADS_UP)
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.check["context"] + "\n\n" + OVERLAP["context"]
+    # Told once: the next message carries nothing of it.
+    fake.extra.clear()
+    said = prompt(run, repo, "Fix the rounding")
+    assert HEADS_UP not in said["systemMessage"]
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.check["context"]
+
+
+def test_a_held_message_shows_the_line_and_going_ahead_gives_the_model_the_details(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = {"verdict": "held", "hold": True, "notice": "On hold: Priya said the export stays.", "context": "",
+                  "statements": [], "anyway": {"phrase": "Plan it anyway", "context": "Going ahead: the export."}}
+    fake.extra["/check"] = {"overlap": OVERLAP}
+    held = prompt(run, repo, "Remove the export")
+    assert held["decision"] == "block" and held["systemMessage"].endswith("\n\n" + HEADS_UP)
+    assert "hookSpecificOutput" not in held and HEADS_UP not in held["reason"]
+    fake.extra.clear()
+    going = prompt(run, repo, "Plan it anyway")
+    assert going["hookSpecificOutput"]["additionalContext"] == "Going ahead: the export.\n\n" + OVERLAP["context"]
+    # Given once.
+    fake.check = {"verdict": "clear", "hold": False, "notice": "Checked.", "context": "Clear.", "statements": []}
+    assert prompt(run, repo, "Fix the rounding")["hookSpecificOutput"]["additionalContext"] == "Clear."
+
+
+@pytest.mark.parametrize("combined", [True, False])
+def test_the_end_of_a_turn_tells_the_developer_and_the_next_message_gives_the_model_the_details(run, fake, repo,
+                                                                                                combined):
+    """At a turn's end the developer reads it, after a conflict and before the messages that wait; the details wait
+    for the next message, since anything a Stop hook gives the model starts another turn. Told whether the turn's end
+    carries the report (a newer server) or the report goes on its own after it (an older one)."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.combined = combined
+    prompt(run, repo, "Change calc.py")
+    (repo / "calc.py").write_text("changed\n")
+    fake.extra = {"/work": {"overlap": OVERLAP}, "/turn": {"inbox_waiting": 1}}
+    said = output(stop(run, repo, last_assistant_message="Done."))
+    assert said == {"systemMessage": HEADS_UP + "\n\nVyavasta: a teammate sent you a message. It comes with your next "
+                                                "message, or send “vyavasta inbox” to read it now."}
+    fake.extra.clear()
+    after = prompt(run, repo, "Add a test")
+    assert HEADS_UP not in after["systemMessage"]
+    assert after["hookSpecificOutput"]["additionalContext"] == fake.check["context"] + "\n\n" + OVERLAP["context"]
+
+
+def test_a_report_that_went_along_later_keeps_what_it_tells_for_its_own_session(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    switched_on(run, fake, notes)
+    (repo / "calc.py").write_text("changed\n")
+    fake.status["/work"] = 503
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"), cwd=repo)
+    assert len(unsent(run)) == 1
+    del fake.status["/work"]
+    fake.extra["/work"] = {"overlap": OVERLAP}
+    # Another session's message, in another folder, takes it along: what its answer tells is session-1's.
+    said = prompt(run, notes, "What is new in the docs?", session="session-2")
+    assert fake.calls("/work")[0]["body"]["session"] == "session-1" and unsent(run) == []
+    assert HEADS_UP not in said["systemMessage"]
+    # Never told at another session's edits, nor at session-1's own (it came after no edit of theirs): with its next
+    # message.
+    assert run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="Edit")).stdout == ""
+    fake.extra.clear()
+    after = prompt(run, repo, "Add a test")
+    assert after["systemMessage"].endswith("\n\n" + HEADS_UP)
+    assert after["hookSpecificOutput"]["additionalContext"].endswith(OVERLAP["context"])
+
+
+def test_an_older_server_tells_nothing_new_and_each_hook_says_what_it_said_before(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("changed\n")
+    assert run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit")).stdout == ""
+    assert run("hook", "edit-check", stdin=event("PostToolUse", repo, tool_name="Edit")).stdout == ""
+    said = prompt(run, repo, "Change calc.py")
+    assert said["hookSpecificOutput"]["additionalContext"] == fake.check["context"]
+    assert "\n" not in said["systemMessage"] and fake.check["notice"] in said["systemMessage"]
+    assert "Vyavasta: " not in said["systemMessage"]
+    assert stop(run, repo, last_assistant_message="Done.").stdout == ""
+    assert not list(run.home.glob("sessions/*/overlap-*"))
+
+
+def test_vyavasta_on_says_what_teammates_see_and_that_both_are_told_when_they_change_the_same_file(run, fake, repo):
+    signed_in(run, fake)
+    teammates = ("Teammates who also read acme/api in Vyavasta see which files you change here as you work, and with "
+                 "code sharing on a short summary of what the change does, never the code (Vyavasta’s Settings can "
+                 "turn this off). When you and a teammate change the same file, both of you are told, as a heads-up: "
+                 "nothing is held.")
+    for tool in (None, "codex"):
+        reason = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta on"),
+                            tool=tool))["reason"]
+        assert teammates in reason.splitlines()
+    # Signed out, it is said too: it is what happens once the computer is connected.
+    (run.home / "credentials").unlink()
+    assert teammates in run("on", cwd=repo).stdout.splitlines()
+    # Not where Vyavasta doesn't read the repository for them: nothing of their work is kept there.
+    signed_in(run, fake)
+    fake.extra["/me"] = {"repositories": ["acme/other"]}
+    assert "Teammates who also read" not in run("on", cwd=repo).stdout
 
 
 # -- upload, chat, shared, settings, status, check, help --------------------------------------------------------
