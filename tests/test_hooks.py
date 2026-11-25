@@ -4743,7 +4743,12 @@ def test_other_ways_of_typing_a_command_are_the_same_command(run, fake, repo, ty
 
 @pytest.mark.parametrize("typed, nearest", [("vyavasta stauts", "status"), ("vyavasta inbx", "inbox"),
                                             ("Vyavasta settigns.", "settings"), ("vyavasta signin2", "sign in"),
-                                            ("vyavasta xyzzy", None)])
+                                            ("vyavasta xyzzy", None), ("vyavasta offf", "off"), ("vyavasta tem", "team"),
+                                            # A short word is a slip only one letter away; a command is never named
+                                            # alone where the one that does the reverse is as near.
+                                            ("vyavasta of", ("on", "off")), ("vyavasta onf", ("on", "off")),
+                                            ("vyavasta signo", ("sign in", "sign out")), ("vyavasta foo", None),
+                                            ("vyavasta log", None), ("vyavasta sign", None)])
 def test_vyavasta_and_a_word_that_is_no_command_says_so_and_names_the_nearest(run, fake, repo, typed, nearest):
     signed_in(run, fake)
     for on in (False, True):
@@ -4752,7 +4757,9 @@ def test_vyavasta_and_a_word_that_is_no_command_says_so_and_names_the_nearest(ru
         said = prompt(run, repo, typed)
         word = typed.lower().rstrip(".").split()[1]
         expected = f"“vyavasta {word}” isn’t one of Vyavasta’s commands."
-        if nearest:
+        if isinstance(nearest, tuple):
+            expected += f" Did you mean “vyavasta {nearest[0]}” or “vyavasta {nearest[1]}”?"
+        elif nearest:
             expected += f" Did you mean “vyavasta {nearest}”?"
         assert said["decision"] == "block" and said["reason"] == expected + " “vyavasta help” lists them all."
     assert fake.calls("/check") == []

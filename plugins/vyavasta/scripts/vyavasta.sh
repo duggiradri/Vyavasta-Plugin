@@ -2368,6 +2368,8 @@ parse_typed() {
     # How long the name of the plugin is at the start of s: 8 for "vyavasta", 9 for "vyavastha" (its spelling before
     # the rename, which is still taken), else 0.
     function named(s) { return (s ~ /^vyavastha/) ? 9 : ((s ~ /^vyavasta/) ? 8 : 0) }
+    # A command of the list below as it is typed.
+    function spelt(w) { return (w == "signin") ? "sign in" : ((w == "signout") ? "sign out" : w) }
     # How many slips of typing turn one word into another: a letter added, left out, changed, or two swapped.
     function slips(a, b,   la, lb, i, j, d, cost, x, y, z) {
       la = length(a); lb = length(b)
@@ -2457,14 +2459,21 @@ parse_typed() {
       if (rest ~ /^open [a-z]+$/) { printf "open\t%s\n", substr(rest, 6); exit }
       if (helpish(rest)) { printf "help\t\n"; exit }
       if (!asked && rest ~ /^[a-z][a-z0-9]*$/ && length(rest) <= 24) {
-        # The nearest command, by its own spelling, when a slip or two of typing away.
+        # The nearest command, by its own spelling: one slip of typing away for a word of four letters or fewer, two
+        # for a longer one. A command that has an opposite (on and off, sign in and sign out) is never named alone
+        # when its opposite is as near: both are named, so a slip never points to the command that does the reverse.
         split("on off status check settings help inbox team summary documents shared chat upload open ask tell " \
               "reply signin signout", word, " ")
-        best = ""; least = 3
+        opposite["on"] = "off"; opposite["off"] = "on"; opposite["signin"] = "signout"; opposite["signout"] = "signin"
+        most = (length(rest) <= 4) ? 1 : 2
+        best = ""; least = most + 1
         for (i = 1; i in word; i++) { d = slips(rest, word[i]); if (d < least && d < length(rest)) { least = d; best = word[i] } }
-        if (best == "signin") best = "sign in"; else if (best == "signout") best = "sign out"
+        other = ""
+        if (best in opposite) { d = slips(rest, opposite[best]); if (d <= most && d < length(rest)) other = opposite[best] }
+        # (Named in the order of the list: on before off, sign in before sign out.)
+        if (other != "" && (best == "off" || best == "signout")) { swap = best; best = other; other = swap }
         printf "unknown\t%s\n", rest
-        printf "%s", best > out
+        printf "%s%s", spelt(best), (other == "" ? "" : "\t" spelt(other)) > out
       }
     }' > "$TMP/typed"
   TYPED=$(cut -f1 < "$TMP/typed")
@@ -4394,10 +4403,17 @@ command_retired() {
 }
 
 # “vyavasta” and a word that is none of its commands ($1, as typed): said so, with the command nearest to it when
-# there is one (`parse_typed` leaves it in $TMP/typed-text). Nothing is sent to the server.
+# there is one, or the two nearest when they are each other's opposite (`parse_typed` leaves them in $TMP/typed-text,
+# a tab between two). Nothing is sent to the server.
 command_unknown() {
   nearest=$(cat "$TMP/typed-text")
-  echo "“vyavasta $1” isn’t one of Vyavasta’s commands.${nearest:+ Did you mean “vyavasta $nearest”?} “vyavasta help” lists them all."
+  tab=$(printf '\t')
+  case "$nearest" in
+    "") mean="" ;;
+    *"$tab"*) mean=" Did you mean “vyavasta ${nearest%%"$tab"*}” or “vyavasta ${nearest#*"$tab"}”?" ;;
+    *) mean=" Did you mean “vyavasta $nearest”?" ;;
+  esac
+  echo "“vyavasta $1” isn’t one of Vyavasta’s commands.$mean “vyavasta help” lists them all."
 }
 
 # A question for the developer's own assistant in Vyavasta, asked by the tool's model or from a terminal: the
