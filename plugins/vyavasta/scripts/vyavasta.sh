@@ -3055,7 +3055,15 @@ handle_message() {
     elif [ "$(summaries)" = "off" ]; then kept_said="Not summed up, because summaries are off."; KEPT_SHORT="not summed up (summaries are off)"
     else kept_said="Not kept for your summary."; KEPT_SHORT="not kept for your summary"; fi
     if [ "$STATUS" != "200" ]; then
-      OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent" "$kept_said")
+      # (One that went out and got no answer, in time or at all, or that met a server that failed, may have been asked
+      # all the same: its answer is then in the session's chat. One turned away, met by a restart, or never sent at
+      # all, wasn't.)
+      if { [ "$STATUS" = "000" ] && [ -n "$WENT" ]; } || \
+          { case "$STATUS" in 5*) [ "$(refusal_code)" != "restarting" ] ;; *) false ;; esac; }; then
+        OUT_LINE=$(line "$sent" "$not_sent" "No answer came from Vyavasta, so ${AGENT} answers by itself. If your question reached it, the answer will be in this session’s chat in Vyavasta.$consent" "$kept_said")
+      else
+        OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent" "$kept_said")
+      fi
     else
       outcome=$(json_text "$(answer notice)")
       [ -n "$outcome" ] || outcome="Vyavasta had no answer to give."
@@ -4619,23 +4627,27 @@ command_ask_assistant() {
       # (CODEX_SANDBOX), the network is switched off. Where it says nothing of a sandbox, either may be so, and both
       # are said. (That the session's network is off, CODEX_SANDBOX_NETWORK_DISABLED, Codex says of every command,
       # of one it runs outside the sandbox too: seen in Codex 0.171. It is never taken for the sandbox.) A question
-      # that went out and got no answer in time is told as that. One that was never sent, because the quick question
-      # asked first went unanswered, is told as nothing asked.
-      if [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ] && [ -n "${CODEX_SANDBOX:-}" ]; then
+      # that went out and got no answer in time, or whose answer was cut off, is told as that, and as one that may have
+      # been asked all the same, its answer then in the session's chat. One that was never sent, because the quick
+      # question asked first went unanswered, is told as nothing asked.
+      if [ -n "$WENT" ] && [ -n "$SLOW" ]; then
+        echo "Vyavasta didn’t answer in time, so there is no answer this time. If the question reached it, the answer will be in this session’s chat in Vyavasta."
+      elif [ -n "$WENT" ]; then
+        echo "Vyavasta’s answer was cut off, so there is no answer this time. If the question reached it, the answer will be in this session’s chat in Vyavasta."
+      elif [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ] && [ -n "${CODEX_SANDBOX:-}" ]; then
         boxed_said "the network is switched off"
       elif [ "$CLIENT" = "codex" ] && [ -z "$SLOW" ]; then
         echo "Vyavasta could not be reached from this command, so nothing was asked. If it ran inside Codex’s sandbox, run the same command again outside the sandbox, asking for escalated permissions for it. If it ran outside, Vyavasta’s server is out of reach right now."
-      elif [ -n "$SLOW" ] && [ -n "$WENT" ]; then
-        echo "Vyavasta didn’t answer in time, so there is no answer this time."
       elif [ -n "$SLOW" ]; then
         echo "Vyavasta’s server isn’t answering right now, so nothing was asked."
       else
         echo "Vyavasta can’t be reached right now, so nothing was asked."
       fi ;;
-    # (It reached the server, which failed, or is restarting, as during a deploy, which its code says.)
+    # (It reached the server, which failed, perhaps once the question was asked, or is restarting, as during a deploy,
+    # which its code says, and which refuses a call before it begins.)
     5*)
       if [ "$(refusal_code)" = "restarting" ]; then echo "Vyavasta is restarting, so nothing was asked. Ask again in a moment."
-      else echo "Vyavasta’s server isn’t working right now, so nothing was asked."; fi ;;
+      else echo "Vyavasta’s server isn’t working right now, so there is no answer this time. If the question reached it, the answer will be in this session’s chat in Vyavasta."; fi ;;
     # (Refused for another reason by a server that was reached: in its own sentence when it gave one.)
     *)
       said=$(refusal)

@@ -907,10 +907,19 @@ def test_a_question_with_no_answer_goes_to_the_model_as_it_is_with_a_note(run, f
     said = prompt(run, repo, "What is Priya doing?")
     assert said == {"systemMessage": "Vyavasta · sent: your question. Kept in this session’s chat for your summary. · "
                                      + fake.asked["notice"]}
+    # The server failed on it, perhaps once it was asked: where its answer would be. Turned away, or met by a restart,
+    # which refuses a call before it begins: not asked.
     fake.status["/ask"] = 500
     said = prompt(run, repo, "What is Priya doing?")
-    assert said == {"systemMessage": "Vyavasta · sent: your question · kept for your summary · Your question couldn’t "
-                                     "be asked just now, so Claude answers by itself."}
+    assert said == {"systemMessage": "Vyavasta · sent: your question · kept for your summary · No answer came from "
+                                     "Vyavasta, so Claude answers by itself. If your question reached it, the answer "
+                                     "will be in this session’s chat in Vyavasta."}
+    for status, code in ((429, "busy"), (503, "restarting")):
+        fake.status["/ask"], fake.code = status, {"/ask": code}
+        said = prompt(run, repo, "What is Priya doing?")
+        assert said == {"systemMessage": "Vyavasta · sent: your question · kept for your summary · Your question "
+                                         "couldn’t be asked just now, so Claude answers by itself."}, status
+    fake.code = {}
 
 
 def test_a_question_that_was_asked_stays_asked_when_a_later_wait_for_its_answer_fails(run, fake, repo, tmp_path):
@@ -5766,7 +5775,8 @@ def test_a_server_restarting_for_a_deploy_says_so_everywhere_and_is_tried_again(
     fake.status = {"/ask": 503}
     for tool in (None, "codex"):
         assert run("ask", "Who owns billing?", cwd=repo, tool=tool).stdout == (
-            "Vyavasta’s server isn’t working right now, so nothing was asked.\n")
+            "Vyavasta’s server isn’t working right now, so there is no answer this time. If the question reached it, "
+            "the answer will be in this session’s chat in Vyavasta.\n")
     fake.status = {"/check": 503}
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
         " · Vyavasta’s server isn’t working right now, so it wasn’t checked. Claude works as usual, and Vyavasta is "
@@ -5783,8 +5793,9 @@ def test_a_server_restarting_for_a_deploy_says_so_everywhere_and_is_tried_again(
 
 
 def test_a_question_the_server_answers_too_late_is_said_to_be_that_never_out_of_reach(run, fake, repo, tmp_path):
-    """The model's question went out and no answer came in time: it is told that Vyavasta didn't answer in time. Held
-    back because the quick question asked first went unanswered, it is told that nothing was asked."""
+    """The model's question went out and no answer came in time: it is told that Vyavasta didn't answer in time, and
+    where the answer will be if the question reached it. Held back because the quick question asked first went
+    unanswered, it is told that nothing was asked."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     # (The question's 55 seconds run out in 2 here.)
@@ -5792,7 +5803,8 @@ def test_a_question_the_server_answers_too_late_is_said_to_be_that_never_out_of_
     fake.delay["/ask"] = 5
     for tool in (None, "codex"):
         done = run("ask", "Who owns billing?", cwd=repo, tool=tool, extra={"PATH": path})
-        assert done.stdout == "Vyavasta didn’t answer in time, so there is no answer this time.\n"
+        assert done.stdout == ("Vyavasta didn’t answer in time, so there is no answer this time. If the question "
+                               "reached it, the answer will be in this session’s chat in Vyavasta.\n")
     assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
     fake.delay["/hello"] = 6
     done = run("ask", "Who owns billing?", cwd=repo, extra={"PATH": path})
@@ -5801,6 +5813,26 @@ def test_a_question_the_server_answers_too_late_is_said_to_be_that_never_out_of_
     # A typed command held back the same way, and “vyavasta check”, whose own quick question went unanswered.
     assert run("inbox", cwd=repo).stdout == "Vyavasta’s server isn’t answering right now. Try again in a minute.\n"
     assert "Problem: Vyavasta’s server isn’t answering right now. Try again in a minute.\n" in run("check", cwd=repo).stdout
+    del fake.delay["/hello"]
+    for marker in ("slow", "unanswered", "offline"):
+        (run.home / marker).unlink(missing_ok=True)
+    # A question in a message, asked by the plugin's own call, which went out and got no answer in time, as a server
+    # too busy to answer it may have taken it and be answering it in the session's chat: never told as one that
+    # couldn't be asked.
+    fake.check = QUESTION
+    said = prompt(run, repo, "What is Priya doing?", extra={"PATH": path})
+    assert said == {"systemMessage": "Vyavasta · sent: your question. Kept in this session’s chat for your summary. · "
+                                     "No answer came from Vyavasta, so Claude answers by itself. If your question "
+                                     "reached it, the answer will be in this session’s chat in Vyavasta."}
+    del fake.delay["/ask"]
+    for marker in ("slow", "unanswered", "offline"):
+        (run.home / marker).unlink(missing_ok=True)
+    # The model's question went out and its answer was cut off: the same, and never “can't be reached”.
+    for tool in (None, "codex"):
+        fake.drop["/ask"] = 1
+        done = run("ask", "Who owns billing?", cwd=repo, tool=tool)
+        assert done.stdout == ("Vyavasta’s answer was cut off, so there is no answer this time. If the question "
+                               "reached it, the answer will be in this session’s chat in Vyavasta.\n"), tool
 
 
 def test_a_connection_that_never_opens_counts_as_out_of_reach_and_says_nothing_was_sent(run, fake, repo):
