@@ -1,7 +1,7 @@
 ---
 description: "Show whether Vyavasta is connected, whether it is on in this project, and whether code sharing and summaries are on."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" status:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" status || true`

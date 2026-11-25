@@ -1,7 +1,7 @@
 ---
 description: "Disconnect Claude Code on this computer from Vyavasta."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" sign-out:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" sign-out || true`

@@ -1390,7 +1390,10 @@ def test_every_hook_runs_this_script_with_a_command_it_knows():
         text = (PLUGIN / "skills" / skill / "SKILL.md").read_text()
         words = skill.replace("share-code-", "share-code ").replace("summaries-", "summaries ").replace("open-", "open ")
         assert f'!`sh "${{CLAUDE_PLUGIN_ROOT}}/scripts/vyavasta.sh" {words} || true`' in text
-        assert "disable-model-invocation: true" in text and "allowed-tools: Bash(sh:*)" in text
+        # The skill lets its turn run its own command and nothing else: never any “sh …” at all.
+        assert "disable-model-invocation: true" in text
+        (allowed,) = [line for line in text.splitlines() if line.startswith("allowed-tools:")]
+        assert allowed == f'allowed-tools: Bash(sh "${{CLAUDE_PLUGIN_ROOT}}/scripts/vyavasta.sh" {words}:*)'
         # A skill never takes words of its own: nothing typed is put on a shell line.
         assert "$ARGUMENTS" not in text
 

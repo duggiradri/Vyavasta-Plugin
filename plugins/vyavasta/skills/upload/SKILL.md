@@ -1,7 +1,7 @@
 ---
 description: "Open this session’s chat in Vyavasta so you can drop in a file for your next question."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" upload:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" upload || true`

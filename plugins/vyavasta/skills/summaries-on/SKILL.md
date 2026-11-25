@@ -1,7 +1,7 @@
 ---
 description: "Keep your messages in this project and Claude Code’s replies in a chat of your own in Vyavasta, summed up for teammates under categories you control there."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" summaries on:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" summaries on || true`

@@ -1,7 +1,7 @@
 ---
 description: "Open your settings in Vyavasta’s web app in your browser."
 disable-model-invocation: true
-allowed-tools: Bash(sh:*)
+allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" open settings:*)
 ---
 
 !`sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" open settings || true`
