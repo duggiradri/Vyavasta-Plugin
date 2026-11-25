@@ -2319,7 +2319,10 @@ render_inbox() {
         else printf "%d more messages from your teammates are waiting: send “vyavasta inbox” to read them all.\n", n + MORE - shown
       } else if (MORE == 1) print "1 more item from your teammates waits in Vyavasta."
       else if (MORE > 1) printf "%d more items from your teammates wait in Vyavasta.\n", MORE
-      print "Answer with “vyavasta reply <number>: <your words>”."
+      # (The model of the tool shows each message under a line of its own words, without the number: the developer is
+      # told where the numbers are.)
+      if (FOR == "developer") print "Answer with “vyavasta reply <number>: <your words>”."
+      else print "To answer one, send “vyavasta inbox” to see them numbered, then “vyavasta reply <number>: <your words>”."
       printf "%d %d\n", n + MORE, shown > COUNT
     }'
   mkdir -p "$HOME_DIR" && cp "$TMP/listing" "$HOME_DIR/inbox"
