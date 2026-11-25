@@ -1696,7 +1696,8 @@ def test_a_session_start_says_connected_once_and_what_a_folder_not_read_does(run
 def test_signing_out_says_nothing_is_sent_and_help_names_the_typed_only_commands(run, fake, repo):
     signed_in(run, fake)
     assert run("sign-out", cwd=repo).stdout.strip() == ("Signed out of Vyavasta on this computer. Requests are no "
-                                                        "longer checked, and nothing is sent from this computer.")
+                                                        "longer checked, and nothing is sent from this computer until "
+                                                        "you send “vyavasta sign in”.")
     text = run("help", cwd=repo).stdout
     assert "ask, tell, reply, and searching and reading documents are typed only" in text
     assert "It answers only from what you can both already see" in text
@@ -4306,7 +4307,7 @@ def test_a_message_that_mentions_the_team_gives_the_model_one_command_for_it(run
 @pytest.mark.parametrize("emailed", [True, False])
 def test_the_sign_in_says_the_guide_was_emailed_only_when_it_was(run, fake, repo, emailed):
     if emailed:
-        fake.extra["/token"] = {"guide_emailed": True}
+        fake.extra["/token"] = {"guide_emailed": True, "guide_emailed_now": True}
     run("sign-in", cwd=repo)
     fake.approved = True
     status = run("status", cwd=repo).stdout
@@ -4329,6 +4330,63 @@ def closed_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+SIGNED_OUT = ("Vyavasta · nothing sent (you signed out on this computer) · Send “vyavasta sign in” to connect again. "
+              "Claude works as usual.")
+
+
+def test_signing_out_is_kept_to_until_the_developer_signs_in_again(run, fake, repo, tmp_path):
+    """Nothing starts signing in by itself after “vyavasta sign out”: no message, session or welcome sends the
+    computer's name or opens a page. “vyavasta sign in” does, and once it is approved the computer is connected."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    assert "until you send “vyavasta sign in”" in prompt(run, repo, "vyavasta sign out")["reason"]
+    fake.requests.clear()
+    for session in ("session-1", "session-2"):
+        assert prompt(run, repo, "Change calc.py", session=session)["systemMessage"] == SIGNED_OUT
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="session-3"), cwd=repo))
+    assert started["systemMessage"] == ("Vyavasta: you signed out on this computer, so nothing is checked. Send "
+                                        "“vyavasta sign in” to connect again. Claude works as usual.")
+    # A tool's first session after an update, in a project that is off, and turning another project on.
+    (run.home / "welcomed-codex").unlink(missing_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    welcome = start(run, elsewhere, "codex", "session-4")["systemMessage"]
+    assert "you signed out on this computer" in welcome
+    assert "you signed out on this computer" in run("on", cwd=elsewhere).stdout
+    assert "you signed out on this computer" in run("chat", cwd=repo).stdout
+    assert not fake.calls("/pair") and run.opened() == []
+    # Asked for, sign-in starts; approved, the next message connects, and the computer is signed in as before.
+    said = prompt(run, repo, "vyavasta sign in")["reason"]
+    assert "BCDF-GHJK" in said and len(fake.calls("/pair")) == 1 and run.opened() == ["http://127.0.0.1/connect"]
+    assert "Enter the code BCDF-GHJK" in prompt(run, repo, "Change calc.py")["systemMessage"]
+    fake.approved = True
+    assert "Connected as sam@acme.test in Acme." in prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert not (run.home / "signed-out").exists() and fake.calls("/check")
+
+
+def test_a_connection_ended_in_the_web_app_starts_no_sign_in_by_itself(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/check"] = 401
+    assert "connection to Vyavasta has ended" in prompt(run, repo, "Change calc.py")["systemMessage"]
+    del fake.status["/check"]
+    for _ in range(2):
+        assert prompt(run, repo, "Change calc.py")["systemMessage"] == (
+            "Vyavasta · nothing sent (this computer’s connection to Vyavasta has ended) · Send “vyavasta sign in” to "
+            "connect again. Claude works as usual.")
+    assert not fake.calls("/pair") and run.opened() == []
+
+
+def test_a_refusal_that_is_not_vyavastas_never_signs_the_computer_out(run, fake, repo):
+    """A page in between (a network's sign-in page, a proxy) that answers 401 is not Vyavasta ending the connection."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.page["/check"] = (401, b"<html><body>Sign in to the hotel network</body></html>")
+    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert "can’t be reached" in said and (run.home / "credentials").exists()
+    assert not (run.home / "signed-out").exists()
 
 
 def test_curl_reads_none_of_the_developers_settings_and_follows_no_redirect(run, fake, repo, tmp_path):
@@ -4521,3 +4579,11 @@ def test_without_git_or_curl_the_plugin_says_so(run, fake, repo, tmp_path):
     assert prompt(run, repo, "Change calc.py", extra={"PATH": nocurl})["systemMessage"] == (
         "Vyavasta · nothing sent (Vyavasta needs curl, which isn’t installed here) · Claude works as usual.")
     assert not (run.home / "offline").exists()
+
+
+def test_signing_in_again_says_the_guide_is_in_the_email_already(run, fake, repo):
+    fake.extra["/token"] = {"guide_emailed": True, "guide_emailed_now": False}
+    run("sign-in", cwd=repo)
+    fake.approved = True
+    status = run("status", cwd=repo).stdout
+    assert "The guide to every command is in your email." in status and "was emailed to you" not in status

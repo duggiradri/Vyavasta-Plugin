@@ -557,6 +557,8 @@ keep_credentials() {
   } > "$CREDENTIALS.new" && chmod 600 "$CREDENTIALS.new"
   mv -f "$CREDENTIALS.new" "$CREDENTIALS"
   forget_told
+  # Signed in again: whatever signed this computer out before is over.
+  rm -f "$HOME_DIR/signed-out"
 }
 
 # What each project last told the server about code sharing belongs to one connection: the server forgets it when
@@ -604,6 +606,25 @@ slow_lately() {
   [ $(( $(now) - since )) -lt "$SLOW_FOR" ]
 }
 
+# This computer is signed out: by the developer here (`out`), or because its connection ended (`ended`: disconnected
+# on the web app's Coding tools page, or run out). The token is forgotten, and until the developer sends “vyavasta sign
+# in” nothing starts signing in by itself, sends the computer's name or opens a page (the file `signed-out` says which
+# of the two, and goes once a sign-in finishes).
+signed_out_here() {
+  rm -f "$CREDENTIALS"
+  forget_told
+  mkdir -p "$HOME_DIR" && printf '%s\n' "$1" > "$HOME_DIR/signed-out"
+}
+
+# Why this computer is signed out, as the middle of a sentence (“nothing sent (…)”), when it signed out or its
+# connection ended; nothing otherwise.
+out_said() {
+  [ -f "$HOME_DIR/signed-out" ] || return 0
+  case "$(cat "$HOME_DIR/signed-out")" in
+    ended) printf '%s' "this computer’s connection to Vyavasta has ended" ;;
+    *) printf '%s' "you signed out on this computer" ;;
+  esac
+}
 
 # -- projects, on and off -----------------------------------------------------------------------------------
 
@@ -784,11 +805,26 @@ api() {
   fi
   [ -z "$ride" ] || [ -z "$ride_status" ] || ride_settled "$ride_status"
   if [ "$STATUS" = "401" ] && [ -n "${TOKEN:-}" ]; then
-    # The connection ended (disconnected on the web app’s Coding tools page, or run out): this computer is signed out.
-    rm -f "$CREDENTIALS"
-    forget_told
-    TOKEN=""
+    if from_vyavasta; then
+      # The connection ended (disconnected on the web app’s Coding tools page, or run out): this computer is signed
+      # out, and stays so until the developer signs in again.
+      signed_out_here ended
+      TOKEN=""
+    else
+      # Refused by something on the way that isn't Vyavasta (a page in between): Vyavasta itself wasn't reached, and
+      # the connection is kept.
+      STATUS=000; WENT=""
+      [ -n "${CODEX_SANDBOX:-}" ] || now > "$HOME_DIR/offline"
+    fi
   fi
+}
+
+# Whether a refusal came from Vyavasta itself: its own JSON, with a `detail` that has a `code` (a page in between, such
+# as a proxy's or a network's sign-in page, answers otherwise).
+from_vyavasta() {
+  json_get "$TMP/answer" detail > "$TMP/detail"
+  case "$(json_get "$TMP/detail" code)" in \"?*\") return 0 ;; esac
+  return 1
 }
 
 answer() { json_get "$TMP/answer" "$1"; }
@@ -899,10 +935,13 @@ finish_pairing() {
       TOKEN=$(token_for "$SERVER")
       CONNECTED="Connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
       # Whether the server emailed its person the guide to every command (a server from before 0.5.6 says nothing,
-      # and nothing is said of it): said here and in a later welcome, and only then, so it is never said untrue.
+      # and nothing is said of it): said here and in a later welcome, and only then, so it is never said untrue. It
+      # was emailed for this sign-in only where the server says so (`guide_emailed_now`); after a sign-in again it is
+      # said to be in the developer's email already.
       if [ "$(answer guide_emailed)" = "true" ]; then
         printf '%s\n' "$SERVER" > "$HOME_DIR/guide-emailed"
-        CONNECTED="$CONNECTED $GUIDE_EMAILED"
+        if [ "$(answer guide_emailed_now)" = "true" ]; then CONNECTED="$CONNECTED $GUIDE_EMAILED"
+        else CONNECTED="$CONNECTED The guide to every command is in your email."; fi
       else
         rm -f "$HOME_DIR/guide-emailed"
       fi
@@ -915,10 +954,12 @@ finish_pairing() {
 # Starts connecting this computer: a pairing the developer approves in the browser, whose page is opened. A sign-in
 # still waiting is used as it is, and its page is not opened again (PAIR_AGAIN is then set). A page that isn't the
 # server's own isn't opened at all (PAIR_UNOPENED is then set). Sets PAIR_CODE and PAIR_PAGE, or fails with
-# PAIR_FAILED set to the reason.
+# PAIR_FAILED set to the reason. A computer that signed out, or whose connection ended, starts none unless the
+# developer asked to sign in (ASKED_SIGN_IN, set by “vyavasta sign in”).
 start_pairing() {
   PAIR_FAILED=""; PAIR_AGAIN=""; PAIR_UNOPENED=""
   if pending_waiting; then PAIR_AGAIN=1; return 0; fi
+  if [ -z "${ASKED_SIGN_IN:-}" ] && [ -f "$HOME_DIR/signed-out" ]; then PAIR_FAILED=$(out_said); return 1; fi
   if [ -n "$NOCURL" ]; then PAIR_FAILED="Vyavasta needs curl, which isn’t installed here"; return 1; fi
   machine=$(hostname | cut -d. -f1)
   [ -n "$machine" ] || machine=$(uname -n)
@@ -1541,6 +1582,8 @@ $WHATS_NEW
     if pending_waiting; then
       PAIR_AGAIN=1
       say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      say "${BANNER}Vyavasta: $(out_said), so nothing is checked. $WAY_IN_AGAIN ${AGENT} works as usual.$SUMMARIES_NOTE"
     elif ! offline && start_pairing; then
       true > "$dir/said-sign-in"
       say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
@@ -1623,6 +1666,8 @@ $WHATS_NEW$foot"
     elif pending_waiting; then
       PAIR_AGAIN=1
       say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      say "${top}Vyavasta is installed, and sends nothing, because $(out_said). $WAY_IN_AGAIN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
     elif ! offline && start_pairing; then
       true > "$1/said-sign-in"
       say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
@@ -2032,9 +2077,14 @@ handle_message() {
   finish_pairing
   if [ -z "$TOKEN" ]; then
     # Signed out: sign-in starts by itself on the first message of a session (unless the session's start began it),
-    # and never again in it; one still waiting is told again with its code, and its page isn't opened again.
+    # and never again in it; one still waiting is told again with its code, and its page isn't opened again. A
+    # computer that signed out, or whose connection ended, starts none: the developer signs in when they choose.
+    why="you aren’t signed in"
     if pending_waiting; then
       outcome="Enter the code $PAIR_CODE on the sign-in page ($PAIR_PAGE) to connect. Once you approve, your next message finishes connecting. ${AGENT} works as usual until then."
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      why=$(out_said)
+      outcome="$WAY_IN_AGAIN ${AGENT} works as usual."
     elif [ ! -f "$dir/said-sign-in" ]; then
       true > "$dir/said-sign-in"
       if start_pairing; then
@@ -2049,7 +2099,7 @@ handle_message() {
     else
       outcome="$WAY_IN ${AGENT} works as usual."
     fi
-    OUT_LINE=$(nothing_line "you aren’t signed in" "$outcome")
+    OUT_LINE=$(nothing_line "$why" "$outcome")
     emit; return
   fi
   # A folder that is no repository has nothing to check, and a question about the team can still be asked from it.
@@ -2447,6 +2497,8 @@ need_token() {
     if pending_waiting; then
       PAIR_AGAIN=1
       echo "You aren’t signed in to Vyavasta on this computer yet. To connect, $(code_said). Once you approve, send this again."
+    elif [ -f "$HOME_DIR/signed-out" ]; then
+      echo "Nothing was sent, because $(out_said). $WAY_IN_AGAIN"
     else
       echo "You aren’t signed in to Vyavasta on this computer. $WAY_IN"
     fi
@@ -2478,7 +2530,9 @@ command_sign_in() {
       return
     fi
   fi
-  # A sign-in still waiting is told again, never started a second time.
+  # A sign-in still waiting is told again, never started a second time. (Asked for, it starts on a computer that
+  # signed out too.)
+  ASKED_SIGN_IN=1
   if ! start_pairing; then
     echo "Couldn’t start connecting to Vyavasta at $SERVER: ${PAIR_FAILED%.}."
     [ "$STATUS" = "000" ] && echo "Check the address and your connection. To use another server, set VYAVASTA_SERVER before starting ${TOOL}."
@@ -2495,17 +2549,19 @@ command_sign_in() {
   echo "${lasts_said:+$lasts_said }$(finish_said)"
 }
 
+# Signing out is kept to: nothing starts signing in again by itself, and nothing is sent, until the developer sends
+# “vyavasta sign in” (`signed_out_here`).
 command_sign_out() {
   rm -f "$PENDING"
   if [ -z "$TOKEN" ]; then
-    rm -f "$CREDENTIALS"
-    echo "Not signed in to Vyavasta on this computer."
+    signed_out_here out
+    echo "Not signed in to Vyavasta on this computer, and nothing starts signing in by itself until you send “vyavasta sign in”."
     return
   fi
   api POST /signout "" "$QUICK_SECONDS"
-  rm -f "$CREDENTIALS" "$HOME_DIR/guide-emailed"
-  forget_told
-  echo "Signed out of Vyavasta on this computer. Requests are no longer checked, and nothing is sent from this computer."
+  signed_out_here out
+  rm -f "$HOME_DIR/guide-emailed"
+  echo "Signed out of Vyavasta on this computer. Requests are no longer checked, and nothing is sent from this computer until you send “vyavasta sign in”."
 }
 
 command_on() {
@@ -2528,7 +2584,9 @@ command_on() {
   finish_pairing
   if repository "$HERE"; then :; else ROOT=""; REMOTE=""; fi
   if [ -z "$TOKEN" ]; then
-    if start_pairing; then
+    if [ -f "$HOME_DIR/signed-out" ] && ! pending_waiting; then
+      echo "It sends nothing until you sign in again, because $(out_said). $WAY_IN_AGAIN"
+    elif start_pairing; then
       # The page is open already: the session's first message doesn't open it a second time.
       [ -n "${SESSION:-}" ] && mkdir -p "$SESSIONS/$SESSION" && true > "$SESSIONS/$SESSION/said-sign-in"
       lasts_said=$(code_lasts_said)
