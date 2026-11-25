@@ -1059,6 +1059,18 @@ from_vyavasta() {
 
 answer() { json_get "$TMP/answer" "$1"; }
 
+# Why the server turned a call away for too many calls (429), as the start of a sentence, by the code it gave: this
+# computer sent too many (`rate_limited`), or Vyavasta is busy for everyone just now (`busy`); words that blame neither
+# when it gave another code or none (a page in between). $1 names Vyavasta where it is busy: “Vyavasta” or “the server”.
+busy_said() {
+  json_get "$TMP/answer" detail > "$TMP/detail"
+  case "$(json_text "$(json_get "$TMP/detail" code)")" in
+    rate_limited) printf '%s' "this computer sent Vyavasta too many requests in the last minute" ;;
+    busy) printf '%s is busy just now' "$1" ;;
+    *) printf '%s had too many requests just now' "$1" ;;
+  esac
+}
+
 # A request's own id, made once for each message or turn sent and sent again with it when it must be sent again (the
 # call broke after it went out, or it is sent again later from `unsent`): the server answers a repeat as it answered
 # the first and keeps nothing twice. An older server takes no notice of it. Put first in the body, where `api` and
@@ -2117,7 +2129,7 @@ $(arrived_context "$listing" "While the developer was away" "your first reply in
       ;;
     held) say "${BANNER}Vyavasta: $(away_now_said), so requests aren’t being checked. It is tried again in a minute, and ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     401) say "${BANNER}Vyavasta: this computer’s connection has ended. $WAY_IN_AGAIN$SUMMARIES_NOTE" ;;
-    429) say "${BANNER}Vyavasta: this computer sent Vyavasta too many requests in the last minute, so requests aren’t checked for a moment. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
+    429) say "${BANNER}Vyavasta: $(busy_said "the server"), so requests aren’t checked for a moment. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     5*) say "${BANNER}Vyavasta: Vyavasta’s server isn’t working right now, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     unread) say "${BANNER}Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. ${AGENT} works as usual.$SUMMARIES_NOTE" ;;
     *)
@@ -2813,7 +2825,7 @@ handle_message() {
       OUT_LINE=$(nothing_line "this computer’s connection to Vyavasta has ended" "$WAY_IN_AGAIN ${AGENT} works as usual.")
       emit; return ;;
     429)
-      OUT_LINE=$(line "your message" "" "Vyavasta had too many requests just now, so it wasn’t checked. ${AGENT} works as usual.")
+      OUT_LINE=$(line "your message" "" "$(busy_said Vyavasta | sed 's/^t/T/'), so it wasn’t checked. ${AGENT} works as usual.")
       emit; return ;;
     000)
       # (Said as sent only when it went out.)
@@ -3370,7 +3382,7 @@ need_token() {
 not_reached() {
   case "$STATUS" in
     401) echo "This computer’s connection to Vyavasta has ended. $WAY_IN_AGAIN" ;;
-    429) echo "Vyavasta had too many requests just now. Try again in a minute." ;;
+    429) echo "$(busy_said Vyavasta | sed 's/^t/T/'). Try again in a minute." ;;
     000)
       if [ -n "$NOCURL" ]; then echo "Vyavasta needs curl, which isn’t installed here. Install it, and on Windows use Git for Windows, which brings it."
       elif [ -n "$SLOW" ]; then echo "Vyavasta took too long to answer. Try again in a moment."
@@ -4458,7 +4470,7 @@ command_ask_assistant() {
       fi
       ;;
     401) echo "This computer’s connection to Vyavasta has ended, so nothing was asked. Tell the developer: $WAY_IN_AGAIN" ;;
-    429) echo "Too many requests to Vyavasta just now. Ask again in a minute." ;;
+    429) echo "$(busy_said Vyavasta | sed 's/^t/T/'). Ask again in a minute." ;;
     422) echo "Vyavasta couldn’t take that question as it was sent, so nothing was asked. Ask it in fewer words." ;;
     000)
       # Out of reach at once, under Codex: inside its sandbox, which Codex says of a command it runs there

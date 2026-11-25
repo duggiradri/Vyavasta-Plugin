@@ -103,8 +103,9 @@ class Fake:
         self.documents = {"documents": [], "count": 0}
         self.searched = {"status": "none", "words": [], "passages": [], "matched": 0, "readable": 0}
         self.read = {"status": "not_found"}
-        # The sentence a refusal carries (``status`` sets which routes refuse).
+        # The sentence a refusal carries (``status`` sets which routes refuse), and its code by route ("x" unless set).
         self.refused = "Refused."
+        self.code: dict[str, str] = {}
         # Seconds a route takes to answer.
         self.delay: dict[str, float] = {}
         # Whether it is a newer server that takes the combined calls: a check that carries the work report and asks a
@@ -165,7 +166,8 @@ class Fake:
                     self.wfile.write(page)
                     return
                 if path in fake.status:
-                    return self._answer(fake.status[path], {"detail": {"code": "x", "message": fake.refused}})
+                    return self._answer(fake.status[path], {"detail": {"code": fake.code.get(path, "x"),
+                                                                       "message": fake.refused}})
                 if fake.combined and isinstance(body, dict) and body.get("request_id") and \
                         (path, body["request_id"]) in fake.answered:
                     return self._answer(*fake.answered[(path, body["request_id"])])
@@ -659,6 +661,29 @@ def test_a_server_that_fails_or_is_busy_is_said_in_one_plain_line(run, fake, rep
     assert not (run.home / "offline").exists()
     del fake.status["/check"]
     assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
+
+
+@pytest.mark.parametrize("code, why", [
+    ("busy", ("the server is busy just now", "Vyavasta is busy just now")),
+    ("rate_limited", ("this computer sent Vyavasta too many requests in the last minute",
+                      "This computer sent Vyavasta too many requests in the last minute")),
+    ("x", ("the server had too many requests just now", "Vyavasta had too many requests just now"))])
+def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, repo, code, why):
+    """A 429 is this computer's doing only when the server says so (`rate_limited`); “busy” is Vyavasta's, for
+    everyone; any other code, or none, blames neither."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.code = {"/me": code, "/check": code, "/ask": code, "/inbox": code}
+    fake.status = {"/me": 429}
+    started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
+    assert started == f"Vyavasta: {why[0]}, so requests aren’t checked for a moment. Claude works as usual."
+    fake.status = {"/check": 429}
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
+        f" · {why[1]}, so it wasn’t checked. Claude works as usual.")
+    fake.status = {"/inbox": 429}
+    assert run("inbox", cwd=repo).stdout == f"{why[1]}. Try again in a minute.\n"
+    fake.status = {"/ask": 429}
+    assert run("ask", "Who owns billing?", cwd=repo).stdout == f"{why[1]}. Ask again in a minute.\n"
 
 
 def test_a_connection_ended_in_settings_signs_this_computer_out(run, fake, repo):
