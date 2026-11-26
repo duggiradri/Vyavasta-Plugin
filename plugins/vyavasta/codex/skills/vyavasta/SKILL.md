@@ -28,21 +28,28 @@ Your setup
 See what is shared
 - `vyavasta settings`: every setting and how to change it.
 - `vyavasta open` / `vyavasta open settings`: opens Vyavasta’s web app, or the developer’s settings there, in their browser.
-- `vyavasta share code on` / `vyavasta share code off`: code sharing, off until the developer turns it on, also sends the uncommitted changes with each message for the check (teammates see only a short summary, never the code; key files, ignored files, machine-written files and files that aren’t text are never sent); off stops it and deletes what was kept.
+- `vyavasta share code on` / `vyavasta share code off`: code sharing, off until the developer turns it on, also sends the uncommitted changes with each message for the check (teammates see a short summary, and a teammate who changes the same file can see the developer’s latest version of it as a diff, the developer told who looked; key files, ignored files, machine-written files and files that aren’t text are never sent); off stops it and deletes what was kept.
 - `vyavasta summaries on` / `vyavasta summaries off`: summaries keep the developer’s messages and your replies in a chat of their own in Vyavasta, summed up for teammates under categories they control there (on when the project is turned on), or stop.
 - `vyavasta summary`: the developer’s own summaries, each category with whether teammates see it, and then what each teammate is working on.
-- `vyavasta shared`: everything sent from this session.
+- `vyavasta sent`: everything sent from this session.
 - `vyavasta chat` (or `vyavasta chat open`): this session’s chat in Vyavasta.
 - `vyavasta upload`: opens that chat so the developer can drop in a file for their next question.
 
 Otherwise, from a project that is on, each message’s words, the repository and branch, and changed files’ names are
 sent. Teammates who read the same repository see which files the developer changes (with code sharing on, also a
-short summary of what the change does, never the code), and when the developer and a teammate change the same file,
-both are told once, as a heads-up that holds nothing: you are then given who, which files, on which branch, since
-when and what their change does, to tell the developer exactly when they ask.
+short summary of what the change does), and when the developer and a teammate change the same file, on any branch,
+committed or not, both are told once, in one line for each teammate, as a heads-up that holds nothing: you are then
+given who, which files, on which branch, since when and what their change does, to tell the developer exactly when
+they ask. Codex doesn’t show the developer those lines itself: open your reply with them when you are told to.
 
 Teammates
 - `vyavasta team`: what each teammate is working on, from the summaries they share with the team.
+- `vyavasta shared`: the files the developer and their teammates both change now, and what their changes do.
+  `vyavasta --<name>` (or `vyavasta with <name>`) shows them for one teammate, and with a file after the name
+  (`vyavasta --priya app.ts`) that teammate’s latest version of it as a diff against the developer’s own, which is
+  never changed; the teammate is told who looked. When the developer asks you to show it, run the plugin’s script with
+  `diff "<name>" "<file>"`, by the command the plugin gives you with the details, outside Codex’s sandbox as for its
+  other commands.
 - `vyavasta inbox`: what teammates told the developer and asked of them. What is new also comes with the developer’s next message: you are given it then, to show at the top of your reply.
 - `vyavasta tell <name>: <words>`: tells a teammate something, as written. They see it in Vyavasta at once, and in their own coding tool with their next message there.
 - `vyavasta ask <name>: <question>`: asks a teammate’s agent, which is Vyavasta answering for that teammate, only from what the developer and they can both already see. It does not see the teammate’s computer or coding session. The teammate sees the question and can answer it themselves.

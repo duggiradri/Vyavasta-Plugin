@@ -1,5 +1,5 @@
 ---
-description: "List everything this session sent to Vyavasta."
+description: "Show the files you and your teammates both change, on any branch, and what their changes do."
 disable-model-invocation: true
 allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" shared:*)
 ---

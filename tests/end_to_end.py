@@ -28,8 +28,15 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "plugins" / "vyavasta" / "scripts" / "vyavasta.sh"
 REMOTE = "https://github.com/northwind/customer-platform.git"
-# This plugin's version, as its script names itself on every call.
+# This plugin's version, as its script names itself on every call; and whether the server is to tell it one line for
+# each teammate changing the same files, naming the command that shows their files (from 0.7.0).
 VERSION = re.search(r'^VERSION="([^"]+)"', SCRIPT.read_text(), re.M).group(1)
+NAMES_COMMANDS = tuple(int(part) for part in VERSION.split(".")) >= (0, 7, 0)
+
+
+def changing(name: str, path: str, command: str) -> str:
+    """The line a developer reads of a teammate changing a file of theirs too, as this plugin's version is told it."""
+    return f"Vyavasta: {name} is also changing {path}." + (f" Send “{command}” to see it." if NAMES_COMMANDS else "")
 
 
 class Browser:
@@ -625,23 +632,34 @@ def main() -> int:
             said = ganesh_hook("edit-check", "PostToolUse", tool_name="Edit")
             told = said.get("systemMessage", "")
             details = said.get("hookSpecificOutput", {}).get("additionalContext", "")
-            expect(told.startswith("Vyavasta: Sam Rivera is also changing api/serializers.py in "
-                                   "northwind/customer-platform, on their own computer and not committed yet.")
+            expect(told == changing("Sam Rivera", "api/serializers.py", "vyavasta --sam")
                    and "decision" not in said and "continue" not in said,
-                   "the check after his next edit tells Ganesh who else is changing the file, and stops nothing")
+                   "the check after his next edit tells Ganesh, on another branch, in one line who else is changing "
+                   "the file, and stops nothing")
             expect("│ Sam Rivera is changing northwind/customer-platform with Claude Code on their own computer, on "
                    "the branch drop-customer-plan." in details and "heads-up, never in the way of the change" in details,
                    "and Ganesh’s Claude is given who, where, on which branch and that it is a heads-up")
             expect(ganesh_hook("edit-check", "PostToolUse", tool_name="Edit") == {}, "once")
+            notices = [notice["text"] for notice in sam.ok("GET", "/shared-files/notices")["notices"]]
+            expect(notices == ["ganesh is also changing api/serializers.py in northwind/customer-platform."],
+                   "Sam is told at once in the web app")
+            said = ganesh_hook("prompt", "UserPromptSubmit", prompt="vyavasta --sam")
+            expect(said.get("decision") == "block" and said.get("reason", "").startswith(
+                       "You and Sam Rivera both change 1 file now:\n- api/serializers.py in northwind/customer-platform: "
+                       "Sam Rivera’s is on drop-customer-plan, changed and not committed"),
+                   "“vyavasta --sam” shows Ganesh the file both change, and where Sam changes it")
             said = hook("prompt", "UserPromptSubmit", repo, prompt="Add a docstring to the serializer")
             line = said.get("systemMessage", "")
-            expect("\n\nVyavasta: ganesh is also changing api/serializers.py in northwind/customer-platform, on their "
-                   "own computer and not committed yet. A heads-up only: nothing is held." in line,
+            expect("\n\n" + changing("ganesh", "api/serializers.py", "vyavasta --ganesh") in line,
                    "Sam is told with his next message, under its line")
             expect("on the branch plan-field." in said.get("hookSpecificOutput", {}).get("additionalContext", ""),
                    "and Sam’s Claude is given Ganesh’s branch and the rest")
             said = hook("prompt", "UserPromptSubmit", repo, prompt="And one for the view")
             expect("is also changing" not in said.get("systemMessage", ""), "told once: the next message says nothing")
+            said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta shared")
+            expect(said.get("reason", "").startswith("Files you and your teammates both change now (1 teammate):\n\n"
+                                                     "ganesh, 1 file (send “vyavasta --ganesh” for more):"),
+                   "“vyavasta shared” lists, for Sam, the teammate and the file they both change")
 
         step("Sam commits; Claude stops again")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Drop customer_plan"], check=True,
