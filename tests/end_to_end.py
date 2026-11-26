@@ -154,15 +154,18 @@ def main() -> int:
     claude_env.write_text("")
 
     def plugin(*command: str, stdin: dict | None = None, cwd: Path | None = None, typed: str | None = None,
-               home_dir: Path | None = None) -> str:
+               home_dir: Path | None = None, tool: str | None = None) -> str:
         # (``typed``: what stands on the command's input as it is, as a message for a teammate does; ``home_dir``:
-        # another person's settings folder, as on their own computer.)
+        # another person's settings folder, as on their own computer; ``tool``: "codex" where Codex runs it, as its
+        # hooks file says.)
         given = {} if home_dir is not None else dict(
             line.removeprefix("export ").split("=", 1) for line in claude_env.read_text().splitlines() if "=" in line)
         if command[:2] == ("hook", "session-start"):
             given = {"CLAUDE_ENV_FILE": str(claude_env)}
         elif command[:1] == ("hook",):
             given = {}
+        if tool:
+            given["VYAVASTA_TOOL"] = tool
         done = subprocess.run(["sh", str(SCRIPT), *command],
                               input=typed if typed is not None else json.dumps(stdin) if stdin else "",
                               capture_output=True, text=True, cwd=cwd or work, timeout=120, env={
@@ -248,12 +251,8 @@ def main() -> int:
                "after approving, Sam’s next ordinary message finishes connecting, says so, and goes through")
         guides = [mail for mail in sam.ok("GET", "/demo/inbox?email=sam@northwind.dev")
                   if mail["subject"] == "Vyavasta in Claude Code and Codex: your guide (keep this email)"]
-        # (The line says this sign-in sent the guide where the server says which sign-in sent it, as a server since
-        # 0.6.0 does; with an older one, which says only that a guide was sent, it says the guide is in the email.)
-        tells_which = "guide_emailed_now" in (project / "src" / "mas_stealth" / "product" / "plugin_api.py").read_text()
-        told = ("A guide to every command was emailed to you; it is worth keeping." if tells_which
-                else "The guide to every command is in your email.")
-        expect(len(guides) == 1 and told in said["systemMessage"],
+        expect(len(guides) == 1
+               and "A guide to every command was emailed to you; it is worth keeping." in said["systemMessage"],
                "the first connection brings the guide to every command by email, once, and the line says so")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta how do I sign in?")
         expect(said.get("decision") == "block" and "You’re signed in as sam@northwind.dev" in said.get("reason", ""),
@@ -327,8 +326,9 @@ def main() -> int:
         outside.mkdir()
         plugin("on", cwd=outside)
         said = hook("prompt", "UserPromptSubmit", outside, prompt="Vyavasta, what is my team working on?")
-        expect(bool(said.get("hookSpecificOutput", {}).get("additionalContext")),
-               "from a folder that is no repository it is asked all the same")
+        expect(said.get("hookSpecificOutput", {}).get("additionalContext", "").startswith(
+                   "Vyavasta’s assistant answered this message"),
+               "from a folder that is no repository it is asked all the same, and Claude is given the answer")
         asked = plugin("ask", "Who said what about customer_plan?", cwd=repo)
         print("  ask printed: " + asked.strip().replace("\n", "\n  ")[:600])
         expect("From Vyavasta, the team’s record" in asked, "the tool’s model can ask Vyavasta itself")
@@ -363,9 +363,14 @@ def main() -> int:
         line = said.get("systemMessage", "")
         expect("your changes not on GitHub yet (" in line, "the line says the changes went")
         expect("1 file that looks like a key or password" in line, "and that the key file was left out")
+        # What reached the server is in its own files, read now, before any connection ends (ending one deletes the
+        # code it kept).
+        stored = b"".join(path.read_bytes() for path in data.rglob("*") if path.is_file())
+        expect(b"return customer.subscription_tier" in stored, "the shared change reached the server")
+        expect(b"sk_live_not_sent" not in stored, "and the key file never did")
         listed = plugin("sent", cwd=repo)
         print("  sent printed: " + listed.strip().replace("\n", "\n  ")[:800])
-        expect("Sent to Vyavasta from this session" in listed and "sk_live_not_sent" not in listed,
+        expect("Sent to Vyavasta from this session" in listed,
                "“vyavasta sent” lists what this session sent, read from the server")
         chat = plugin("chat", cwd=repo)
         expect("/c/" in chat, "“vyavasta chat” gives the link to this session’s chat")
@@ -383,6 +388,14 @@ def main() -> int:
         seen = ganesh.ok("GET", "/team-work")["teammates"]
         expect("api/plans.py" in [entry["path"] for row in seen for entry in row.get("files", [])],
                "and Ganesh sees the new file among Sam’s work")
+
+        step("The push Claude runs (PreToolUse): checked before it runs")
+        said = hook("before-run", "PreToolUse", repo, tool_name="Bash",
+                    tool_input={"command": "git push origin drop-customer-plan", "description": "Push the branch"})
+        expect(said == {}, "the push goes to the check before it runs, and this server, which checks no request, "
+                           "stops nothing")
+        expect("A command of 4 words your coding tool was about to run was sent" in plugin("sent", cwd=repo),
+               "and “vyavasta sent” lists the command among what this session sent")
 
         step("Summaries: a message kept in this session’s chat, Claude’s reply when the turn ends, Sam’s summaries")
         said = hook("prompt", "UserPromptSubmit", repo,
@@ -483,7 +496,7 @@ def main() -> int:
         asked = said.get("reason", "")
         print("  vyavasta ask printed: " + asked.strip().replace("\n", "\n  ")[:800])
         expect("── To " in asked and "’s agent · from " in asked, "the message opens with its header")
-        expect("── From " in asked or "still" in asked, "and the agent’s answer follows under its own, or is on its way")
+        expect("── From ganesh’s agent" in asked, "and the agent’s answer follows under its own header")
         expect(asked.count("/?agent-chat=") == 1, "the link to the conversation is printed once")
         # What the tool's model sends with the script's own command is told him, a question too: no agent answers it.
         told = plugin("tell", "Ganesh", "Are you around this afternoon?", cwd=repo)
@@ -543,13 +556,14 @@ def main() -> int:
                "sends a teammate a message")
         # Claude does the work, then runs that command, the message on its input, taken as it is.
         words = "Pushed drop-customer-plan: `customer_plan` is gone from the API response, at $0 cost to callers."
+        unread = ganesh.ok("GET", "/agent-chats")["unread"]
         told = plugin("tell", "Ganesh", cwd=repo, typed=words + "\n")
         print("  tell printed: " + told.strip().replace("\n", "\n  ")[:700])
         expect(told.startswith("── To ") and "’s agent" not in told.splitlines()[0] and f"│ {words}" in told
                and "Delivered. " in told and told.count("/?agent-chat=") == 1,
                "what is told a teammate is delivered as it is written, under a header that names them, with where they see it")
         expect("── From " not in told, "and no agent answers what asks nothing")
-        expect(ganesh.ok("GET", "/agent-chats")["unread"] >= 1, "it waits for Ganesh in the web app, unread")
+        expect(ganesh.ok("GET", "/agent-chats")["unread"] == unread + 1, "it waits for Ganesh in the web app, unread")
         asked = ganesh.ok("POST", "/conversations", {"text": "What is new today?", "client_request_id": "e2e-what-is-new"})
         answer = {}
         for _ in range(120):
@@ -585,6 +599,33 @@ def main() -> int:
                and "│ CI is green, tagging v2.1 now" in reason,
                "“vyavasta tell <name>: …” is sent by the plugin itself, as it is written")
 
+        step("While Sam’s Claude Code session waits for him, a teammate’s message wakes it")
+        # (The hook Claude Code starts in the background at a turn's end, looking every second here.)
+        waiting = subprocess.Popen(
+            ["sh", str(SCRIPT), "hook", "wait"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, cwd=repo,
+            env={"PATH": os.environ["PATH"], "HOME": str(work), "VYAVASTA_HOME": str(home), "VYAVASTA_SERVER": base,
+                 "CLAUDE_PROJECT_DIR": str(repo), "VYAVASTA_BROWSER": "true", "VYAVASTA_WAIT_EVERY": "1",
+                 "CLAUDE_CODE_ENTRYPOINT": "cli"})
+        waiting.stdin.write(json.dumps({"session_id": "loop-session", "transcript_path": str(work / "transcript.jsonl"),
+                                        "cwd": str(repo), "permission_mode": "default", "hook_event_name": "Stop",
+                                        "stop_hook_active": False}))
+        waiting.stdin.close()
+        time.sleep(2.5)
+        expect(waiting.poll() is None, "the hook waits while nothing new came for Sam")
+        ganesh.ok("POST", f"/agent-chats/{sam_id}/messages", {"text": "Can you look at the failing deploy?",
+                                                               "intent": "tell", "client_request_id": "e2e-3"})
+        try:
+            woke = waiting.wait(10)
+        except subprocess.TimeoutExpired:
+            waiting.kill()
+            woke = waiting.wait()
+        said = waiting.stdout.read()
+        print("  the wake printed: " + said.strip().replace("\n", "\n  ")[:700])
+        expect(woke == 2 and said.startswith("Vyavasta woke you (notice ")
+               and "│ Can you look at the failing deploy?" in said,
+               "within seconds of Ganesh’s message the hook ends with 2, which wakes Claude, and quotes it")
+
         step("Several at once: “@team …” and two names reach each teammate in their own thread, with whom else")
         ines = Browser(base)
         ganesh.ok("POST", "/workspace/invitations", {"email": "ines@northwind.dev", "role": "member"})
@@ -618,73 +659,94 @@ def main() -> int:
         expect("Sent to the whole team (2 people)." in lines and "Also sent to ganesh." in lines
                and "│ the release is out" in lines and "│ hello from the loop" in lines,
                "in her own coding tool, each item says whom else it went to, on a line under its header")
+        signed_out = plugin("sign-out", home_dir=ines_home)
+        print("  Ines’s “vyavasta sign out” printed: " + signed_out.strip())
+        expect(signed_out.startswith("Signed out of Vyavasta on this computer, which was signed in as "
+                                     "ines@northwind.dev")
+               and ines.ok("GET", "/plugin/tokens")["tokens"] == [],
+               "“vyavasta sign out” signs her computer out and ends its connection on the server")
 
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta open settings")
         expect(said.get("decision") == "block" and f"{base}/settings" in said.get("reason", ""),
                "“vyavasta open settings” is answered by the plugin with the settings page of this server")
 
-        # (A server from before same-file warnings tells nothing of them: the step is left out against one.)
-        if "_same_files" in (project / "src" / "mas_stealth" / "product" / "plugin_api.py").read_text():
-            step("The same file: Ganesh, with his own plugin and clone, changes a file Sam is changing, and both are told")
-            ganesh_home, theirs = work / "ganesh-home", work / "ganesh-clone"
-            signing = plugin("sign-in", home_dir=ganesh_home)
-            found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", signing)
-            if found:
-                ganesh.ok("POST", "/plugin/pairings/approve", {"code": found.group(1), "approve": True})
-            (theirs / "api").mkdir(parents=True)
-            for command in (["init", "-q", "--initial-branch=main"], ["remote", "add", "origin", REMOTE]):
-                subprocess.run(["git", "-C", str(theirs), *command], check=True)
-            (theirs / "api" / "serializers.py").write_text("FIELDS = ['id', 'customer_plan', 'subscription_tier']\n")
-            subprocess.run(["git", "-C", str(theirs), "add", "--all"], check=True)
-            subprocess.run(["git", "-C", str(theirs), "commit", "-q", "-m", "Initial"], check=True, env=environment)
-            subprocess.run(["git", "-C", str(theirs), "checkout", "-q", "-b", "plan-field"], check=True)
-            turned_on = plugin("on", cwd=theirs, home_dir=ganesh_home)
-            expect("When you and a teammate change the same file, on any branch, both of you are told, as a heads-up"
-                   in turned_on,
-                   "“vyavasta on” tells Ganesh what teammates see and that both are told when they change the same file")
+        step("The same file: Ganesh, in Codex with his own plugin and clone, changes a file Sam is changing, and both "
+             "are told")
+        ganesh_home, theirs = work / "ganesh-home", work / "ganesh-clone"
+        signing = plugin("sign-in", home_dir=ganesh_home, tool="codex")
+        found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", signing)
+        if found:
+            ganesh.ok("POST", "/plugin/pairings/approve", {"code": found.group(1), "approve": True})
+        (theirs / "api").mkdir(parents=True)
+        for command in (["init", "-q", "--initial-branch=main"], ["remote", "add", "origin", REMOTE]):
+            subprocess.run(["git", "-C", str(theirs), *command], check=True)
+        (theirs / "api" / "serializers.py").write_text("FIELDS = ['id', 'customer_plan', 'subscription_tier']\n")
+        subprocess.run(["git", "-C", str(theirs), "add", "--all"], check=True)
+        subprocess.run(["git", "-C", str(theirs), "commit", "-q", "-m", "Initial"], check=True, env=environment)
+        subprocess.run(["git", "-C", str(theirs), "checkout", "-q", "-b", "plan-field"], check=True)
+        turned_on = plugin("on", cwd=theirs, home_dir=ganesh_home, tool="codex")
+        expect("When you and a teammate change the same file, on any branch, both of you are told, as a heads-up"
+               in turned_on,
+               "“vyavasta on” tells Ganesh what teammates see and that both are told when they change the same file")
 
-            def ganesh_hook(name: str, event: str, **fields) -> dict:
-                stdin = {"session_id": "ganesh-session", "transcript_path": str(work / "ganesh.jsonl"),
-                         "cwd": str(theirs), "permission_mode": "default", "hook_event_name": event, **fields}
-                printed = plugin("hook", name, stdin=stdin, cwd=theirs, home_dir=ganesh_home)
-                said = json.loads(printed) if printed.strip() else {}
-                print(f"  Ganesh’s {event} printed: {json.dumps(said, ensure_ascii=False)[:700]}")
-                return said
+        def ganesh_hook(name: str, event: str, **fields) -> dict:
+            stdin = {"session_id": "ganesh-session", "transcript_path": str(work / "ganesh.jsonl"),
+                     "cwd": str(theirs), "permission_mode": "default", "hook_event_name": event, **fields}
+            printed = plugin("hook", name, stdin=stdin, cwd=theirs, home_dir=ganesh_home, tool="codex")
+            said = json.loads(printed) if printed.strip() else {}
+            print(f"  Ganesh’s {event} printed: {json.dumps(said, ensure_ascii=False)[:700]}")
+            return said
 
-            (theirs / "api" / "serializers.py").write_text("FIELDS = ['id', 'plan']\n")
-            expect(ganesh_hook("edited", "PostToolUse", tool_name="Edit") == {},
-                   "the report after Ganesh’s edit prints nothing")
-            said = ganesh_hook("edit-check", "PostToolUse", tool_name="Edit")
-            told = said.get("systemMessage", "")
-            details = said.get("hookSpecificOutput", {}).get("additionalContext", "")
-            expect(told == changing("Sam Rivera", "api/serializers.py", "vyavasta --sam")
-                   and "decision" not in said and "continue" not in said,
-                   "the check after his next edit tells Ganesh, on another branch, in one line who else is changing "
-                   "the file, and stops nothing")
-            expect("│ Sam Rivera is changing northwind/customer-platform with Claude Code on their own computer, on "
-                   "the branch drop-customer-plan." in details and "heads-up, never in the way of the change" in details,
-                   "and Ganesh’s Claude is given who, where, on which branch and that it is a heads-up")
-            expect(ganesh_hook("edit-check", "PostToolUse", tool_name="Edit") == {}, "once")
-            notices = [notice["text"] for notice in sam.ok("GET", "/shared-files/notices")["notices"]]
-            expect(notices == ["ganesh is also changing api/serializers.py in northwind/customer-platform."],
-                   "Sam is told at once in the web app")
-            said = ganesh_hook("prompt", "UserPromptSubmit", prompt="vyavasta --sam")
-            expect(said.get("decision") == "block" and said.get("reason", "").startswith(
-                       "You and Sam Rivera both change 1 file now:\n- api/serializers.py in northwind/customer-platform: "
-                       "Sam Rivera’s is on drop-customer-plan, changed and not committed"),
-                   "“vyavasta --sam” shows Ganesh the file both change, and where Sam changes it")
-            said = hook("prompt", "UserPromptSubmit", repo, prompt="Add a docstring to the serializer")
-            line = said.get("systemMessage", "")
-            expect("\n\n" + changing("ganesh", "api/serializers.py", "vyavasta --ganesh") in line,
-                   "Sam is told with his next message, under its line")
-            expect("on the branch plan-field." in said.get("hookSpecificOutput", {}).get("additionalContext", ""),
-                   "and Sam’s Claude is given Ganesh’s branch and the rest")
-            said = hook("prompt", "UserPromptSubmit", repo, prompt="And one for the view")
-            expect("is also changing" not in said.get("systemMessage", ""), "told once: the next message says nothing")
-            said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta shared")
-            expect(said.get("reason", "").startswith("Files you and your teammates both change now (1 teammate):\n\n"
-                                                     "ganesh, 1 file (send “vyavasta --ganesh” for more):"),
-                   "“vyavasta shared” lists, for Sam, the teammate and the file they both change")
+        (theirs / "api" / "serializers.py").write_text("FIELDS = ['id', 'plan']\n")
+        expect(ganesh_hook("edited", "PostToolUse", tool_name="Edit") == {},
+               "the report after Ganesh’s edit prints nothing")
+        said = ganesh_hook("edit-check", "PostToolUse", tool_name="Edit")
+        told = said.get("systemMessage", "")
+        details = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        expect(told == changing("Sam Rivera", "api/serializers.py", "vyavasta --sam")
+               and "decision" not in said and "continue" not in said,
+               "the check after his next edit tells Ganesh, on another branch, in one line who else is changing "
+               "the file, and stops nothing")
+        expect("│ Sam Rivera is changing northwind/customer-platform with Claude Code on their own computer, on "
+               "the branch drop-customer-plan." in details and "heads-up, never in the way of the change" in details,
+               "and Ganesh’s Codex is given who, where, on which branch and that it is a heads-up")
+        expect(ganesh_hook("edit-check", "PostToolUse", tool_name="Edit") == {}, "once")
+        # Codex shows its developer no line of a hook's: his next message has Codex open its reply with it.
+        said = ganesh_hook("prompt", "UserPromptSubmit", prompt="Add a test for the serializer")
+        context = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        expect(context.startswith("The developer doesn’t see Vyavasta’s own lines in Codex.")
+               and f"\n│ {changing('Sam Rivera', 'api/serializers.py', 'vyavasta --sam')}\n" in context,
+               "Codex shows Ganesh none of that line, so his next message has Codex open its reply with it, word for "
+               "word")
+        notices = [notice["text"] for notice in sam.ok("GET", "/shared-files/notices")["notices"]]
+        expect(notices == ["ganesh is also changing api/serializers.py in northwind/customer-platform."],
+               "Sam is told at once in the web app")
+        said = ganesh_hook("prompt", "UserPromptSubmit", prompt="vyavasta --sam")
+        expect(said.get("decision") == "block" and said.get("reason", "").startswith(
+                   "You and Sam Rivera both change 1 file now:\n- api/serializers.py in northwind/customer-platform: "
+                   "Sam Rivera’s is on drop-customer-plan, changed and not committed"),
+               "“vyavasta --sam” shows Ganesh the file both change, and where Sam changes it")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Add a docstring to the serializer")
+        line = said.get("systemMessage", "")
+        expect("\n\n" + changing("ganesh", "api/serializers.py", "vyavasta --ganesh") in line,
+               "Sam is told with his next message, under its line")
+        expect("on the branch plan-field." in said.get("hookSpecificOutput", {}).get("additionalContext", ""),
+               "and Sam’s Claude is given Ganesh’s branch and the rest")
+        # Shown when Sam asks, Ganesh’s latest version of the file is a diff against Sam’s own copy, which stays as
+        # it was.
+        mine = (repo / "api" / "serializers.py").read_bytes()
+        shown = plugin("diff", "ganesh", "api/serializers.py", cwd=repo)
+        print("  diff printed: " + shown.strip().replace("\n", "\n  ")[:700])
+        expect("ganesh’s latest version of api/serializers.py (on plan-field), as a diff against yours" in shown
+               and "│ +FIELDS = ['id', 'plan']" in shown and (repo / "api" / "serializers.py").read_bytes() == mine,
+               "Claude can show Sam Ganesh’s latest version of the file as a diff, and Sam’s own file is left as it "
+               "was")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="And one for the view")
+        expect("is also changing" not in said.get("systemMessage", ""), "told once: the next message says nothing")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta shared")
+        expect(said.get("reason", "").startswith("Files you and your teammates both change now (1 teammate):\n\n"
+                                                 "ganesh, 1 file (send “vyavasta --ganesh” for more):"),
+               "“vyavasta shared” lists, for Sam, the teammate and the file they both change")
 
         step("Sam commits; Claude stops again")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-am", "Drop customer_plan"], check=True,
@@ -709,6 +771,31 @@ def main() -> int:
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta sign in")
         expect("enter the code " in said.get("reason", "") and (home / "pairing").exists(),
                "“vyavasta sign in” starts it")
+
+        # (Last: the server is stopped here for good.)
+        step("The server goes down: Ganesh’s message goes on unchecked, his push is refused, and “Go ahead anyway” "
+             "runs it")
+        (theirs / "api" / "serializers.py").write_text("FIELDS = ['id', 'plan', 'tier']\n")
+        subprocess.run(["git", "-C", str(theirs), "commit", "-qam", "Add tier"], check=True, env=environment)
+        server.terminate()
+        server.wait(timeout=20)
+        said = ganesh_hook("prompt", "UserPromptSubmit", prompt="Rename tier to plan_tier")
+        expect("nothing sent (Vyavasta’s server can’t be reached)" in said.get("systemMessage", "")
+               and said.get("hookSpecificOutput", {}).get("additionalContext", "").endswith(
+                   "before you push, merge, release or deploy anything, or do anything else that leaves this computer, "
+                   "ask the developer whether to go ahead, and wait for their answer."),
+               "his message goes on unchecked, and Codex is told to ask him before anything leaves the computer")
+        push = {"tool_name": "Bash", "tool_input": {"command": "git push origin plan-field", "description": "Push"}}
+        refused = ganesh_hook("before-run", "PreToolUse", **push).get("hookSpecificOutput", {})
+        reason = refused.get("permissionDecisionReason", "")
+        expect(refused.get("permissionDecision") == "deny" and "(Vyavasta’s server can’t be reached)" in reason
+               and "Send “Go ahead anyway” to run it without the check." in reason,
+               "his push is refused, and Codex is told to open what it says next with why and how to run it anyway")
+        said = ganesh_hook("prompt", "UserPromptSubmit", prompt="Go ahead anyway")
+        going = said.get("hookSpecificOutput", {}).get("additionalContext", "")
+        expect("and chose to run it without the check" in going,
+               "“Go ahead anyway” tells Codex he chose to run it without the check")
+        expect(ganesh_hook("before-run", "PreToolUse", **push) == {}, "and the push then runs")
     finally:
         server.terminate()
         try:
