@@ -283,8 +283,9 @@ def main() -> int:
         reason = said.get("reason", "")
         expect(said.get("decision") == "block" and "Vyavasta is on for customer-platform" in reason,
                "the plugin answers “vyavasta on” itself")
-        expect("Vyavasta reads northwind/customer-platform for you" in reason and "Code sharing is off" in reason,
-               "and says the repository is read and code sharing is off")
+        expect("Vyavasta reads northwind/customer-platform for you" in reason and "Code sharing is on:" in reason
+               and "“vyavasta share code off”" in reason,
+               "and says the repository is read, and that code sharing is on and how to turn it off")
         expect("Teammates who also read northwind/customer-platform in Vyavasta see which files you change here" in reason
                and "When you and a teammate change the same file, both of you are told" in reason,
                "and what teammates see of the work, and that both are told when they change the same file")
@@ -353,7 +354,7 @@ def main() -> int:
         (repo / ".env").write_text("STRIPE_KEY=sk_live_not_sent\n")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Return subscription_tier where customer_plan was used")
         line = said.get("systemMessage", "")
-        expect("your uncommitted changes (" in line, "the line says the uncommitted changes went")
+        expect("your changes not on GitHub yet (" in line, "the line says the changes went")
         expect("1 file that looks like a key or password" in line, "and that the key file was left out")
         listed = plugin("shared", cwd=repo)
         print("  shared printed: " + listed.strip().replace("\n", "\n  ")[:800])
@@ -362,6 +363,19 @@ def main() -> int:
         chat = plugin("chat", cwd=repo)
         expect("/c/" in chat, "“vyavasta chat” gives the link to this session’s chat")
         (repo / ".env").unlink()
+
+        step("A commit not pushed and a new file: the report carries them, and the server takes it")
+        subprocess.run(["git", "-C", str(repo), "add", "api/views.py"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "WIP, don't merge: plan_tier"], check=True,
+                       env=environment)
+        (repo / "api" / "plans.py").write_text("PLANS = ['free', 'team']\n")
+        said = hook("prompt", "UserPromptSubmit", repo, prompt="Add the plans list in api/plans.py")
+        line = said.get("systemMessage", "")
+        expect(line.startswith("Vyavasta · sent") and "couldn’t take" not in line,
+               "the server takes the message and the work it carries, its commits and copies among it")
+        seen = ganesh.ok("GET", "/team-work")["teammates"]
+        expect("api/plans.py" in [entry["path"] for row in seen for entry in row.get("files", [])],
+               "and Ganesh sees the new file among Sam’s work")
 
         step("Summaries: a message kept in this session’s chat, Claude’s reply when the turn ends, Sam’s summaries")
         said = hook("prompt", "UserPromptSubmit", repo,

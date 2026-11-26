@@ -1,5 +1,5 @@
 ---
-description: "Send your uncommitted changes to Vyavasta’s check from this project; teammates see only a summary (never keys, ignored, machine-written or non-text files)."
+description: "Send your changes not on GitHub yet to Vyavasta’s check from this project (on unless you turned it off); teammates see only a summary (never keys, ignored, machine-written or non-text files)."
 disable-model-invocation: true
 allowed-tools: Bash(sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" share-code on:*)
 ---

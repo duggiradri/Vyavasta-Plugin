@@ -333,6 +333,9 @@ def repo(tmp_path: Path) -> Path:
     git(folder, "commit", "-q", "-m", "Initial")
     # A remote URL that carries a credential, as some do: it must never leave the computer.
     git(folder, "remote", "add", "origin", "https://sam:ghp_hunter2@github.com/acme/api.git")
+    # As a clone from GitHub knows them: origin's main, at the first commit, and that it is origin's default branch.
+    git(folder, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(folder, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     return folder
 
 
@@ -479,7 +482,7 @@ def test_off_by_default_every_hook_does_nothing_and_a_tools_first_session_says_s
     assert fake.requests == []
 
 
-def test_on_while_signed_in_says_who_what_is_read_and_that_sharing_is_off(run, fake, repo):
+def test_on_while_signed_in_says_who_what_is_read_and_that_sharing_is_on(run, fake, repo):
     signed_in(run, fake)
     said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Vyavasta on.")))
     assert said["decision"] == "block" and said["hookSpecificOutput"]["suppressOriginalPrompt"] is True
@@ -487,7 +490,7 @@ def test_on_while_signed_in_says_who_what_is_read_and_that_sharing_is_off(run, f
     assert reason.startswith(f"Vyavasta is on for api ({repo}).")
     assert "Signed in as sam@acme.test in Acme." in reason
     assert "Vyavasta reads acme/api for you" in reason
-    assert "Code sharing is off" in reason and "“vyavasta share code on”" in reason
+    assert "Code sharing is on:" in reason and "“vyavasta share code off”" in reason
     assert "“vyavasta help”" in reason and not fake.calls("/check")
     # From now on, messages here are checked.
     prompt(run, repo, "Change calc.py")
@@ -719,6 +722,9 @@ def test_a_clear_request_reaches_claude_with_the_facts_and_sends_only_what_the_c
     # own id, and whether a question is asked at once, are the calls' own: see the combined calls below.)
     body = dict(sent["body"])
     assert re.fullmatch(r"[0-9a-f]{24}", body.pop("request_id")) and body.pop("ask_now") is True
+    # (With code sharing on, as it is unless turned off, the change goes too: of a clean tree, none.)
+    change = body.pop("change")
+    assert change["diff"] == change["unpushed_diff"] == "" and change["copies"] == [] and change["files"] == 0
     assert body == {"request": text, "remote": "https://github.com/acme/api.git", "branch": "main",
                     "session": "session-1", "tool": "claude-code", "keep": True}
     assert b"hunter2" not in sent["raw"] and b"transcript" not in sent["raw"] and str(repo).encode() not in sent["raw"]
@@ -974,6 +980,10 @@ def test_a_repository_with_no_github_copy_and_one_not_read_each_say_so(run, fake
     fake.check = {"verdict": "not_connected", "hold": False, "context": "",
                   "notice": "Not checked: Vyavasta doesn’t read acme/other for you, so nothing was checked or shared."}
     said = prompt(run, local, "Change it", cwd=local)["systemMessage"]
+    # (Turned on with no copy on GitHub, the project was never told code sharing is on: its first line with one says
+    # so, once.)
+    assert said.startswith("Vyavasta · sent and kept for your summary · " + fake.check["notice"] + " Code sharing is now on")
+    said = prompt(run, local, "Change it", cwd=local)["systemMessage"]
     assert said == "Vyavasta · sent and kept for your summary · " + fake.check["notice"]
 
 
@@ -1063,8 +1073,9 @@ def test_a_question_that_was_asked_stays_asked_when_a_later_wait_for_its_answer_
     fake.slow = 99
     asked = ("Vyavasta · sent: your question. Kept in this session’s chat for your summary. · Vyavasta is still "
              "working on the answer.")
-    # Out of reach after the check: the wait is the second run of curl.
-    said = prompt(run, repo, "What is Priya doing?", session="q-1", extra={"PATH": curl_closing(tmp_path, fake, 1)})
+    # Out of reach after the check: the wait is the third run of curl (the first of a connection tells the server that
+    # code sharing is on).
+    said = prompt(run, repo, "What is Priya doing?", session="q-1", extra={"PATH": curl_closing(tmp_path, fake, 2)})
     assert said == {"systemMessage": asked} and len(fake.calls("/check")) == 1
     # (Nothing is tried for a minute after it, as after any server out of reach.)
     assert (run.home / "offline").exists()
@@ -1210,25 +1221,23 @@ def test_under_codex_a_sandboxed_ask_says_what_stood_in_its_way_and_to_run_it_ou
 
 # -- the one line for every message ------------------------------------------------------------------------------
 
-def test_with_sharing_off_the_line_names_the_changed_files_and_asks_about_sharing_once(run, fake, repo):
+def test_with_sharing_turned_off_the_line_names_the_changed_files_and_says_what_isnt_sent(run, fake, repo):
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    run("share-code", "off", cwd=repo)
+    fake.requests.clear()
     (repo / "calc.py").write_text(f"# {SECRET}\n")
     (repo / "new.py").write_text("z = 3\n")
     said = prompt(run, repo, "Change calc.py")["systemMessage"]
-    assert said.startswith("Vyavasta · sent: your message and 2 changed files’ names. Not sent: what the files hold "
-                           "(code sharing is off). Kept in this session’s chat for your summary. · Checked: nothing stands against this change.")
-    # The one question about code sharing says what turning it on does, in a sentence.
-    assert said.endswith(" Send “vyavasta share code on” to also send your uncommitted changes for the check: "
-                         "teammates see only a summary, and key, ignored, machine-written and non-text files never go. "
-                         "This is asked only once.")
+    assert said == ("Vyavasta · sent: your message and 2 changed files’ names. Not sent: what the files hold (code "
+                    "sharing is off). Kept in this session’s chat for your summary. · Checked: nothing stands against "
+                    "this change.")
     (check,) = fake.calls("/check")
     assert "change" not in check["body"] and SECRET.encode() not in check["raw"]
     (work,) = fake.calls("/work")
     assert SECRET.encode() not in work["raw"] and "change" not in work["body"]
-    # Asked once only; and what doesn't change from one message to the next is said in the session's first line only.
+    # What doesn't change from one message to the next is said in the session's first line only.
     again = prompt(run, repo, "Change calc.py")["systemMessage"]
-    assert "asked only once" not in again
     assert again == ("Vyavasta · sent: your message and 2 changed files’ names · kept for your summary · Checked: "
                      "nothing stands against this change.")
     # One changed file is said in the singular.
@@ -1256,8 +1265,9 @@ def test_turning_code_sharing_on_says_what_is_sent_and_never_sent_and_tells_the_
     # Signed out, the plugin says itself what Vyavasta does with the changes: teammates see a summary only.
     (run.home / "credentials").unlink()
     said = run("share-code", "on", cwd=repo).stdout.splitlines()
-    assert said[0] == ("Code sharing is on for acme/api: your uncommitted changes (up to 5,000 lines) now go to "
-                       "Vyavasta with each message and after each edit, and Vyavasta’s check reads them.")
+    assert said[0] == ("Code sharing is on for acme/api: your changes not on GitHub yet (up to 5,000 lines), with the "
+                       "latest copy of each changed file, now go to Vyavasta with each message and after each edit, and "
+                       "Vyavasta’s check reads them.")
     assert said[1].startswith("Teammates who can already see this work see which files you change and a short summary "
                               "of what the change does, never the code. When you and a teammate change the same file, "
                               "both of you are told, as a heads-up.") and "7 days" in said[1] and said[2] == never
@@ -1296,8 +1306,8 @@ def test_with_sharing_on_the_check_carries_one_diff_of_the_working_tree_against_
     # An ignored file is never even listed (only the .gitignore that names it is a change).
     assert SECRET not in diff and "b/ignored.txt" not in diff
     assert change["files"] == 6 and change["lines"] >= 5
-    assert said.startswith("Vyavasta · sent: your message and your uncommitted changes (6 files,")
-    assert "Not sent" not in said
+    assert said.startswith("Vyavasta · sent: your message, your changes not on GitHub yet (6 files,")
+    assert "lines of changes), and 1 unpushed commit’s message." in said and "Not sent" not in said
     # The developer's own index is untouched: the new file is still untracked.
     assert "?? " in git(repo, "status", "--porcelain")
     # The same changes are not sent again with the report that follows; changed again, they are.
@@ -1309,7 +1319,7 @@ def test_with_sharing_on_the_check_carries_one_diff_of_the_working_tree_against_
     assert "return b + a" in fake.calls("/work")[-1]["body"]["change"]["diff"]
 
 
-def test_keys_machine_written_and_binary_files_are_left_out_by_name_with_their_reasons(run, fake, repo):
+def test_keys_machine_written_and_binary_files_are_left_out_with_their_reasons_and_keys_never_named(run, fake, repo):
     signed_in(run, fake)
     (repo / ".env").write_text("A=1\n")
     git(repo, "add", ".env")
@@ -1329,10 +1339,11 @@ def test_keys_machine_written_and_binary_files_are_left_out_by_name_with_their_r
     said = prompt(run, repo, "Change calc.py")["systemMessage"]
     change = fake.calls("/check")[0]["body"]["change"]
     assert SECRET not in json.dumps(change)
-    reasons = {entry["path"]: entry["why"] for entry in change["left_out"]}
-    assert reasons == {".env": "secret", "deploy.pem": "secret", "config/credentials.json": "secret",
-                       "package-lock.json": "generated", "node_modules/x/index.js": "generated",
-                       "app.min.js": "generated", "logo.png": "binary"}
+    assert sorted((entry["why"], entry["path"]) for entry in change["left_out"]) == [
+        ("binary", "logo.png"), ("generated", "app.min.js"), ("generated", "node_modules/x/index.js"),
+        ("generated", "package-lock.json"), ("secret", ""), ("secret", ""), ("secret", "")]
+    for name in (".env", "deploy.pem", "credentials.json"):
+        assert name not in json.dumps(fake.calls("/check")[0]["body"])
     assert change["files"] == 1 and change["complete"] is True
     assert ("Not sent: 3 files that look like keys or passwords, 3 machine-written files, such as lock files or "
             "build output, 1 file that isn’t text.") in said
@@ -1695,14 +1706,16 @@ def test_settings_and_status_show_the_project_and_sharing_and_how_to_change_them
     signed_in(run, fake)
     settings = run("settings", cwd=repo).stdout
     assert "- This project: off. Send “vyavasta on” to turn it on." in settings
-    assert "- Code sharing: off. Send “vyavasta share code on” to turn it on." in settings
+    # Code sharing is on until the developer turns it off.
+    assert "- Code sharing: on. Send “vyavasta share code off” to turn it off." in settings
     assert "- Signed in as: sam@acme.test in Acme." in settings and f"- Server: {fake.url}." in settings
     switched_on(run, fake, repo)
-    sharing_on(run, fake, repo)
-    settings = run("settings", cwd=repo).stdout
-    assert "- This project: on." in settings and "- Code sharing: on." in settings
     status = run("status", cwd=repo).stdout
     assert "Vyavasta is on in this project (api)." in status and "Code sharing is on for this project." in status
+    run("share-code", "off", cwd=repo)
+    settings = run("settings", cwd=repo).stdout
+    assert "- This project: on." in settings and "- Code sharing: off. Send “vyavasta share code on” to turn it on." in settings
+    assert "Code sharing is off for this project." in run("status", cwd=repo).stdout
 
 
 def test_check_tests_each_part_and_says_how_to_fix_what_is_wrong(run, fake, repo, tmp_path):
@@ -1881,6 +1894,7 @@ def test_inbox_and_reply_act_on_the_numbered_items(run, fake, repo):
 def test_an_edit_reports_gits_own_list_of_changes_with_counts_and_never_what_files_hold(run, fake, repo):
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    run("share-code", "off", cwd=repo)
     run("hook", "session-start", stdin=event("SessionStart", repo, source="startup"))
     fake.requests.clear()
     (repo / "calc.py").write_text(f"def add(a, b):\n    # {SECRET}\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n")
@@ -2080,6 +2094,9 @@ def test_every_hook_runs_this_script_with_a_command_it_knows():
     assert hooks["Stop"][0]["hooks"][0]["statusMessage"] == "Sending your work to Vyavasta"
     (expansion,) = hooks["UserPromptExpansion"]
     assert expansion["matcher"] == "^vyavasta:" and expansion["hooks"][0]["statusMessage"] == "Waiting for Vyavasta"
+    # A work report goes after the shell's commands as after an edit, so that a commit made there is told as it happens.
+    (reported,) = [group for group in hooks["PostToolUse"] if any(hook["command"].endswith("edited") for hook in group["hooks"])]
+    assert "Bash" in reported["matcher"].split("|") and reported["hooks"][0]["async"] is True
     # The check after an edit is the one that can stop the tool, so it runs in the foreground, quickly.
     (check,) = [hook for group in hooks["PostToolUse"] for hook in group["hooks"] if hook["command"].endswith("edit-check")]
     assert not check.get("async") and check["timeout"] <= 10
@@ -2135,7 +2152,7 @@ def test_a_file_that_turns_into_a_link_never_lets_a_key_file_after_it_through(ru
     (check,) = fake.calls("/check")
     assert KEY.encode() not in check["raw"]
     change = check["body"]["change"]
-    assert {entry["path"]: entry["why"] for entry in change["left_out"]} == {"a_link": "binary", "m/.env": "secret"}
+    assert sorted((entry["why"], entry["path"]) for entry in change["left_out"]) == [("binary", "a_link"), ("secret", "")]
     assert "+z = 2" in change["diff"] and "a_link" not in change["diff"] and change["files"] == 1
     assert "1 file that looks like a key or password" in said
 
@@ -2183,13 +2200,16 @@ def test_no_key_file_reaches_the_sent_change_by_any_path(run, fake, repo, tmp_pa
     (check,) = fake.calls("/check")
     assert KEY.encode() not in check["raw"] and str(outside).encode() not in check["raw"]
     change = check["body"]["change"]
-    reasons = {entry["path"]: entry["why"] for entry in change["left_out"]}
-    assert reasons["config/.ENV"] == reasons["keys/ID_RSA.PEM"] == reasons["deploy.key"] == "secret"
-    # A link is never sent, whatever it points to; one that points at a key file says so.
-    assert reasons["pointer"] == reasons["elsewhere"] == reasons["harmless.txt"] == "secret"
-    assert "+notes, changed" in change["diff"]
-    # The renamed key file: its old name was enough to leave it out, under whatever name it has now.
-    assert reasons["plain.json"] == "secret" and "plain.json" not in change["diff"]
+    # Each is left out by its reason alone, never named: the key files, the links to them, and the files renamed
+    # from or to a key's name.
+    assert change["left_out"] == [{"path": "", "why": "secret"}] * 7
+    body = json.dumps(check["body"])
+    for name in ("config/.ENV", "keys/ID_RSA.PEM", "deploy.key", "plain.json", "service-account"):
+        assert name not in body
+    # A link is never sent, whatever it points to: its copy is its name alone.
+    copies = {copy["path"]: copy for copy in change["copies"]}
+    assert copies["pointer"] == {"path": "pointer", "binary": True, "too_large": False}
+    assert "+notes, changed" in change["diff"] and copies["notes.txt"]["content"] == "notes, changed\n"
     # The submodule is told only as the commit it is at.
     assert "vendored/.env" not in change["diff"]
     (work,) = fake.calls("/work")
@@ -2270,7 +2290,7 @@ def test_signing_out_and_back_in_keeps_code_sharing_on_and_tells_the_new_connect
     fake.requests.clear()
     said = prompt(run, repo, "Change calc.py")["systemMessage"]
     assert fake.calls("/sharing")[0]["body"]["on"] is True
-    assert "turned off" not in said and "your uncommitted changes" in said
+    assert "turned off" not in said and "your changes not on GitHub yet" in said
     assert "Code sharing: on" in run("settings", cwd=repo).stdout
     # The same at a session's start, after the connection ended by itself.
     fake.status["/check"] = 401
@@ -5582,15 +5602,14 @@ def test_the_line_gives_the_whole_account_once_a_session_and_then_a_short_or_qui
                   "context": "x", "statements": []}
     (repo / "calc.py").write_text("def add(a, b):\n    return a - b\n")
     said = prompt(run, repo, "Make add subtract")["systemMessage"]
-    # (With the one question about code sharing after it, asked once.)
-    assert said.startswith("Vyavasta · sent: your message and 1 changed file’s name · not kept (summaries are off) · "
-                           "Checked: nothing stands against this change. Send “vyavasta share code on”")
+    assert said == ("Vyavasta · sent: your message and your changes not on GitHub yet (1 file, 2 lines of changes) · "
+                    "not kept (summaries are off) · Checked: nothing stands against this change.")
     # A question's line says whether it is kept, in the session's first line and in a later one.
     run("summaries", "on", cwd=repo)
     fake.check = dict(QUESTION)
     asked = prompt(run, repo, "What is Priya doing?", session="session-9")["systemMessage"]
-    assert asked.startswith("Vyavasta · sent: your question and 1 changed file’s name. Not sent: what the files hold "
-                            "(code sharing is off). Kept in this session’s chat for your summary. · ")
+    assert asked.startswith("Vyavasta · sent: your question and your changes not on GitHub yet (1 file, 2 lines of "
+                            "changes). Kept in this session’s chat for your summary. · ")
     run("summaries", "off", cwd=repo)
     assert "not summed up (summaries are off)" in prompt(run, repo, "And Sam?", session="session-9")["systemMessage"]
 
@@ -6387,8 +6406,12 @@ def test_links_devices_and_large_files_are_named_and_never_read(run, fake, repo,
     assert done.seconds < 5
     files = {entry["path"]: entry for entry in fake.calls("/work")[-1]["body"]["files"]}
     assert files["note.txt"]["additions"] == 2
+    # (With code sharing on, git compares a link by where it points, one line, never by what is there; and its copy is
+    # its name alone. A pipe is never opened.)
+    copies = {copy["path"]: copy for copy in fake.calls("/check")[-1]["body"]["change"]["copies"]}
     for name in ("data.csv", "zero.txt", "queue-link"):
-        assert files[name]["additions"] == 0, name
+        assert files[name]["additions"] == 1 and copies[name] == {"path": name, "binary": True, "too_large": False}
+    assert "queue" not in copies
     done = run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Write"), cwd=repo)
     assert done.seconds < 5
 
@@ -6534,9 +6557,10 @@ def test_a_newer_server_takes_the_report_the_question_the_inbox_and_the_reply_in
     (repo / "calc.py").write_text("changed\n")
     # A change request with changed files: the report goes with the check.
     said = prompt(run, repo, "Change calc.py")["systemMessage"]
-    assert [call["path"] for call in fake.requests] == ["/check"]
+    # (Once a connection, the first message tells the server that code sharing is on.)
+    assert [call["path"] for call in fake.requests] == ["/sharing", "/check"]
     assert fake.calls("/check")[0]["body"]["work"]["files"][0]["path"] == "calc.py"
-    assert "and 1 changed file’s name" in said
+    assert "and your changes not on GitHub yet (1 file," in said
     # The turn's end: the reply carries the report.
     fake.requests.clear()
     stop(run, repo, last_assistant_message="Done.")
@@ -6742,3 +6766,225 @@ def test_a_turns_end_says_a_conflict_and_waiting_messages_in_one_line(run, fake,
     assert said.startswith(CONFLICT["notice"]) and "Send “continue” to go on" in said
     assert said.endswith("\n\nVyavasta: teammates sent you 3 messages. They come with your next message, or send "
                          "“vyavasta inbox” to read them now.")
+
+
+# -- 0.7: every change on the computer reaches Vyavasta: new files, commits not pushed, nested repositories ----------
+#
+# Every work report (on its own, carried by a check, or with a turn's end) carries `git`: the branch, its upstream,
+# origin's default branch and where the branch left it, the files changed and not committed (new ones too), the commits
+# no remote-tracking branch has with their messages and files, and the same for each repository nested inside this
+# one. With code sharing on (the default), the change carries the commits' own diff and each changed file's latest
+# copy, once until it changes again. Nothing of a key file or a file git ignores is ever sent, in any field.
+
+def head_of(folder: Path) -> str:
+    return git(folder, "rev-parse", "HEAD").strip()
+
+
+def test_new_files_and_commits_not_pushed_go_with_every_report_whatever_code_sharing_says(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    run("share-code", "off", cwd=repo)
+    fake.requests.clear()
+    pushed = head_of(repo)
+    git(repo, "checkout", "-q", "-b", "feature/sign-in")
+    (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    git(repo, "commit", "-q", "-am", "WIP, don't merge: reworking sign-in", "-m", "The old flow stays until Friday.")
+    (repo / "auth").mkdir()
+    (repo / "auth" / "login.py").write_text("def login():\n    pass\n")
+    (repo / "README.md").write_text("# api\n")
+    said = prompt(run, repo, "Change the login page")["systemMessage"]
+    # The check carries the work with its facts: the new files, and the commit with its message and files.
+    facts = fake.calls("/check")[0]["body"]["work"]["git"]
+    assert facts["branch"] == "feature/sign-in" and facts["head"] == head_of(repo) and facts["upstream"] == ""
+    assert facts["default_branch"] == "main" and facts["base"] == pushed and facts["nested"] == []
+    assert {entry["path"]: entry for entry in facts["uncommitted"]} == {
+        "auth/login.py": {"path": "auth/login.py", "status": "added", "additions": 2, "deletions": 0},
+        "README.md": {"path": "README.md", "status": "added", "additions": 1, "deletions": 0}}
+    (commit,) = facts["unpushed"]
+    assert commit["sha"] == head_of(repo) and commit["at"].startswith(time.strftime("%Y-"))
+    assert commit["subject"] == "WIP, don't merge: reworking sign-in" and commit["body"] == "The old flow stays until Friday."
+    assert commit["files"] == [{"path": "calc.py", "status": "changed", "additions": 1, "deletions": 1}]
+    # The report on its own names the new files as well, in the list an older server reads.
+    assert {entry["path"] for entry in fake.calls("/work")[0]["body"]["files"]} == {"auth/login.py", "README.md"}
+    assert said.startswith("Vyavasta · sent: your message, 2 changed files’ names, and 1 unpushed commit’s message. "
+                           "Not sent: what the files hold (code sharing is off).")
+    # Everything committed and nothing left uncommitted: a request to push still carries what the push would take.
+    git(repo, "add", "--all")
+    git(repo, "commit", "-q", "-m", "Add the login page")
+    fake.requests.clear()
+    prompt(run, repo, "Push it")
+    facts = fake.calls("/check")[0]["body"]["work"]["git"]
+    assert [commit["subject"] for commit in facts["unpushed"]] == ["Add the login page",
+                                                                  "WIP, don't merge: reworking sign-in"]
+    assert facts["uncommitted"] == [] and {entry["path"] for entry in facts["unpushed"][0]["files"]} == {
+        "auth/login.py", "README.md"}
+    # Pushed: the next report says nothing is left to push, and names the upstream.
+    git(repo, "update-ref", "refs/remotes/origin/feature/sign-in", "HEAD")
+    git(repo, "branch", "-q", "--set-upstream-to=origin/feature/sign-in")
+    fake.requests.clear()
+    stop(run, repo)
+    reports = [call["body"].get("work") or call["body"] for call in fake.requests if call["path"] in ("/turn", "/work")]
+    assert reports and all(report["git"]["unpushed"] == [] and report["git"]["upstream"] == "origin/feature/sign-in"
+                           for report in reports)
+
+
+def test_a_nested_repositorys_work_is_reported_with_its_own_path_and_remote(run, fake, repo, tmp_path):
+    signed_in(run, fake)
+    web = tmp_path / "web"
+    web.mkdir()
+    git(web, "init", "-q", "--initial-branch=main")
+    (web / "app.ts").write_text("export const signIn = 1\n")
+    git(web, "add", "--all")
+    git(web, "commit", "-q", "-m", "Web")
+    # A clone of another repository put inside this one, which ignores it, with a commit not pushed, a change and a
+    # new file; and a submodule with a change of its own.
+    (repo / ".gitignore").write_text("test-clone/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "Ignore the scratch clone")
+    clone = repo / "test-clone"
+    git(tmp_path, "clone", "-q", str(web), str(clone))
+    git(clone, "remote", "set-url", "origin", "https://dana:ghp_nested_secret@github.com/acme/web.git")
+    (clone / "app.ts").write_text("export const signIn = 2\n")
+    git(clone, "commit", "-q", "-am", "WIP, don't merge: reworking sign-in")
+    (clone / "app.ts").write_text("export const signIn = 3\n")
+    (clone / "new.ts").write_text("export const fresh = true\n")
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(web), "vendored")
+    git(repo, "commit", "-q", "-m", "Vendor the web app")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (repo / "vendored" / "app.ts").write_text("export const signIn = 4\n")
+    switched_on(run, fake, repo)
+    stop(run, repo)
+    (work,) = fake.calls("/work")
+    nested = {entry["path"]: entry for entry in work["body"]["git"]["nested"]}
+    assert set(nested) == {"test-clone", "vendored"}
+    inside = nested["test-clone"]
+    assert inside["remote"] == "https://github.com/acme/web.git" and inside["branch"] == "main"
+    assert inside["upstream"] == "origin/main" and inside["head"] == head_of(clone)
+    assert [commit["subject"] for commit in inside["unpushed"]] == ["WIP, don't merge: reworking sign-in"]
+    assert {entry["path"]: entry["status"] for entry in inside["uncommitted"]} == {"app.ts": "changed", "new.ts": "added"}
+    assert [entry["path"] for entry in nested["vendored"]["uncommitted"]] == ["app.ts"]
+    assert nested["vendored"]["unpushed"] == []
+    # Neither is a file of this repository, nor is anything of either one's own address sent.
+    assert not any(entry["path"].startswith(("test-clone", "vendored/")) for entry in work["body"]["files"])
+    assert b"ghp_nested_secret" not in work["raw"] and b"dana" not in work["raw"]
+    # A session working inside the clone, which is part of the project that is on, tells the project's work the same.
+    fake.requests.clear()
+    stop(run, clone, session="session-2")
+    (work,) = fake.calls("/work")
+    assert work["body"]["remote"] == "https://github.com/acme/api.git"
+    assert {entry["path"] for entry in work["body"]["git"]["nested"]} == {"test-clone", "vendored"}
+
+
+def test_key_files_and_ignored_files_are_never_sent_in_any_field(run, fake, repo):
+    signed_in(run, fake)
+    (repo / ".gitignore").write_text("debug-output.log\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "Ignore the debug output")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    switched_on(run, fake, repo)
+    # A key file committed and not pushed, then renamed to a harmless name in another commit and changed again; a new
+    # key file; a file git ignores; and an ordinary change.
+    (repo / "service-account-prod.json").write_text(f"{KEY}\n")
+    git(repo, "add", "--all")
+    git(repo, "commit", "-q", "-m", "Add the account")
+    git(repo, "mv", "service-account-prod.json", "settings.json")
+    git(repo, "commit", "-q", "-m", "Rename it")
+    with open(repo / "settings.json", "a") as appended:
+        appended.write(f"{KEY} again\n")
+    (repo / ".env.production").write_text(f"TOKEN={KEY}\n")
+    (repo / "debug-output.log").write_text(f"{KEY}\n")
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b + 0\n")
+    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    stop(run, repo)
+    sent = [call for call in fake.requests if call["path"] in ("/check", "/work", "/turn")]
+    assert sent and all(SECRET.encode() not in call["raw"] for call in sent)
+    for call in sent:
+        for never in (KEY, "service-account-prod", ".env.production", "debug-output.log"):
+            assert never.encode() not in call["raw"], (call["path"], never)
+    change = fake.calls("/check")[0]["body"]["change"]
+    assert "+    return a + b + 0" in change["diff"] and [copy["path"] for copy in change["copies"]] == ["calc.py"]
+    # What was left out is counted by its reason, a key file's name never said.
+    assert {"path": "", "why": "secret"} in change["left_out"]
+    assert "Not sent: 2 files that look like keys or passwords." in said
+
+
+def test_each_changed_files_latest_copy_goes_once_until_it_changes_again(run, fake, repo):
+    import hashlib
+
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.requests.clear()
+    git(repo, "checkout", "-q", "-b", "feature/x")
+    (repo / "committed.py").write_text("print('committed, not pushed')\n")
+    git(repo, "add", "committed.py")
+    git(repo, "commit", "-q", "-m", "Add committed.py")
+    # Text as the file holds it: a carriage return, a tab, quotes, a backslash, a control character, and no line break
+    # at its end; text past ASCII; a file that isn't text; and one larger than a copy may be.
+    exact = 'tab\there "quoted" back\\slash\x0c\r\nno line break at the end'
+    (repo / "calc.py").write_bytes(exact.encode())
+    (repo / "notes.md").write_text("Grüße, 日本\n", encoding="utf-8")
+    (repo / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00" + bytes(range(256)))
+    (repo / "data.csv").write_text("x," * 200_000)
+    prompt(run, repo, "Change calc.py")
+    change = fake.calls("/check")[0]["body"]["change"]
+    copies = {copy["path"]: copy for copy in change["copies"]}
+    assert set(copies) == {"calc.py", "notes.md", "logo.png", "data.csv", "committed.py"}
+    assert copies["calc.py"] == {"path": "calc.py", "sha256": hashlib.sha256(exact.encode()).hexdigest(),
+                                 "binary": False, "too_large": False, "content": exact}
+    assert copies["notes.md"]["content"] == "Grüße, 日本\n"
+    assert copies["committed.py"]["content"] == "print('committed, not pushed')\n"
+    assert copies["logo.png"] == {"path": "logo.png", "sha256": hashlib.sha256((repo / "logo.png").read_bytes()).hexdigest(),
+                                  "binary": True, "too_large": False}
+    assert copies["data.csv"] == {"path": "data.csv", "binary": False, "too_large": True}
+    # The commits not pushed come as a diff of their own, beside the diff of the whole working tree.
+    assert "+print('committed, not pushed')" in change["unpushed_diff"] and "committed.py" in change["diff"]
+    # Taken once, no copy goes again: neither with the turn's end nor with the next message.
+    stop(run, repo, last_assistant_message="Done.")
+    assert not any("copies" in json.dumps((call["body"] or {}).get("work", call["body"] or {}).get("change") or {})
+                   for call in fake.requests if call["path"] in ("/turn", "/work"))
+    prompt(run, repo, "Change calc.py")
+    assert fake.calls("/check")[-1]["body"]["change"]["copies"] == []
+    # A file changed again goes again, alone.
+    (repo / "calc.py").write_text("changed again\n")
+    prompt(run, repo, "Change calc.py")
+    assert [copy["path"] for copy in fake.calls("/check")[-1]["body"]["change"]["copies"]] == ["calc.py"]
+    # One the server didn't take goes with the next message.
+    (repo / "notes.md").write_text("more\n")
+    fake.status["/check"] = 500
+    prompt(run, repo, "Change calc.py")
+    del fake.status["/check"]
+    prompt(run, repo, "Change calc.py")
+    assert [copy["path"] for copy in fake.calls("/check")[-1]["body"]["change"]["copies"]] == ["notes.md"]
+
+
+def test_code_sharing_is_on_unless_turned_off_and_said_before_any_code_goes(run, fake, repo):
+    signed_in(run, fake)
+    said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta on")))["reason"]
+    assert ("Code sharing is on: what you change and haven’t pushed yet goes to Vyavasta with each message and after "
+            "each edit, new files and commits not pushed included, so that its check reads the real change. Key and "
+            "password files, files git ignores, machine-written files and files that aren’t text never leave this "
+            "computer. Send “vyavasta share code off” to turn it off.") in said.splitlines()
+    (repo / "calc.py").write_text("changed = True\n")
+    line = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert fake.calls("/sharing")[0]["body"]["on"] is True and "change" in fake.calls("/check")[0]["body"]
+    assert line.startswith("Vyavasta · sent: your message and your changes not on GitHub yet (1 file, 3 lines of "
+                           "changes).")
+    # Turned off, only the files' names go.
+    run("share-code", "off", cwd=repo)
+    fake.requests.clear()
+    prompt(run, repo, "Change calc.py")
+    assert "change" not in fake.calls("/check")[0]["body"]
+    # A project turned on before code sharing was on by default, which never chose, is told once on its first line,
+    # and its code goes from the next message.
+    (project,) = (run.home / "projects").iterdir()
+    (project / "sharing").unlink()
+    (project / "sharing-said").unlink(missing_ok=True)
+    fake.requests.clear()
+    told = prompt(run, repo, "Change calc.py", session="session-2")["systemMessage"]
+    assert told.endswith(" Code sharing is now on in this project: from your next message, your changes that aren’t "
+                         "on GitHub yet go to Vyavasta for its check, and teammates who read this repository see which "
+                         "files you change and a short summary of what the changes do, never the code. Send “vyavasta "
+                         "share code off” to turn it off.")
+    assert "change" not in fake.calls("/check")[0]["body"]
+    again = prompt(run, repo, "Change calc.py", session="session-2")["systemMessage"]
+    assert "change" in fake.calls("/check")[1]["body"] and "Code sharing is now on" not in again

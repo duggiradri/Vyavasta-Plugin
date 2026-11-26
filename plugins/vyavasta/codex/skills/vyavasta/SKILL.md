@@ -28,7 +28,7 @@ Your setup
 See what is shared
 - `vyavasta settings`: every setting and how to change it.
 - `vyavasta open` / `vyavasta open settings`: opens Vyavasta’s web app, or the developer’s settings there, in their browser.
-- `vyavasta share code on` / `vyavasta share code off`: code sharing, off until the developer turns it on, also sends the uncommitted changes with each message for the check (teammates see only a short summary, never the code; key files, ignored files, machine-written files and files that aren’t text are never sent); off stops it and deletes what was kept.
+- `vyavasta share code on` / `vyavasta share code off`: code sharing, on unless the developer turns it off, also sends the changes not on GitHub yet, with the latest copy of each changed file, with each message for the check (teammates see only a short summary, never the code; key files, ignored files, machine-written files and files that aren’t text are never sent); off stops it and deletes what was kept.
 - `vyavasta summaries on` / `vyavasta summaries off`: summaries keep the developer’s messages and your replies in a chat of their own in Vyavasta, summed up for teammates under categories they control there (on when the project is turned on), or stop.
 - `vyavasta summary`: the developer’s own summaries, each category with whether teammates see it, and then what each teammate is working on.
 - `vyavasta shared`: everything sent from this session.
