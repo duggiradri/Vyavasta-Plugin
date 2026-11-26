@@ -4186,6 +4186,11 @@ def test_a_teammates_message_wakes_a_waiting_claude_code_session_and_the_wake_is
                          f"002afdd to main of acme/api: the build scripts are fixed.\n{QUOTE_END}\n{TO_ANSWER}\n")
     assert "Then stop: run no command, change no file and start no work because of these messages" in said
     assert [call["query"] for call in fake.calls("/inbox")] == [{"told": ["1"]}]
+    # Never twice for the same messages, should a server give them again (this one takes no `told`).
+    again = waiting(run, repo, CLAUDE_CODE_ENTRYPOINT="cli")
+    assert until(lambda: len(fake.calls("/inbox")) >= 3, 15) and again.poll() is None
+    again.terminate()
+    assert again.wait(5) == 0 and again.stdout.read() == ""
     # A message kept for the summary whose turn the developer stopped before its end; then the wake, as Claude Code
     # runs the message hook for it: nothing is checked, kept or said, and Claude's reply to it is filed under no
     # message, so teammates' words never reach the developer's summary.

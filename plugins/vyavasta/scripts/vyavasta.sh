@@ -3564,6 +3564,11 @@ hook_wait() {
     [ "$items" != "[]" ] || continue
     listing=$(render_inbox "$items" "$(answer more)" model capped)
     [ -n "$listing" ] || continue
+    # (Never twice for the same messages: a server that gives them again, as one from before plugin 0.5.5 that takes
+    # no `told` does, would otherwise wake Claude at every look.)
+    cut -f2 "$TMP/listing" > "$TMP/woken-ids"
+    if [ -f "$HOME_DIR/woken-ids" ] && cmp -s "$TMP/woken-ids" "$HOME_DIR/woken-ids"; then continue; fi
+    cp "$TMP/woken-ids" "$HOME_DIR/woken-ids"
     rm -f "$HOME_DIR/waiter"
     notice=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
     [ -n "$notice" ] || notice="$$x$(now)"
