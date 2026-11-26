@@ -283,7 +283,7 @@ def main() -> int:
         expect("Vyavasta reads northwind/customer-platform for you" in reason and "Code sharing is off" in reason,
                "and says the repository is read and code sharing is off")
         expect("Teammates who also read northwind/customer-platform in Vyavasta see which files you change here" in reason
-               and "When you and a teammate change the same file, both of you are told" in reason,
+               and "When you and a teammate change the same file, on any branch, both of you are told" in reason,
                "and what teammates see of the work, and that both are told when they change the same file")
 
         step("SessionStart")
@@ -352,10 +352,10 @@ def main() -> int:
         line = said.get("systemMessage", "")
         expect("your uncommitted changes (" in line, "the line says the uncommitted changes went")
         expect("1 file that looks like a key or password" in line, "and that the key file was left out")
-        listed = plugin("shared", cwd=repo)
-        print("  shared printed: " + listed.strip().replace("\n", "\n  ")[:800])
+        listed = plugin("sent", cwd=repo)
+        print("  sent printed: " + listed.strip().replace("\n", "\n  ")[:800])
         expect("Sent to Vyavasta from this session" in listed and "sk_live_not_sent" not in listed,
-               "“vyavasta shared” lists what this session sent, read from the server")
+               "“vyavasta sent” lists what this session sent, read from the server")
         chat = plugin("chat", cwd=repo)
         expect("/c/" in chat, "“vyavasta chat” gives the link to this session’s chat")
         (repo / ".env").unlink()
@@ -429,10 +429,10 @@ def main() -> int:
                and "read <number> [part]" in context
                and "drew on the team’s documents" in context,
                "an answer of Vyavasta’s that drew on a document gives Claude the commands that read them")
-        shared = plugin("shared", cwd=repo)
-        print("  shared printed: " + "\n  ".join(line for line in shared.splitlines() if "given" in line or "30 days" in line))
-        expect("Part 1 of 1 of “refund-policy.md” was given." in shared and "within 30 days" not in shared,
-               "“vyavasta shared” names the document read, never its text")
+        sent = plugin("sent", cwd=repo)
+        print("  sent printed: " + "\n  ".join(line for line in sent.splitlines() if "given" in line or "30 days" in line))
+        expect("Part 1 of 1 of “refund-policy.md” was given." in sent and "within 30 days" not in sent,
+               "“vyavasta sent” names the document read, never its text")
 
         said = hook("prompt", "UserPromptSubmit", repo, prompt="vyavasta summaries off")
         expect(said.get("decision") == "block" and said.get("reason", "").startswith("Summaries are off"),
@@ -615,7 +615,8 @@ def main() -> int:
             subprocess.run(["git", "-C", str(theirs), "commit", "-q", "-m", "Initial"], check=True, env=environment)
             subprocess.run(["git", "-C", str(theirs), "checkout", "-q", "-b", "plan-field"], check=True)
             turned_on = plugin("on", cwd=theirs, home_dir=ganesh_home)
-            expect("When you and a teammate change the same file, both of you are told, as a heads-up" in turned_on,
+            expect("When you and a teammate change the same file, on any branch, both of you are told, as a heads-up"
+                   in turned_on,
                    "“vyavasta on” tells Ganesh what teammates see and that both are told when they change the same file")
 
             def ganesh_hook(name: str, event: str, **fields) -> dict:
