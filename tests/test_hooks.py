@@ -120,10 +120,11 @@ class Fake:
         self.code: dict[str, str] = {}
         # Seconds a route takes to answer.
         self.delay: dict[str, float] = {}
-        # Whether it is a newer server that takes the combined calls: a check that carries the work report and asks a
-        # question at once, /me that carries the inbox, and a turn that carries the work report; and that answers a
-        # repeat of a request_id as it answered it first (``answered``, by route and id).
-        self.combined = False
+        # Whether it is a server that takes the combined calls, as every server since 0.6.0 does: a check that carries
+        # the work report and asks a question at once, /me that carries the inbox, and a turn that carries the work
+        # report; and that answers a repeat of a request_id as it answered it first (``answered``, by route and id). A
+        # test of an older server, such as a pilot's own image may be, sets it False.
+        self.combined = True
         self.answered: dict[tuple[str, str], tuple[int, dict]] = {}
         self.asked_in_check = 0
         # Routes whose next calls are taken and dropped with no answer at all, and routes that answer with a page that
@@ -235,7 +236,9 @@ class Fake:
                         answer["work_recorded"] = True
                         answer["work_answer"] = fake.worked(body["work"])
                     if fake.combined and path == "/check" and body.get("ask_now") and answer.get("ask") is True:
-                        answer["asked"] = fake.first_asked()
+                        asked = fake.first_asked()
+                        if asked is not None:
+                            answer["asked"] = asked
                     if fake.combined and body.get("request_id"):
                         fake.answered[(path, body["request_id"])] = (200, answer)
                     return self._answer(200, answer)
@@ -308,12 +311,20 @@ class Fake:
         answer.update(self.extra.get("/work", {}))
         return answer
 
-    def first_asked(self) -> dict:
-        """What the first /ask of a question answers, as a newer server answers it inside a check."""
+    def first_asked(self) -> dict | None:
+        """What the first /ask of a question answers, as a newer server answers it inside a check, as /ask is set to
+        answer. While its answer is still being made (``slow``), the question was taken and says so, and what /ask is
+        set to answer meets the plugin's waits for it. Otherwise, where /ask is turned away, fails, is dropped or is
+        slow to answer (``status``, ``drop``, ``delay``), None: the server leaves the question for the plugin to ask,
+        as it does where its own ask is refused or one more of the connection's calls may not wait, and the plugin's
+        own call meets the same."""
         self.asked_in_check += 1
         if self.slow >= self.asked_in_check:
             return {"status": "pending", "answer": "", "context": "", "notice": "Vyavasta is still working on the "
                     "answer.", "waiting": "msg_9"}
+        if "/ask" in self.status or self.drop.get("/ask") or "/ask" in self.delay:
+            self.asked_in_check -= 1
+            return None
         return self.asked
 
 
@@ -1010,16 +1021,27 @@ def test_a_repository_with_no_github_copy_and_one_not_read_each_say_so(run, fake
 QUESTION = {"verdict": "question", "hold": False, "ask": True, "notice": "", "context": "", "statements": []}
 
 
+@pytest.mark.parametrize("combined", [True, False], ids=["newer-server", "older-server"])
 def test_a_question_about_the_team_is_asked_in_vyavasta_and_the_answer_is_given_to_the_model(run, fake, repo,
-                                                                                            tmp_path):
+                                                                                            tmp_path, combined):
+    """A server since 0.6.0 asks the question with the check itself (``ask_now``); an older one is asked it with a
+    call of its own, which carries the same."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    fake.combined = combined
     fake.check = QUESTION
     asking = 'See what "Priya" is doing'
     said = prompt(run, repo, asking)
-    (sent,) = fake.calls("/ask")
-    assert sent["body"] == {"question": asking, "remote": "https://github.com/acme/api.git", "branch": "main",
-                            "session": "session-1", "tool": "claude-code", "keep": True}
+    carried = {"remote": "https://github.com/acme/api.git", "branch": "main", "session": "session-1",
+               "tool": "claude-code", "keep": True}
+    if combined:
+        (sent,) = fake.calls("/check")
+        assert sent["body"]["request"] == asking and sent["body"]["ask_now"] is True
+        assert {key: sent["body"][key] for key in carried} == carried
+        assert fake.asked_in_check == 1 and not fake.calls("/ask")
+    else:
+        (sent,) = fake.calls("/ask")
+        assert sent["body"] == {"question": asking, **carried}
     # The model is given the answer as the server worded it, non-ASCII and all; the developer is told it was asked.
     assert said["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit",
                                           "additionalContext": fake.asked["context"]}
@@ -1032,12 +1054,15 @@ def test_a_question_about_the_team_is_asked_in_vyavasta_and_the_answer_is_given_
     switched_on(run, fake, outside)
     again = prompt(run, outside, asking, cwd=outside)
     assert again["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
-    assert fake.calls("/ask")[-1]["body"]["remote"] == ""
+    assert fake.calls("/check" if combined else "/ask")[-1]["body"]["remote"] == ""
 
 
 def test_a_slow_answer_is_waited_for_over_several_short_calls_and_then_given_up_on(run, fake, repo):
+    """(On an older server, which is asked the question with a call of its own: a newer one asks it with the check,
+    and is waited for the same way, test_a_newer_server_takes_the_report_the_question_the_inbox_and_the_reply_in_…)"""
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    fake.combined = False
     fake.check = QUESTION
     fake.slow = 2
     said = prompt(run, repo, "What is Priya doing?")
@@ -1250,10 +1275,11 @@ def test_with_sharing_turned_off_the_line_names_the_changed_files_and_says_what_
     assert said == ("Vyavasta · sent: your message and 2 changed files’ names. Not sent: what the files hold (code "
                     "sharing is off). Kept in this session’s chat for your summary. · Checked: nothing stands against "
                     "this change.")
+    # The names go with the work report the check carries, and what the files hold goes nowhere.
     (check,) = fake.calls("/check")
-    assert "change" not in check["body"] and SECRET.encode() not in check["raw"]
-    (work,) = fake.calls("/work")
-    assert SECRET.encode() not in work["raw"] and "change" not in work["body"]
+    assert "change" not in check["body"] and "change" not in check["body"]["work"]
+    assert {entry["path"] for entry in check["body"]["work"]["files"]} == {"calc.py", "new.py"}
+    assert SECRET.encode() not in check["raw"] and not fake.calls("/work")
     # What doesn't change from one message to the next is said in the session's first line only.
     again = prompt(run, repo, "Change calc.py")["systemMessage"]
     assert again == ("Vyavasta · sent: your message and 2 changed files’ names · kept for your summary · Checked: "
@@ -1332,10 +1358,11 @@ def test_with_sharing_on_the_check_carries_one_diff_of_the_working_tree_against_
     assert "lines of changes), and 1 unpushed commit’s message." in said and "Not sent" not in said
     # The developer's own index is untouched: the new file is still untracked.
     assert "?? " in git(repo, "status", "--porcelain")
-    # The same changes are not sent again with the report that follows; changed again, they are.
-    assert "change" not in fake.calls("/work")[0]["body"]
+    # The same changes are not sent again with the report the check carries, nor with the turn's end's; changed again,
+    # they are.
+    assert "change" not in check["body"]["work"]
     run("hook", "stopped", stdin=event("Stop", repo))
-    assert "change" not in fake.calls("/work")[-1]["body"]
+    assert "change" not in fake.calls("/turn")[-1]["body"]["work"]
     (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
     run("hook", "stopped", stdin=event("Stop", repo))
     assert "return b + a" in fake.calls("/work")[-1]["body"]["change"]["diff"]
@@ -1882,8 +1909,11 @@ INBOX = [{"n": 1, "message_id": "pm_1", "from": {"name": "Priya Raman"}, "kind":
 
 
 def test_a_session_starts_with_what_teammates_asked_while_away_each_under_its_header(run, fake, repo):
+    """(On an older server, which gives what came on a route of its own: a newer one's /me carries it,
+    test_a_newer_server_takes_the_report_the_question_the_inbox_and_the_reply_in_fewer_calls.)"""
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    fake.combined = False
     fake.inbox = INBOX
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo)))
     said, told = started["systemMessage"], started["hookSpecificOutput"]["additionalContext"]
@@ -2639,8 +2669,8 @@ def test_no_key_file_reaches_the_sent_change_by_any_path(run, fake, repo, tmp_pa
     assert "+notes, changed" in change["diff"] and copies["notes.txt"]["content"] == "notes, changed\n"
     # The submodule is told only as the commit it is at.
     assert "vendored/.env" not in change["diff"]
-    (work,) = fake.calls("/work")
-    assert KEY.encode() not in work["raw"]
+    # (The work report went with the check, every byte of which is looked at above.)
+    assert check["body"]["work"]["files"] and not fake.calls("/work")
 
 
 def test_the_developers_index_is_never_written_or_locked_by_any_hook(run, fake, repo):
@@ -2694,7 +2724,7 @@ def test_a_large_new_file_is_never_read_and_is_left_out_as_past_the_limit(run, f
     (repo / "calc.py").write_text("changed = True\n")
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo)
     print(f"\n[timing] 200 MB new file, code sharing off: {done.seconds:.3f} s")
-    files = {entry["path"]: entry for entry in fake.calls("/work")[0]["body"]["files"]}
+    files = {entry["path"]: entry for entry in fake.calls("/check")[0]["body"]["work"]["files"]}
     assert files["recording.mov"]["additions"] == 0 and done.seconds < 3
     sharing_on(run, fake, repo)
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo)
@@ -2754,10 +2784,9 @@ def test_file_names_that_are_not_utf8_or_hold_a_line_break_still_make_valid_repo
     (repo / "new\nline.py").write_text("x = 1\n")
     (repo / "calc.py").write_text("changed = True\n")
     prompt(run, repo, "Change calc.py")
-    # The fake server parses every body as JSON: both arrived.
+    # The fake server parses every body as JSON: the check arrived, with the work report it carries.
     (check,) = fake.calls("/check")
-    (work,) = fake.calls("/work")
-    assert any(entry["path"].startswith("caf") for entry in work["body"]["files"])
+    assert any(entry["path"].startswith("caf") for entry in check["body"]["work"]["files"])
     # The new file with a line break in its name is left out, and said so, rather than silently missing.
     assert {"path": "new\nline.py", "why": "binary"} in check["body"]["change"]["left_out"]
     assert check["body"]["change"]["left_out"]
@@ -3003,7 +3032,7 @@ def test_the_plugins_own_commands_and_answers_to_its_questions_are_never_kept(ru
     # A question goes on to the assistant, whose chat already holds it: the reply is not added again.
     fake.check = dict(QUESTION)
     said = prompt(run, repo, "What is Priya working on?")
-    assert fake.calls("/check")[-1]["body"]["keep"] is True and fake.calls("/ask")
+    assert fake.calls("/check")[-1]["body"]["keep"] is True and fake.asked_in_check == 1
     # Its line says it is kept, as every message's line says whether it is.
     assert said["systemMessage"].startswith("Vyavasta · sent: your question · kept for your summary · ")
     stop(run, repo, last_assistant_message="Priya is moving the export.")
@@ -3088,13 +3117,14 @@ def test_with_summaries_off_a_question_is_still_asked_but_never_summed_up(run, f
     fake.check = dict(QUESTION)
     prompt(run, repo, "What is Priya working on?")
     run("ask", "And Sam?", cwd=repo)
-    assert [call["body"]["keep"] for call in fake.calls("/ask")] == [True, True]
+    # (The message's question is asked with its check, and the model's own with a call of its own.)
+    assert [call["body"]["keep"] for call in fake.calls("/check") + fake.calls("/ask")] == [True, True]
     run("summaries", "off", cwd=repo)
     fake.requests.clear()
     said = prompt(run, repo, "What is Priya working on?")
     assert said["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
     run("ask", "And Sam?", cwd=repo)
-    assert [call["body"]["keep"] for call in fake.calls("/ask")] == [False, False]
+    assert [call["body"]["keep"] for call in fake.calls("/check") + fake.calls("/ask")] == [False, False]
     # What “summaries off” is said to mean names the question that is still answered.
     for told in (run("settings", cwd=repo).stdout, run("check", cwd=repo).stdout,
                  output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta on")))["reason"]):
@@ -3179,6 +3209,7 @@ def test_the_end_of_a_turn_is_never_held_up_twice_by_a_server_that_does_not_answ
     its own, and one that didn't answer the first call is not called a second time."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    fake.combined = False
     prompt(run, repo, "Change calc.py")
     (repo / "calc.py").write_text("changed\n")
     # A report that takes too long: the reply was taken first, and the turn's end waits for the report once.
@@ -3215,7 +3246,7 @@ def test_a_project_turned_on_before_summaries_is_told_once_and_that_first_messag
         told.unlink()
     fake.check = dict(QUESTION)
     said = prompt(run, repo, "What is Priya working on?")
-    assert fake.calls("/ask")[-1]["body"]["keep"] is False and fake.calls("/check")[-1]["body"]["keep"] is False
+    assert fake.calls("/check")[-1]["body"]["keep"] is False and fake.asked_in_check == 1
     assert said["systemMessage"].endswith(
         " Summaries are on in this project: from your next message, your messages here and Claude Code’s replies, as "
         "written, are kept in a chat of your own in Vyavasta and summed up for teammates, until you send “vyavasta "
@@ -3729,7 +3760,7 @@ def test_a_message_put_to_the_team_never_also_gets_the_guidance(run, fake, repo)
     switched_on(run, fake, repo)
     fake.check["ask"] = True
     said = prompt(run, repo, "What does Vyavasta send from this project?")
-    assert fake.calls("/ask")
+    assert fake.asked_in_check == 1
     assert said["hookSpecificOutput"]["additionalContext"] == fake.asked["context"]
 
 
@@ -6915,7 +6946,7 @@ def test_links_devices_and_large_files_are_named_and_never_read(run, fake, repo,
     (repo / "note.txt").write_text("one\ntwo\n")
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"), cwd=repo)
     assert done.seconds < 5
-    files = {entry["path"]: entry for entry in fake.calls("/work")[-1]["body"]["files"]}
+    files = {entry["path"]: entry for entry in fake.calls("/check")[-1]["body"]["work"]["files"]}
     assert files["note.txt"]["additions"] == 2
     # (With code sharing on, git compares a link by where it points, one line, never by what is there; and its copy is
     # its name alone. A pipe is never opened.)
@@ -7290,6 +7321,8 @@ def test_new_files_and_commits_not_pushed_go_with_every_report_whatever_code_sha
     signed_in(run, fake)
     switched_on(run, fake, repo)
     run("share-code", "off", cwd=repo)
+    # (The session starts as the tool starts it, which keeps where the work stood then.)
+    run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo)
     fake.requests.clear()
     pushed = head_of(repo)
     git(repo, "checkout", "-q", "-b", "feature/sign-in")
@@ -7310,8 +7343,9 @@ def test_new_files_and_commits_not_pushed_go_with_every_report_whatever_code_sha
     assert commit["sha"] == head_of(repo) and commit["at"].startswith(time.strftime("%Y-"))
     assert commit["subject"] == "WIP, don't merge: reworking sign-in" and commit["body"] == "The old flow stays until Friday."
     assert commit["files"] == [{"path": "calc.py", "status": "changed", "additions": 1, "deletions": 1}]
-    # The report on its own names the new files as well, in the list an older server reads.
-    assert {entry["path"] for entry in fake.calls("/work")[0]["body"]["files"]} == {"auth/login.py", "README.md"}
+    # The report names the new files in its list of changed files as well, the list an older server reads.
+    assert {entry["path"] for entry in fake.calls("/check")[0]["body"]["work"]["files"]} == {"auth/login.py",
+                                                                                            "README.md"}
     assert said.startswith("Vyavasta · sent: your message, 2 changed files’ names, and 1 unpushed commit’s message. "
                            "Not sent: what the files hold (code sharing is off).")
     # Everything committed and nothing left uncommitted: a request to push still carries what the push would take.
