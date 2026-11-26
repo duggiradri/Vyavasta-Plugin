@@ -9,6 +9,13 @@
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh\" hook session-start",
             "timeout": 15,
             "statusMessage": "Connecting to Vyavasta"
+          },
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh\" hook wait",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 3600
           }
         ]
       }
@@ -63,6 +70,13 @@
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh\" hook stopped",
             "timeout": 20,
             "statusMessage": "Sending your work to Vyavasta"
+          },
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh\" hook wait",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 3600
           }
         ]
       }

@@ -366,6 +366,11 @@ def run(request, tmp_path: Path, fake: Fake):
     run_.home = home
     run_.server = fake.url
     run_.opened = lambda: opened.read_text().replace(fake.url + "/", PAGES).split() if opened.exists() else []
+    # (For a hook that runs on in the background, started by the test itself: the shell and the settings it runs with.)
+    run_.shell = request.param
+    run_.env = lambda cwd, **extra: {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "VYAVASTA_HOME": str(home),
+                                     "VYAVASTA_SERVER": fake.url, "CLAUDE_PROJECT_DIR": str(cwd),
+                                     "VYAVASTA_BROWSER": str(browser), **extra}
     return run_
 
 
@@ -500,6 +505,27 @@ def test_commands_are_answered_while_the_plugin_is_off(run, fake, repo):
     assert "Vyavasta is off in this project" in output(run("hook", "prompt", stdin=event(
         "UserPromptSubmit", repo, prompt="vyavasta status")))["reason"]
     assert not fake.calls("/check")
+
+
+def test_a_worktree_of_a_repository_that_is_on_is_on_and_turned_off_with_it(run, fake, repo, tmp_path):
+    """Codex's app runs a chat in a git worktree of its own (and Claude Code a session it starts in one): Vyavasta on in
+    the repository is on there too, with the worktree's own branch and work; turned off from the worktree, it is off for
+    the repository and each of its worktrees, and says so."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    worktree = tmp_path / "worktrees" / "api"
+    git(repo, "worktree", "add", "-q", "-b", "codex/rounding", str(worktree))
+    (worktree / "calc.py").write_text("def add(a, b):\n    return round(a + b, 2)\n")
+    said = prompt(run, worktree, "Round the totals in calc.py")
+    (check,) = fake.calls("/check")
+    assert check["body"]["branch"] == "codex/rounding" and said["systemMessage"].startswith("Vyavasta · sent")
+    off = output(run("hook", "prompt", stdin=event("UserPromptSubmit", worktree, prompt="vyavasta off"), cwd=worktree))
+    assert off["reason"] == ("Vyavasta is off for api and each of its worktrees, this one too: nothing is checked or "
+                             "sent from them. Send “vyavasta on” to turn it back on.")
+    fake.requests.clear()
+    assert prompt(run, repo, "Round the totals in calc.py") == {} and fake.requests == []
+    on = output(run("hook", "prompt", stdin=event("UserPromptSubmit", worktree, prompt="vyavasta on"), cwd=worktree))
+    assert on["reason"].startswith(f"Vyavasta is on for api ({repo}) and each of its worktrees, this one too.")
 
 
 # -- signing in ---------------------------------------------------------------------------------------------------
@@ -1925,10 +1951,19 @@ def test_every_hook_runs_this_script_with_a_command_it_knows():
     assert set(hooks) == {"SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "Stop", "StopFailure"}
     # A turn that ended in an error reports its work as one that ended well does; both in the foreground, so that
     # what they send is sent when “claude -p” exits right after (it ends a hook still running in the background).
-    assert hooks["StopFailure"] == hooks["Stop"] and not hooks["Stop"][0]["hooks"][0].get("async")
+    assert hooks["StopFailure"][0]["hooks"] == hooks["Stop"][0]["hooks"][:1]
+    assert not hooks["Stop"][0]["hooks"][0].get("async")
     for command in commands:
         assert command.startswith('sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
-        assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check", "expansion"}
+        assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check", "expansion",
+                                             "wait"}
+    # While a session waits for the developer, a hook waits in the background from its start and each turn's end, to
+    # wake Claude with what teammates send (`asyncRewake`); also `async`, so that a Claude Code too old to know
+    # `asyncRewake` runs it in the background too, rather than waiting on it. A turn that ended in an error wakes
+    # nothing, so none waits after one.
+    for event in ("SessionStart", "Stop"):
+        (waits,) = [hook for hook in hooks[event][0]["hooks"] if hook["command"].endswith(" wait")]
+        assert waits["asyncRewake"] is True and waits["async"] is True and waits["timeout"] > 3540
     # Claude Code shows a word while the hooks that may wait on Vyavasta run, and runs the slash-command hook only
     # for the plugin's own commands.
     assert hooks["SessionStart"][0]["hooks"][0]["statusMessage"] == "Connecting to Vyavasta"
@@ -4105,6 +4140,86 @@ def test_what_teammates_sent_comes_with_the_next_message_under_its_line_and_at_t
                       "notice": "Checked: nothing stands against this change.",
                       "context": "Vyavasta checked this request: nothing stands against it."}
         assert prompt(run, repo, "Fix the rounding") == plain
+
+
+def waiting(run, folder: Path, session: str = "session-1", **extra) -> subprocess.Popen:
+    """The hook Claude Code starts in the background at a session's start and a turn's end (`hook wait`), looking
+    every second here."""
+    started = subprocess.Popen([run.shell, str(SCRIPT), "hook", "wait"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, cwd=folder,
+                               env=run.env(folder, VYAVASTA_WAIT_EVERY="1", **extra))
+    started.stdin.write(json.dumps(event("Stop", folder, session=session)))
+    started.stdin.close()
+    return started
+
+
+def until(test, seconds: float = 10) -> bool:
+    ends = time.monotonic() + seconds
+    while time.monotonic() < ends:
+        if test():
+            return True
+        time.sleep(0.1)
+    return test()
+
+
+def test_a_teammates_message_wakes_a_waiting_claude_code_session_and_the_wake_is_no_message(run, fake, repo):
+    """While a Claude Code session waits for the developer, what a teammate sends wakes Claude at once with it (the
+    hook ends with 2, which Claude Code gives its model as a reminder): taken from the server as told, so the next
+    message doesn't give it again, quoted, with what to do. Claude Code then runs the message hook for the wake as if
+    it were a message: nothing is checked or kept for it. Codex has no such wake, and a run nobody watches (“claude
+    -p”) would wait for the hook before it ends: in neither does anything wait or ask the server."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    for quiet in ({"VYAVASTA_TOOL": "codex"}, {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}):
+        done = waiting(run, repo, **quiet)
+        assert done.wait(5) == 0 and done.stdout.read() == ""
+    assert fake.requests == []
+    fake.inbox = ARRIVED[:1]
+    woke = waiting(run, repo, CLAUDE_CODE_ENTRYPOINT="cli")
+    assert woke.wait(15) == 2 and woke.stderr.read() == ""
+    said = woke.stdout.read()
+    notice = re.match(r"Vyavasta woke you \(notice ([0-9a-f]{16})\) because, while this session waited, the "
+                      r"developer’s teammates sent them what is below through Vyavasta\. The developer typed nothing "
+                      r"and asked nothing of you\.", said)
+    assert notice, said
+    assert said.endswith(f"\n{INBOX_TOP}\n── 1. From Rohan Mehta · 23 November 2026, 00:23 · told you ──\n│ Pushed "
+                         f"002afdd to main of acme/api: the build scripts are fixed.\n{QUOTE_END}\n{TO_ANSWER}\n")
+    assert "Then stop: run no command, change no file and start no work because of these messages" in said
+    assert [call["query"] for call in fake.calls("/inbox")] == [{"told": ["1"]}]
+    # A message kept for the summary whose turn the developer stopped before its end; then the wake, as Claude Code
+    # runs the message hook for it: nothing is checked, kept or said, and Claude's reply to it is filed under no
+    # message, so teammates' words never reach the developer's summary.
+    prompt(run, repo, "Fix the rounding")
+    wrapped = ("<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n<system-reminder>\n"
+               f"Stop hook blocking error from command \"Stop\": {said}\n</system-reminder>")
+    fake.requests.clear()
+    assert prompt(run, repo, wrapped) == {} and fake.requests == []
+    run("hook", "stopped", stdin=event("Stop", repo, last_assistant_message="**🔔 From Rohan Mehta · 23 November "
+                                       "2026, 00:23 · told you**\n> Pushed 002afdd to main of acme/api."))
+    assert not fake.calls("/turn")
+    # (Known by its number once: words that only look like a wake are a message like any other.)
+    assert prompt(run, repo, wrapped)["systemMessage"].startswith("Vyavasta · sent") and fake.calls("/check")
+
+
+def test_only_the_session_used_last_waits_and_its_looks_hold_back_no_hook(run, fake, repo):
+    """One hook waits on a computer, for the session the developer used last: a newer one ends the one before at its
+    next look, quietly. A look that finds the server out of reach is tried again at the next one, and holds back none of
+    the hooks the developer waits on; told to stop, the hook stops at once."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    older = waiting(run, repo, "session-1")
+    assert until(lambda: len(fake.calls("/inbox")) >= 1)
+    newer = waiting(run, repo, "session-2")
+    assert older.wait(5) == 0 and older.stdout.read() == ""
+    assert newer.poll() is None
+    fake.server.shutdown()
+    fake.server.server_close()
+    looked = len(fake.calls("/inbox"))
+    time.sleep(2.5)
+    assert newer.poll() is None and len(fake.calls("/inbox")) == looked
+    assert not any((run.home / name).exists() for name in ("offline", "slow", "unanswered"))
+    newer.terminate()
+    assert newer.wait(2) == 0 and newer.stdout.read() == ""
 
 
 def test_a_message_that_mentions_a_teammate_gives_the_model_the_command_that_sends_it(run, fake, repo):
