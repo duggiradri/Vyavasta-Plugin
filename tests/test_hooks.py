@@ -5,7 +5,8 @@ folder and server set by environment, and reads what it prints and what it sent.
 
     python3 -m pytest tests -q
 
-Every test runs under each POSIX shell this machine has of sh and dash (Ubuntu's sh is dash).
+Every test runs under sh and under dash (Ubuntu's sh is dash): a machine without one of them stops at once and
+says which, rather than running half the suite.
 """
 
 from __future__ import annotations
@@ -27,7 +28,9 @@ import pytest
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "vyavasta"
 SCRIPT = PLUGIN / "scripts" / "vyavasta.sh"
-SHELLS = [shell for shell in ("sh", "dash") if shutil.which(shell)]
+SHELLS = ["sh", "dash"]
+if missing := [shell for shell in SHELLS if not shutil.which(shell)]:
+    raise RuntimeError(f"The plugin's tests run under sh and dash, and this machine has no {' or '.join(missing)}.")
 TOKEN = "vyv-tool-secret-token-value"
 SECRET = "THE-FILE-CONTENTS-NEVER-LEAVE"
 # What the server answers when code sharing is turned on or off, as it words it.
@@ -788,21 +791,25 @@ def test_a_server_out_of_reach_never_holds_the_developer_up(run, fake, repo):
     first = prompt(run, repo, "Change calc.py", server=f"http://127.0.0.1:{closed}")
     assert first["systemMessage"] == ("Vyavasta · nothing sent (Vyavasta’s server can’t be reached) · Claude works "
                                       "as usual, and Vyavasta is tried again in a minute.")
+    # Nothing was checked: Claude asks the developer before anything leaves the computer.
+    assert first["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
     # Found out of reach a moment ago: the next prompt doesn't even try, and says the same quickly.
     second = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Change calc.py"),
                  server=f"http://127.0.0.1:{closed}", cwd=repo)
     assert output(second)["systemMessage"] == first["systemMessage"] and second.seconds < 2
+    assert output(second)["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
 
 
 def test_a_server_that_fails_or_is_busy_is_said_in_one_plain_line(run, fake, repo):
+    """(A busy server, whose line says whose the requests were: test_too_many_requests_says_whose_they_were_by_the_…)"""
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    fake.status["/check"] = 429
-    assert "too many requests" in prompt(run, repo, "Change calc.py")["systemMessage"]
     fake.status["/check"] = 503
-    said = prompt(run, repo, "Change calc.py")["systemMessage"]
+    failed = prompt(run, repo, "Change calc.py")
+    said = failed["systemMessage"]
     assert "isn’t working right now" in said and "503" not in said
     assert said.endswith("Claude works as usual, and Vyavasta is tried again with your next message.")
+    assert failed["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
     # A server that answers with an error is no server out of reach: the next message tries again, and is checked.
     assert not (run.home / "offline").exists()
     del fake.status["/check"]
@@ -828,8 +835,10 @@ def test_too_many_requests_says_whose_they_were_by_the_servers_code(run, fake, r
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
     assert started == f"Vyavasta: {why[0]}, so requests aren’t checked for a moment. Claude works as usual."
     fake.status = {"/check": 429}
-    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(
-        f" · {why[1]}, so it wasn’t checked. Claude works as usual.")
+    turned_away = prompt(run, repo, "Change calc.py")
+    assert turned_away["systemMessage"].endswith(f" · {why[1]}, so it wasn’t checked. Claude works as usual.")
+    # Nothing was checked: Claude asks the developer before anything leaves the computer.
+    assert turned_away["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
     fake.status = {"/inbox": 429}
     assert run("inbox", cwd=repo).stdout == f"{why[1]}. Try again {again}.\n"
     assert prompt(run, repo, "vyavasta inbox")["reason"] == f"{why[1]}. Try again {again}."
@@ -2362,18 +2371,23 @@ def test_under_codex_the_first_reply_says_why_nothing_is_checked_once_though_the
 def test_under_codex_a_check_that_says_a_source_was_read_a_while_ago_opens_the_reply_with_its_line(run, fake, repo):
     """A check says when a source it relies on was last read, where that was a while ago: in its notice, which Codex
     doesn't show, and on its own as ``late``, from which Codex's model is told to open its reply with the message's
-    line. Claude Code shows the line, as before, and a check with no source behind is told no more than before."""
+    line. The answers here are shaped as the server shapes them (``PluginService._said``): the sentence ends the notice
+    and the context, and stands on its own as ``late`` beside them, in an answer that has one. Claude Code shows the
+    line, as before, and a check with no source behind is told no more than before."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     behind = "Gmail was last read 14 minutes ago, so anything newer there isn’t part of this check."
-    fake.check = {**fake.check, "notice": f"Checked against your team’s record: nothing stands against this change. "
-                                          f"{behind}", "late": behind}
+    checked = {"verdict": "clear", "hold": False, "repository": "acme/api", "statements": [], "kind": "change",
+               "quick": False, "notice": "Checked against your team’s record: nothing stands against this change.",
+               "context": "Vyavasta checked this request against the team’s record for acme/api: nothing the team has "
+                          "said stands against making the change now."}
+    fake.check = {**checked, "notice": f"{checked['notice']} {behind}", "context": f"{checked['context']} {behind}",
+                  "late": behind}
     for tool in (None, "codex"):
         said = prompt(run, repo, "Change compose.yaml", session=f"s-{tool}", tool=tool)
         assert said["systemMessage"].endswith(behind)
         assert relayed(said) == ([said["systemMessage"]] if tool == "codex" else [])
-    fake.check = {**fake.check, "notice": "Checked against your team’s record: nothing stands against this change.",
-                  "late": ""}
+    fake.check = checked
     assert relayed(prompt(run, repo, "Change compose.yaml again", session="s-codex", tool="codex")) == []
 
 
@@ -4762,11 +4776,33 @@ def test_a_teammates_message_wakes_a_waiting_claude_code_session_and_the_wake_is
     run("hook", "stopped", stdin=event("Stop", repo, last_assistant_message="**🔔 From Rohan Mehta · 23 November "
                                        "2026, 00:23 · told you**\n> Pushed 002afdd to main of acme/api."))
     assert not fake.calls("/turn")
-    # (Known by its number once: words that only look like a wake are a message like any other.)
-    assert prompt(run, repo, wrapped)["systemMessage"].startswith("Vyavasta · sent") and fake.calls("/check")
+    # (Known by its number once, and every time by how Claude Code wraps its own notices: the same notice again is no
+    # message either.)
+    assert prompt(run, repo, wrapped) == {} and not fake.calls("/check")
 
 
-def test_only_the_session_used_last_waits_and_its_looks_hold_back_no_hook(run, fake, repo):
+def test_claude_codes_own_notices_of_background_work_are_never_checked_kept_or_answered(run, fake, repo):
+    """Claude Code runs the message hook for its own notices of what ran in the background (a command or an agent it
+    started is done), with a prompt that starts “<task-notification>”. They are not the developer's words: nothing is
+    checked, sent, kept for the summary or said for one, and Claude's reply to it is filed under no message of the
+    developer's. Codex sends no such notices: there a message that starts the same way is the developer's own, and is
+    checked like any other."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    # A message kept for the summary, whose turn the developer stopped before its end.
+    prompt(run, repo, "Run the tests in the background")
+    notice = ("<task-notification>\n<task-id>bq7x2</task-id>\n<status>completed</status>\n<summary>Background command "
+              "\"npm test\" completed (exit code 0)</summary>\n</task-notification>\nRead the output file to retrieve "
+              "the result.")
+    fake.requests.clear()
+    assert prompt(run, repo, notice) == {} and fake.requests == []
+    assert stop(run, repo, last_assistant_message="The tests passed.").stdout == "" and fake.requests == []
+    said = prompt(run, repo, notice, session="s-codex", tool="codex")
+    assert said["systemMessage"].startswith("Vyavasta · sent")
+    assert [call["body"]["request"] for call in fake.calls("/check")] == [notice]
+
+
+def test_only_the_session_used_last_waits_and_its_looks_hold_back_no_hook(run, fake, repo, tmp_path):
     """One hook waits on a computer, for the session the developer used last: a newer one ends the one before at its
     next look, quietly. A look that finds the server out of reach is tried again at the next one, and holds back none of
     the hooks the developer waits on; told to stop, the hook stops at once."""
@@ -4774,15 +4810,15 @@ def test_only_the_session_used_last_waits_and_its_looks_hold_back_no_hook(run, f
     switched_on(run, fake, repo)
     older = waiting(run, repo, "session-1")
     assert until(lambda: len(fake.calls("/inbox")) >= 1)
-    newer = waiting(run, repo, "session-2")
+    # (The newer one's first look reaches the server, and every look after it finds the server out of reach.)
+    newer = waiting(run, repo, "session-2", PATH=curl_closing(tmp_path, fake, 1))
     assert older.wait(5) == 0 and older.stdout.read() == ""
     assert newer.poll() is None
-    fake.server.shutdown()
-    fake.server.server_close()
-    looked = len(fake.calls("/inbox"))
-    time.sleep(2.5)
-    assert newer.poll() is None and len(fake.calls("/inbox")) == looked
+    looks = tmp_path / "curl-closing.txt"
+    assert until(lambda: int(looks.read_text() or 0) >= 3, 10) and newer.poll() is None
     assert not any((run.home / name).exists() for name in ("offline", "slow", "unanswered"))
+    # A message meanwhile is checked as any other.
+    assert prompt(run, repo, "Change calc.py")["systemMessage"].endswith(fake.check["notice"])
     newer.terminate()
     assert newer.wait(2) == 0 and newer.stdout.read() == ""
 
@@ -5368,9 +5404,9 @@ def test_vyavasta_documents_typed_lists_searches_and_reads_in_both_tools_and_the
         "numbers.")
     said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="vyavasta documents search")))
     assert said["reason"] == "Say what to look for, such as “vyavasta documents search refund window”."
-    # A message that only begins like one is the tool's, as any other.
+    # A message that only begins like one is the tool's, and checked as any other.
     assert "decision" not in prompt(run, repo, "vyavasta documents are out of date, update the README")
-    assert not fake.calls("/check") or fake.calls("/check")[-1]["body"]["request"].startswith("vyavasta documents are")
+    assert fake.calls("/check")[-1]["body"]["request"] == "vyavasta documents are out of date, update the README"
 
 
 def test_an_answer_that_drew_on_a_document_gives_the_model_the_commands_that_read_them(run, fake, repo):
@@ -6372,6 +6408,13 @@ HELD_LINE = ("Vyavasta · nothing sent (Vyavasta’s server isn’t answering ri
              "tried again in a minute.")
 
 
+def held_back(done) -> bool:
+    """Whether a message's hook said that nothing was sent, the server not answering, and had the tool's model ask the
+    developer before anything leaves the computer, since nothing was checked."""
+    said = output(done)
+    return said["systemMessage"] == HELD_LINE and said["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
+
+
 def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(run, fake, repo, tmp_path):
     """A read timeout: the request went out and no answer came. A short call left unanswered (a session's start here)
     may only have been slow, so it starts no pause, but each call after it that may take longer than the quick question
@@ -6398,12 +6441,12 @@ def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(r
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
                cwd=repo, extra={"PATH": path})
     assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
-    assert output(done)["systemMessage"] == HELD_LINE and (run.home / "unanswered").exists()
+    assert held_back(done) and (run.home / "unanswered").exists()
     # The minute after it: no call at all, and nothing waits.
     fake.requests.clear()
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
                cwd=repo, extra={"PATH": path})
-    assert output(done)["systemMessage"] == HELD_LINE and done.seconds < 2
+    assert held_back(done) and done.seconds < 2
     done = run("hook", "session-start", stdin=event("SessionStart", repo, session="s-c"), cwd=repo, extra={"PATH": path})
     assert output(done)["systemMessage"] == ("Vyavasta: the server didn’t answer a moment ago, so requests aren’t being "
                                              "checked. It is tried again in a minute, and Claude works as usual.")
@@ -6422,10 +6465,10 @@ def test_a_server_that_takes_requests_and_never_answers_holds_no_hook_up_twice(r
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
                cwd=repo, extra={"PATH": path})
     assert done.seconds < 5.5 and [call["path"] for call in fake.requests] == ["/hello"]
-    assert output(done)["systemMessage"] == HELD_LINE
+    assert held_back(done)
     done = run("hook", "prompt", stdin=event("UserPromptSubmit", repo, session="s-b", prompt="Change calc.py"),
                cwd=repo, extra={"PATH": path})
-    assert output(done)["systemMessage"] == HELD_LINE and done.seconds < 2 and len(fake.requests) == 1
+    assert held_back(done) and done.seconds < 2 and len(fake.requests) == 1
     aged(run, "unanswered")
     fake.requests.clear()
     done = stop(run, repo, session="s-b", last_assistant_message="Done.")
@@ -6564,9 +6607,11 @@ def test_a_long_call_left_unanswered_only_makes_the_next_ask_the_quick_question_
     switched_on(run, fake, repo)
     path, runs = curl_runs(tmp_path, {75: 2})
     fake.delay["/check"] = 5
-    said = prompt(run, repo, "Change calc.py", extra={"PATH": path})["systemMessage"]
-    assert said == ("Vyavasta · sent: your message. · Vyavasta took too long to answer, so it wasn’t checked this time. "
-                    "Claude works as usual.")
+    said = prompt(run, repo, "Change calc.py", extra={"PATH": path})
+    assert said["systemMessage"] == ("Vyavasta · sent: your message. · Vyavasta took too long to answer, so it wasn’t "
+                                     "checked this time. Claude works as usual.")
+    # Nothing was checked: Claude asks the developer before anything leaves the computer.
+    assert said["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
     assert (run.home / "slow").exists() and not (run.home / "unanswered").exists()
     del fake.delay["/check"]
     fake.requests.clear()
@@ -6916,9 +6961,12 @@ def test_an_answer_that_is_not_vyavastas_is_never_told_as_checked(run, fake, rep
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.page["/check"] = (200, b"<!doctype html><html><body>App</body></html>")
-    assert prompt(run, repo, "Change calc.py")["systemMessage"] == (
+    unread = prompt(run, repo, "Change calc.py")
+    assert unread["systemMessage"] == (
         "Vyavasta · sent: your message. · Vyavasta’s answer couldn’t be read, so your message wasn’t checked. Claude "
         "works as usual.")
+    # Nothing was checked: Claude asks the developer before anything leaves the computer.
+    assert unread["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
     fake.page["/me"] = (200, b"<!doctype html><html><body>App</body></html>")
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo), cwd=repo))["systemMessage"]
     assert said == ("Vyavasta: the server’s answer couldn’t be read, so requests aren’t being checked. Claude works "
@@ -7104,14 +7152,6 @@ def test_codex_is_told_of_a_conflict_at_its_next_edit_with_a_block_its_model_rec
                     "tell the developer what stands against the change, and ask whether to continue or stop."}
     # Told once.
     assert run("hook", "edit-check", stdin=event("PostToolUse", repo), cwd=repo, tool="codex").stdout == ""
-
-
-def test_signing_in_again_says_the_guide_is_in_the_email_already(run, fake, repo):
-    fake.extra["/token"] = {"guide_emailed": True, "guide_emailed_now": False}
-    run("sign-in", cwd=repo)
-    fake.approved = True
-    status = run("status", cwd=repo).stdout
-    assert "The guide to every command is in your email." in status and "was emailed to you" not in status
 
 
 def unsent(run) -> list[Path]:
@@ -7697,17 +7737,55 @@ HELD_PUSH = {"verdict": "held", "hold": True, "kind": "action", "repository": "a
              "anyway": {"phrase": "Go ahead anyway",
                         "context": "The developer chose to go ahead anyway. Their request: “push this change”"}}
 
+# How Codex's model is told to open what it says next with the lines a refusal gives it, which Codex shows its developer
+# nowhere else.
+NEXT_WORDS = "what you say to the developer next"
 
-def before_run(run, repo: Path, command, tool: str | None = None) -> dict:
+
+def before_run(run, repo: Path, command, tool: str | None = None, session: str = "session-1", **kwargs) -> dict:
     """The hook before a command of the tool's shell, as each tool sends it."""
-    return output(run("hook", "before-run", stdin=event("PreToolUse", repo, tool_name="Bash",
+    return output(run("hook", "before-run", stdin=event("PreToolUse", repo, session=session, tool_name="Bash",
                                                         tool_input={"command": command, "description": "Push it"}),
-                      cwd=repo, tool=tool))
+                      cwd=repo, tool=tool, **kwargs))
+
+
+def denied(said: dict) -> bool:
+    """Whether the hook before a command refused it."""
+    return said.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+
+def relayed_reason(said: dict) -> tuple[list[str], str]:
+    """A refusal in Codex, which shows its developer nothing of a hook's but what its model says: the lines its reason
+    gives the model to open what it says next with, under the instruction that says how many there are and closed by
+    a line of their own, and the rest of the reason, for the model alone."""
+    reason = said["hookSpecificOutput"]["permissionDecisionReason"]
+    block, end, rest = reason.partition(f"\n{RELAY_END}\n\n")
+    lines = [line.removeprefix("│ ") for line in block.split("\n")[1:]]
+    assert end and block + f"\n{RELAY_END}" == relay(lines, NEXT_WORDS), reason
+    return lines, rest
+
+
+def unchecked(why: str, tool: str | None) -> dict:
+    """What the hook before a push prints when the push couldn't be checked (``why``): a refusal whose reason tells the
+    tool's model to ask the developer, and the line the developer reads, with how to run it without the check. Codex
+    shows its developer neither: the reason opens with the line, for Codex's model to open what it says next with."""
+    line = (f"Vyavasta · this push wasn’t checked ({why}), so it didn’t run. Send “Go ahead anyway” to run it without "
+            "the check.")
+    reason = (f"Vyavasta couldn’t check this command against the team’s record ({why}), so it didn’t run. Ask the "
+              "developer whether to run it anyway. If they choose to, they send “Go ahead anyway”, and then you run it "
+              "again.")
+    if tool == "codex":
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": f"{relay([line], NEXT_WORDS)}\n\n{reason}"}}
+    return {"systemMessage": line, "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                         "permissionDecisionReason": reason}}
 
 
 def test_a_held_push_is_gone_past_with_its_own_words_and_the_push_then_runs_unheld(run, fake, repo):
     """“push this change” is held where the team locked a file it carries; “Go ahead anyway” gives the model the
-    request with what stood in the way, and the push the model then runs is not held again."""
+    request with what stood in the way, and the push the model then runs is not held again. Going past a hold lets that
+    push through and no other: one that carries a commit made since is checked again, with that commit, and so is the
+    same push once 15 minutes have passed. Going past a hold on a change (“Plan it anyway”) lets no push through."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.check = dict(HELD_PUSH)
@@ -7718,6 +7796,28 @@ def test_a_held_push_is_gone_past_with_its_own_words_and_the_push_then_runs_unhe
     assert "going ahead" in going["systemMessage"] and len(fake.calls("/check")) == 1
     # The push the developer chose to go on with runs, with no second check.
     assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 1
+    # One that carries a commit made since is checked again, with that commit, and held.
+    (repo / "compose.yaml").write_text("image: worker:2\n")
+    git(repo, "add", "compose.yaml")
+    git(repo, "commit", "-qm", "Bump the worker image")
+    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 2
+    (commit,) = fake.calls("/check")[-1]["body"]["work"]["git"]["unpushed"]
+    assert commit["subject"] == "Bump the worker image"
+    # Gone past again, it runs, until 15 minutes have passed.
+    assert "going ahead" in prompt(run, repo, "Go ahead anyway")["systemMessage"]
+    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 2
+    (gone,) = run.home.glob("sessions/*/go-ahead")
+    went, commit_held = gone.read_text().split()
+    gone.write_text(f"{int(went) - 901} {commit_held}\n")
+    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 3
+    # A change gone past with “Plan it anyway”: the push the model runs after it is checked, and held.
+    fake.check = {"verdict": "held", "hold": True, "kind": "change", "statements": [],
+                  "notice": "On hold: Priya said the export stays.", "context": "Priya’s decision stands.",
+                  "anyway": {"phrase": "Plan it anyway", "context": "The developer chose to go ahead anyway."}}
+    prompt(run, repo, "Remove the export from calc.py")
+    assert "going ahead" in prompt(run, repo, "Plan it anyway")["systemMessage"]
+    fake.check = dict(HELD_PUSH)
+    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 5
 
 
 def test_a_push_the_tool_runs_is_checked_however_it_was_asked_for_and_nothing_else_is(run, fake, repo):
@@ -7739,9 +7839,16 @@ def test_a_push_the_tool_runs_is_checked_however_it_was_asked_for_and_nothing_el
     (sent,) = fake.calls("/check")
     assert sent["body"]["command"] == "cd api && git -C . push --force-with-lease origin main"
     assert sent["body"]["request"] == "" and sent["body"]["keep"] is False and "ask_now" not in sent["body"]
-    # Codex takes only the refusal and its reason; and GitHub's merge of a pull request is checked too.
+    # Codex takes only the refusal and its reason, and shows its developer nothing else: its model opens what it says
+    # next with the line's own words, the way past the hold among them, and is told what stands. GitHub's merge of a
+    # pull request is checked too.
     codex = before_run(run, repo, ["bash", "-lc", "gh pr merge 12 --squash"], tool="codex")
-    assert set(codex) == {"hookSpecificOutput"} and codex["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert set(codex) == {"hookSpecificOutput"} and denied(codex)
+    shown, told = relayed_reason(codex)
+    assert shown == f"Vyavasta · {fake.check['notice']}".split("\n")
+    assert "To go ahead anyway, send “Go ahead anyway”." in shown
+    assert told == ("Vyavasta checked this request: Priya’s lock stands.\n\nDon’t run this command again unless the "
+                    "developer chooses to go ahead anyway.")
     assert fake.calls("/check")[-1]["body"]["command"] == "bash -lc gh pr merge 12 --squash "
     # Gone past by the developer, the push runs.
     assert "going ahead" in prompt(run, repo, "go ahead anyway")["systemMessage"]
@@ -7755,13 +7862,146 @@ def test_what_could_not_be_checked_has_the_model_ask_the_developer_before_anythi
     said = prompt(run, repo, "push this change")
     assert "so it wasn’t checked" in said["systemMessage"]
     assert said["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
-    refused = before_run(run, repo, "git push")
-    assert refused["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert refused["hookSpecificOutput"]["permissionDecisionReason"].startswith(
-        "Vyavasta couldn’t check this command against the team’s record (Vyavasta’s server couldn’t check it just "
-        "now), so it didn’t run. Ask the developer whether to run it anyway.")
-    assert refused["systemMessage"] == ("Vyavasta · this push wasn’t checked (Vyavasta’s server couldn’t check it just "
-                                        "now), so it didn’t run. Send “Go ahead anyway” to run it without the check.")
+    for tool in (None, "codex"):
+        assert before_run(run, repo, "git push", tool=tool) == unchecked("Vyavasta’s server couldn’t check it just now",
+                                                                         tool)
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+@pytest.mark.parametrize("how, why", [
+    ("busy", "Vyavasta is busy just now"),
+    ("slow", "Vyavasta took too long to answer"),
+    ("out of reach", "Vyavasta’s server can’t be reached"),
+    ("out of reach a moment ago", "Vyavasta’s server can’t be reached"),
+    ("its own word", "the check couldn’t be made just now"),
+    ("not vyavastas", "Vyavasta’s answer couldn’t be read")])
+def test_a_push_that_cannot_be_checked_never_runs_without_the_developer(run, fake, repo, tmp_path, how, why, tool):
+    """Whatever kept a push from being checked (the server busy, slow, out of reach now or a moment ago, its own word
+    that the check couldn't be made, or an answer that isn't Vyavasta's), it doesn't run: the developer is told why
+    and how to run it anyway, and the tool's model is told to ask them."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    kwargs: dict = {}
+    if how == "busy":
+        fake.status["/check"], fake.code["/check"] = 429, "busy"
+    elif how == "slow":
+        # (The check's 75 seconds run out in 2 here.)
+        path, _ = curl_runs(tmp_path, {75: 2})
+        fake.delay["/check"] = 5
+        kwargs["extra"] = {"PATH": path}
+    elif how == "out of reach":
+        kwargs["server"] = f"http://127.0.0.1:{closed_port()}"
+        (run.home / "credentials").write_text(f"server={kwargs['server']}\ntoken={TOKEN}\n")
+    elif how == "out of reach a moment ago":
+        aged(run, "offline", 10)
+    elif how == "its own word":
+        fake.check = {"verdict": "unavailable", "hold": False, "statements": [], "context": ASK_FIRST,
+                      "notice": "Not checked: the check couldn’t be made just now. Claude goes on, and asks you before "
+                                "anything leaves this computer."}
+    else:
+        fake.page["/check"] = (200, b"<!doctype html><html><body>App</body></html>")
+    assert before_run(run, repo, "git push origin main", tool=tool, **kwargs) == unchecked(why, tool)
+
+
+def curl_limits(tmp_path: Path, faster: dict[int, int]) -> tuple[str, Path]:
+    """A PATH whose curl writes down how long each call it makes may take (its ``max-time``, as the script set it), one
+    to a line, then runs the real curl with each limit in ``faster`` (seconds: seconds) made shorter."""
+    folder = tmp_path / "curl-limits"
+    folder.mkdir(exist_ok=True)
+    limits = tmp_path / "curl-limits.txt"
+    edits = " ".join(f"-e 's/^max-time = {was}$/max-time = {now}/'" for was, now in faster.items())
+    shim = folder / "curl"
+    shim.write_text(f"""#!/bin/sh
+told=$(cat)
+printf '%s\\n' "$told" | sed -n 's/^max-time = \\([0-9]*\\)$/\\1/p' >> "{limits}"
+printf '%s\\n' "$told" | sed {edits} | exec "{shutil.which('curl')}" "$@"
+""")
+    shim.chmod(0o755)
+    return f"{folder}{os.pathsep}{os.environ['PATH']}", limits
+
+
+def test_the_check_before_a_push_never_runs_past_the_time_its_tool_gives_it(run, fake, repo, tmp_path):
+    """A hook that runs past its timeout is ended by the tool, and the push then runs, unchecked and unsaid. So the
+    longest the hook before a push can wait stays inside the timeout both tools give it: here the server was slow a
+    moment ago, so the quick question goes first, before telling the server again that code sharing is on and before
+    the check, and every call runs out."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    for told in run.home.glob("projects/*/sharing-told"):
+        told.unlink()
+    aged(run, "slow", 10)
+    fake.delay.update({"/sharing": 3, "/check": 3})
+    # (Each call's limit is written down as the script set it, and runs out in a second here.)
+    path, limits = curl_limits(tmp_path, {4: 1, 8: 1, 75: 1})
+    fake.requests.clear()
+    assert before_run(run, repo, "git push origin main", extra={"PATH": path}) == unchecked(
+        "Vyavasta took too long to answer", None)
+    assert [call["path"] for call in fake.requests] == ["/hello", "/sharing", "/hello", "/check"]
+    timeouts = [hook["timeout"] for name in ("hooks.json", "codex.json")
+                for group in json.loads((PLUGIN / "hooks" / name).read_text())["hooks"]["PreToolUse"]
+                for hook in group["hooks"] if hook["command"].endswith(" before-run")]
+    assert len(timeouts) == 2 and sum(int(limit) for limit in limits.read_text().split()) < min(timeouts)
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+@pytest.mark.parametrize("cause", ["failing", "out of reach"])
+def test_a_push_that_couldnt_be_checked_runs_once_the_developer_says_go_ahead_anyway(run, fake, repo, tool, cause):
+    """While the server can't check anything, “Go ahead anyway” is how the developer pushes all the same: the push
+    that was refused then runs, without a check or a call, and the tool's model is told the developer chose to run
+    that command without the check."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    kwargs: dict = {}
+    if cause == "failing":
+        fake.status["/check"] = 503
+        why = "Vyavasta’s server couldn’t check it just now"
+    else:
+        kwargs["server"] = f"http://127.0.0.1:{closed_port()}"
+        (run.home / "credentials").write_text(f"server={kwargs['server']}\ntoken={TOKEN}\n")
+        why = "Vyavasta’s server can’t be reached"
+    assert before_run(run, repo, "git push origin main", tool=tool, **kwargs) == unchecked(why, tool)
+    going = prompt(run, repo, "Go ahead anyway", tool=tool, **kwargs)
+    assert going == {
+        "systemMessage": f"Vyavasta: going ahead. {'Codex' if tool else 'Claude'} was told you chose to run the "
+                         "command without the check.",
+        "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": (
+            f"The developer was told that Vyavasta couldn’t check the command below against the team’s record ({why}), "
+            "and chose to run it without the check. The choice is theirs: run it again as it was, and don’t ask them "
+            "again because of the check. Their command: “git push origin main”")}}
+    checks = len(fake.calls("/check"))
+    assert before_run(run, repo, "git push origin main", tool=tool, **kwargs) == {}
+    assert len(fake.calls("/check")) == checks
+
+
+def test_a_push_that_carries_a_teammates_file_says_so_once(run, fake, repo):
+    """Teammates changing the same file are told again when one of them is about to push it, once for each push. The
+    server says it with the push's own check (its ``overlap``): Claude Code's developer reads the line on the push's
+    own line, held or not, and nothing else stops; Codex shows its developer nothing of that hook, so its model opens
+    its reply to the next message with the line, as it does with every line of teammates changing the same files. The
+    details come to the tool's model with that next message, and the line is not shown again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    git(repo, "commit", "-qam", "Swap the order")
+    line = "Vyavasta: " + LINES[1]
+    clear = {"verdict": "clear", "hold": False, "kind": "action", "statements": [], "context": "Clear.",
+             "notice": "Checked against your team’s record: nothing stands against this."}
+    for tool in (None, "codex"):
+        session = f"s-{tool}"
+        fake.check = {**clear, "overlap": {**OVERLAP_LINES, "lines": LINES[1:]}}
+        said = before_run(run, repo, "git push origin main", tool=tool, session=session)
+        assert said == ({} if tool else {"systemMessage": line})
+        fake.check = dict(clear)
+        assert before_run(run, repo, "git push origin main", tool=tool, session=session) == {}
+        after = prompt(run, repo, "Add a test for calc.py", session=session, tool=tool)
+        assert relayed(after) == ([line] if tool else [])
+        assert (line in after["systemMessage"]) == (tool == "codex")
+        assert OVERLAP["context"] in after["hookSpecificOutput"]["additionalContext"]
+        assert relayed(prompt(run, repo, "Add another test", session=session, tool=tool)) == []
+    # Held, Claude Code's line says both.
+    fake.check = {**HELD_PUSH, "overlap": {**OVERLAP_LINES, "lines": LINES[1:]}}
+    stopped = before_run(run, repo, "git push origin main", session="s-held")
+    assert denied(stopped) and stopped["systemMessage"] == f"Vyavasta · {HELD_PUSH['notice']}\n\n{line}"
 
 
 def test_a_push_its_message_cleared_runs_without_a_second_check_until_it_carries_another_commit(run, fake, repo):

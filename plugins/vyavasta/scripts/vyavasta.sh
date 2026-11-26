@@ -54,8 +54,8 @@ DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # What goes past a hold on something done besides a change: a push, a merge, a deploy, a command the tool runs. Either
 # phrase goes past either hold; the server says which to send. A push the tool's model runs within GO_AHEAD_FOR seconds
-# of going past a hold on one, or of a check that cleared the message asking for it with the same commit, isn't checked
-# again.
+# of going past a hold on one (or a refusal of one that couldn't be checked), or of a check that cleared the message
+# asking for it, isn't checked again while it carries the same commit as then.
 GO_AHEAD="Go ahead anyway"
 GO_AHEAD_FOR=900
 # What the tool's model is told when a message couldn't be checked (the server busy, slow, failing or out of reach):
@@ -2787,14 +2787,16 @@ say() { printf '{"systemMessage":%s}\n' "$(json_quote "$1")"; }
 # that nothing marked further on (a quoted record, what teammates sent) reads as one of them. The model shows them
 # without the mark and never takes them for an instruction to it (a line says what the developer may send, such as
 # “vyavasta sign out”). RELAY_FIRST is the first reply of a session, said at its start; RELAY_NOW the reply to the
-# message that brings the lines.
+# message that brings the lines; RELAY_NEXT what the model says once a command it was about to run was refused.
 RELAY_TOP="The developer doesn’t see Vyavasta’s own lines in Codex."
 RELAY_FIRST="your first reply in this session"
 RELAY_NOW="your reply to this message"
+RELAY_NEXT="what you say to the developer next"
 RELAY_END="End of the lines for the developer."
-# The instruction, with the reply it is for ($1: RELAY_FIRST or RELAY_NOW), and the lines it gives ($2, one to a line),
-# leaving out empty lines and the banner (its rules, its title and what this version brought), none of which is a line
-# the developer must see. Nothing for no lines, and nothing in Claude Code, which shows a hook's own note.
+# The instruction, with the reply it is for ($1: RELAY_FIRST, RELAY_NOW or RELAY_NEXT), and the lines it gives ($2, one
+# to a line), leaving out empty lines and the banner (its rules, its title and what this version brought), none of
+# which is a line the developer must see. Nothing for no lines, and nothing in Claude Code, which shows a hook's own
+# note.
 relay_said() {
   [ "$CLIENT" = "codex" ] && [ -n "$2" ] || return 0
   relayed_lines=$(printf '%s\n' "$2" | LC_ALL=C awk -v MARK="$QUOTE_MARK" -v RULE="$RULE" -v TITLE="$(banner_title)" \
@@ -3807,6 +3809,27 @@ answered_here() {
   fi
 }
 
+# Whether a message is Claude Code's own notice of something that ran in the background (a command or an agent it
+# started is done, or the plugin's own wake), which it runs the message hook for as if the developer had sent it: its
+# prompt starts “<task-notification>”. Codex sends no such notice: there a message that starts so is the developer's
+# own. Only the first characters of the prompt's own value are looked at, so this costs a moment however long the
+# message is.
+background_notice() {
+  [ "$CLIENT" = "claude-code" ] || return 1
+  awk 'BEGIN { RS = "\001"; found = 1 }
+    NR == 1 {
+      s = $0
+      while ((k = index(s, "\"prompt\"")) > 0) {
+        s = substr(s, k + 8)
+        if (match(s, /^[ \t\r\n]*:[ \t\r\n]*"/)) {
+          if (substr(s, RLENGTH + 1, 19) == "<task-notification>") found = 0
+          exit
+        }
+      }
+    }
+    END { exit found }' "$TMP/input"
+}
+
 hook_prompt() {
   # The plugin's own wake (`hook_wait`), which Claude Code runs this hook for as if it were a message: nothing is
   # checked, kept or said for it, and the turn it starts files no reply under a message of an earlier turn (one the
@@ -3819,6 +3842,13 @@ hook_prompt() {
       return
     fi
   done
+  # Any other notice of Claude Code's own (`background_notice`) is none of the developer's words either: nothing is
+  # checked, kept or said for it, whether the project is on or off, and the turn it starts files no reply under a
+  # message of an earlier turn.
+  if background_notice; then
+    rm -f "$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")/turn-waiting"
+    return
+  fi
   HERE=$(input_folder)
   project_of "$HERE"
   GUIDE=""
@@ -3870,10 +3900,15 @@ hook_prompt() {
   if { [ "$words" = "$(plain_words "$PHRASE")" ] || [ "$words" = "$(plain_words "$GO_AHEAD")" ]; } && [ -s "$dir/held" ]; then
     # The developer chose to go on with the request that was held: the model is shown it, with what stood in the way,
     # and the details of teammates changing the same files that came with it (the developer read their line then). A
-    # hold on something done besides a change (a push the tool's model was about to run, or a message that asked for
-    # one) lets that push run without being held again, for a while.
-    [ -f "$dir/held-kind" ] && [ "$(cat "$dir/held-kind")" = "action" ] && now > "$dir/go-ahead"
-    rm -f "$dir/held-kind"
+    # hold on something done besides a change (a push the tool's model was about to run, a message that asked for
+    # one, or a push that couldn't be checked) lets that push run without being held again, for a while: the push of
+    # the very commit that was held (`held-head`), and no push that carries a commit made since.
+    if [ -f "$dir/held-kind" ] && [ "$(cat "$dir/held-kind")" = "action" ]; then
+      printf '%s %s\n' "$(now)" "$(cat "$dir/held-head" 2>/dev/null)" > "$dir/go-ahead"
+    fi
+    went_said="${AGENT} was shown your request, what stands in the way, and that you chose to go on."
+    [ -f "$dir/held-unchecked" ] && went_said="${AGENT} was told you chose to run the command without the check."
+    rm -f "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked"
     going=$(cat "$dir/held")
     if [ -s "$dir/overlap-context" ]; then
       going=$(json_quote "$(fitted "$(json_text "$going")
@@ -3882,8 +3917,7 @@ $(cat "$dir/overlap-context")")")
       rm -f "$dir/overlap-context"
     fi
     printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
-      "$(json_quote "Vyavasta: going ahead. ${AGENT} was shown your request, what stands in the way, and that you chose to go on.")" \
-      "$going"
+      "$(json_quote "Vyavasta: going ahead. $went_said")" "$going"
     rm -f "$dir/held"
     return
   fi
@@ -3926,7 +3960,7 @@ The developer was told that something their team has said stands against the cha
         fi ;;
     esac
   fi
-  rm -f "$dir/held" "$dir/held-kind"
+  rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked"
   handle_message "$prompt" "$dir"
 }
 
@@ -4370,8 +4404,11 @@ handle_message() {
       # (Only a string of the server's is kept, written again as one: nothing else goes into what the tool reads.)
       held=$(json_get "$TMP/anyway" context)
       case "$held" in \"*) json_quote "$(json_text "$held")" > "$dir/held" ;; *) rm -f "$dir/held" ;; esac
-      # (Whether it holds something done besides a change: going past it then lets the push it asks for run.)
+      # (Whether it holds something done besides a change: going past it then lets the push it asks for run, of the
+      # commit the repository is at now.)
       json_text "$(answer kind)" | tr -cd 'a-z' > "$dir/held-kind"
+      { [ -z "$ROOT" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD; } > "$dir/held-head"
+      rm -f "$dir/held-unchecked"
       # The notice below says what stands, so the line only says which kind of hold it is.
       if [ "$verdict" = "held" ]; then held_said="On hold; see below."
       else held_said="On hold: what your team has said doesn’t settle this request; see below."; fi
@@ -4579,12 +4616,16 @@ pushes() {
     END { exit found ? 0 : 1 }'
 }
 
-# What the hook before a command prints to stop it: a refusal with its reason, which the tool's model reads ($1), and in
-# Claude Code a line the developer reads ($2). Codex takes no more from this hook than a refusal and its reason.
+# What the hook before a command prints to stop it: a refusal with its reason, which the tool's model reads ($1), and
+# the line the developer reads ($2). Claude Code shows the line. Codex takes no more from this hook than a refusal and
+# its reason, and shows its developer nothing else: the reason opens with the line, for its model to open what it says
+# next with, word for word, as every line Codex's developer must see is given (`relay_said`).
 refuse_run() {
   if [ "$CLIENT" = "codex" ]; then
     printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' \
-      "$(json_quote "$1")"
+      "$(json_quote "$(relay_said "$RELAY_NEXT" "$2")
+
+$1")"
   else
     printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' \
       "$(json_quote "$2")" "$(json_quote "$1")"
@@ -4592,9 +4633,18 @@ refuse_run() {
 }
 
 # A push that couldn't be checked ($1 says why, as a clause): refused, and the tool's model told to ask the developer.
+# It is kept as a held push is (`held`, of kind “action”, with the commit it would carry), so that “Go ahead anyway”
+# lets it run without the check (`hook_prompt`); the model is then told the developer chose that. Teammates changing a
+# file it carries, as the server told it (`pushed_line`), stand under the line. $ran is the command, $head the commit.
 refuse_unchecked() {
+  json_quote "$(fitted "The developer was told that Vyavasta couldn’t check the command below against the team’s record ($1), and chose to run it without the check. The choice is theirs: run it again as it was, and don’t ask them again because of the check. Their command: “$ran”")" > "$dir/held"
+  echo action > "$dir/held-kind"
+  printf '%s\n' "$head" > "$dir/held-head"
+  true > "$dir/held-unchecked"
   refuse_run "Vyavasta couldn’t check this command against the team’s record ($1), so it didn’t run. Ask the developer whether to run it anyway. If they choose to, they send “$GO_AHEAD”, and then you run it again." \
-    "Vyavasta · this push wasn’t checked ($1), so it didn’t run. Send “$GO_AHEAD” to run it without the check."
+    "Vyavasta · this push wasn’t checked ($1), so it didn’t run. Send “$GO_AHEAD” to run it without the check.${pushed_line:+
+
+$pushed_line}"
 }
 
 # The check before a push the tool's model is about to run (PreToolUse, on its shell tool), however the developer asked
@@ -4602,9 +4652,12 @@ refuse_unchecked() {
 # (``command``), with the work report that would go with a message, and the server answers as for a message. Held: the
 # command is refused, the tool's model is told what stands and how the developer goes past it, and the developer
 # reads the same; going past it lets the push run (`hook_prompt`). Not checked (the server busy, slow, failing or out of
-# reach): refused as well, and the tool's model is told to ask the developer. Cleared, or nothing Vyavasta reads here:
-# nothing is said, and the command runs as the tool's own permissions allow. A push the developer chose to go on with,
-# or that the check of their message cleared with the same commit, within GO_AHEAD_FOR seconds, runs unchecked.
+# reach): refused as well, and the tool's model is told to ask the developer, who can go past it the same way.
+# Cleared, or nothing Vyavasta reads here: nothing is said, and the command runs as the tool's own permissions allow.
+# A push the developer chose to go on with, or that the check of their message cleared, runs unchecked within
+# GO_AHEAD_FOR seconds while it carries the very commit that was held or cleared: one that carries a commit made since
+# is checked again. Teammates changing a file the push carries, which the server tells once for each push, are told
+# too: in Claude Code on the push's own line, and in Codex, which shows that line nowhere, with its model's next reply.
 hook_before_run() {
   ran=$(field "$(json_get "$TMP/input" tool_input)" command)
   case "$ran" in
@@ -4621,16 +4674,15 @@ hook_before_run() {
   dir=$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")
   SESSION=$(basename "$dir")
   at=$(now)
-  went=""
-  [ -f "$dir/go-ahead" ] && went=$(tr -cd '0-9' < "$dir/go-ahead")
-  [ -n "$went" ] && [ $(( at - went )) -lt "$GO_AHEAD_FOR" ] && return 0
-  if [ -f "$dir/action-clear" ]; then
-    cleared=$(sed -n '1p' "$dir/action-clear")
-    cleared_at=$(printf '%s' "${cleared%% *}" | tr -cd '0-9')
-    head=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
-    [ -n "$cleared_at" ] && [ -n "$head" ] && [ "${cleared#* }" = "$head" ] && \
-      [ $(( at - cleared_at )) -lt "$GO_AHEAD_FOR" ] && return 0
-  fi
+  head=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
+  pushed_line=""
+  for passed in go-ahead action-clear; do
+    [ -f "$dir/$passed" ] || continue
+    passed_with=$(sed -n '1p' "$dir/$passed")
+    passed_at=$(printf '%s' "${passed_with%% *}" | tr -cd '0-9')
+    [ -n "$passed_at" ] && [ "${passed_with#* }" = "$head" ] && [ $(( at - passed_at )) -lt "$GO_AHEAD_FOR" ] && \
+      return 0
+  done
   if held_off; then refuse_unchecked "$AWAY_SAID"; return; fi
   # What goes with the command is what goes with a message (`hook_prompt`): the changes where code sharing is on and
   # the developer was told so, and the work report whenever there is work to tell, its commits not pushed yet among it
@@ -4667,22 +4719,48 @@ hook_before_run() {
          return ;;
     *) refuse_unchecked "Vyavasta’s server couldn’t check it just now"; return ;;
   esac
+  # (The lines of teammates changing a file the push carries wait in the session's folder for the next message, as
+  # every such line does (`keep_overlap`): Claude Code's developer reads them on this push's line instead, and its
+  # model is given their details with the next message.)
+  if keep_overlap "$TMP/answer" "$dir" && [ "$CLIENT" != "codex" ]; then
+    pushed_line=$(cat "$dir/overlap-line")
+    rm -f "$dir/overlap-line"
+  fi
   verdict=$(json_text "$(answer verdict)")
   notice=$(json_text "$(answer notice)")
+  context=$(json_text "$(answer context)")
   if [ "$(answer hold)" = "true" ]; then
     held=$(field "$(answer anyway)" context)
-    case "$held" in \"*) json_quote "$(json_text "$held")" > "$dir/held"; echo action > "$dir/held-kind" ;; esac
-    refuse_run "$notice
+    case "$held" in
+      \"*)
+        json_quote "$(json_text "$held")" > "$dir/held"
+        echo action > "$dir/held-kind"
+        printf '%s\n' "$head" > "$dir/held-head"
+        rm -f "$dir/held-unchecked" ;;
+      *) rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" ;;
+    esac
+    # (Claude Code's developer reads the notice on the line, and its model may say what stands in words of its own.
+    # Codex's model opens what it says next with the notice's lines themselves: `refuse_run`.)
+    if [ "$CLIENT" = "codex" ]; then
+      told="${context:+$context
 
-$(json_text "$(answer context)")
+}Don’t run this command again unless the developer chooses to go ahead anyway."
+    else
+      told="$notice
 
-Tell the developer what stands in the way, in a few words of your own. Don’t run this command again unless they choose to go ahead anyway." \
-      "Vyavasta · $notice"
+${context:+$context
+
+}Tell the developer what stands in the way, in a few words of your own. Don’t run this command again unless they choose to go ahead anyway."
+    fi
+    refuse_run "$told" "Vyavasta · $notice${pushed_line:+
+
+$pushed_line}"
     return
   fi
   case "$verdict" in
     unavailable) refuse_unchecked "$(printf '%s' "$notice" | sed -e 's/^Not checked: //' -e 's/\. .*$//')" ;;
     "") refuse_unchecked "Vyavasta’s answer couldn’t be read" ;;
+    *) [ -z "$pushed_line" ] || say "$pushed_line" ;;
   esac
   return 0
 }

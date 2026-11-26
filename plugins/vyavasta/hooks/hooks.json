@@ -52,7 +52,7 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh\" hook before-run",
-            "timeout": 90,
+            "timeout": 100,
             "statusMessage": "Checking with Vyavasta"
           }
         ]
