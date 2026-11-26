@@ -49,17 +49,17 @@ VERSION="0.6.0"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTA_TOOL=codex). The tool's own name,
-# what its model is called, and how its developer gives this plugin a command.
+# and what its model is called.
 case "${VYAVASTA_TOOL:-}" in
-  codex)
-    CLIENT="codex"; TOOL="Codex"; AGENT="Codex"; VERB="Send"; CMD_SIGN_OUT="“vyavasta sign out”" ;;
-  *)
-    CLIENT="claude-code"; TOOL="Claude Code"; AGENT="Claude"; VERB="Run"; CMD_SIGN_OUT="/vyavasta:sign-out" ;;
+  codex) CLIENT="codex"; TOOL="Codex"; AGENT="Codex" ;;
+  *) CLIENT="claude-code"; TOOL="Claude Code"; AGENT="Claude" ;;
 esac
 # The way in, said the same way in every sentence about being signed out, in both tools: a message of its own, which
-# the plugin answers itself (in Claude Code the slash command does the same).
+# the plugin answers itself (in Claude Code the slash command does the same). And the way out, said wherever the plugin
+# says whom this computer is signed in as.
 WAY_IN="Send “vyavasta sign in” to connect."
 WAY_IN_AGAIN="Send “vyavasta sign in” to connect again."
+WAY_OUT="Send “vyavasta sign out” to sign this computer out."
 # What a server that checks no request does instead (/me says `"checks": false`: the demo, or one with no model),
 # said wherever a line would otherwise say that requests are checked.
 UNCHECKED="This Vyavasta server doesn’t check requests, so ${AGENT} is shown what your team has said about each one instead."
@@ -108,6 +108,12 @@ PENDING="$HOME_DIR/pairing"
 SESSIONS="$HOME_DIR/sessions"
 PROJECTS="$HOME_DIR/projects"
 UNSENT="$HOME_DIR/unsent"
+ENDING="$HOME_DIR/ending"
+INSTALLS="$HOME_DIR/installs"
+REINSTALLED="$HOME_DIR/reinstalled"
+# How many days a connection lasts unused before the server ends it by itself, as the server sets it: a connection
+# this computer gave up and couldn't end is tried no longer than that (`retry_ending`).
+TOKEN_DAYS=30
 
 # The one check that runs after every edit, in both tools: whether a conflict, or teammates changing the same files,
 # is waiting to be told. It costs a file test for each when there is none, so it is answered as soon as the settings
@@ -171,6 +177,10 @@ WELCOMED="$HOME_DIR/welcomed-$CLIENT"
 # empty, so the first session after this update greets.)
 # (Read only where a greeting may be due: most hooks never need it.)
 GREETED=""
+# What a sign-in finished in this run says (`finish_pairing`): that this computer is connected and as whom, and, where
+# it replaced another account, that it is signed in as that one no more. Nothing from the environment.
+CONNECTED=""
+REPLACED_SAID=""
 greeted() { [ -n "$GREETED" ] || GREETED="$VERSION $(ls -i "$SELF" | awk '{ print $1 }')"; }
 greeting_due() { greeted; [ ! -f "$WELCOMED" ] || [ "$(cat "$WELCOMED")" != "$GREETED" ]; }
 mark_greeted() { greeted; mkdir -p "$HOME_DIR" && printf '%s\n' "$GREETED" > "$WELCOMED"; }
@@ -800,7 +810,7 @@ keep_credentials() {
   mv -f "$CREDENTIALS.new" "$CREDENTIALS"
   forget_told
   # Signed in again: whatever signed this computer out before is over.
-  rm -f "$HOME_DIR/signed-out"
+  rm -f "$HOME_DIR/signed-out" "$REINSTALLED"
   # (And nothing kept to send for another connection goes with this one.)
   rm -rf "$UNSENT"
 }
@@ -890,6 +900,116 @@ out_said() {
     ended) printf '%s' "this computer’s connection to Vyavasta has ended" ;;
     *) printf '%s' "you signed out on this computer" ;;
   esac
+}
+
+# -- one account on a computer -----------------------------------------------------------------------------------
+
+# A computer is signed in to one Vyavasta account at a time: a connection it gives up (signing out, signing in as
+# another account or on another server, the plugin installed again) is ended on its server, never only forgotten
+# here. $1 is the server it belongs to and $2 its token: one short call to that server's /signout, which changes
+# nothing of what is thought of the server set now (it may be another, and a refusal there is no sign that this
+# computer's own connection ended). Succeeds when the connection ended, was ended already (the server knows the token
+# no more), or can't be ended from here at all (not a server or a token this plugin would use); fails when it is worth
+# trying again (no answer, or a server that is busy or failing).
+end_connection() {
+  case "$2" in ""|*[!A-Za-z0-9._~+/=-]*) return 0 ;; esac
+  case "$1" in https://*|http://localhost|http://localhost:*|http://127.0.0.1|http://127.0.0.1:*) ;; *) return 0 ;; esac
+  case "$1" in *[!A-Za-z0-9.:/_-]*) return 0 ;; esac
+  [ -z "$NOCURL" ] || return 1
+  ended=$(SERVER=$1; curl_op POST /signout "" "$TMP/ended" 4 4 "$2" | curl -q -sS -K -)
+  case "${ended%% *}" in 2??|401|403|404|410) return 0 ;; esac
+  return 1
+}
+
+# A connection given up that couldn't be ended just now ($1 its server, $2 its token), kept in ENDING with when, readable
+# by the developer only, to be ended once Vyavasta is next reached (`retry_ending`). One at a time: a later one takes
+# its place.
+keep_ending() {
+  KEPT_ENDING=1
+  mkdir -p "$HOME_DIR" && chmod 700 "$HOME_DIR" || return 0
+  printf 'server=%s\ntoken=%s\nsince=%s\n' "$1" "$2" "$(now)" > "$ENDING.$$" && chmod 600 "$ENDING.$$" \
+    && mv -f "$ENDING.$$" "$ENDING"
+  rm -f "$ENDING.$$"
+}
+
+# Ends the connection kept in ENDING, when it belongs to the server set now: never this computer's own connection, none
+# older than TOKEN_DAYS (which the server has ended by itself), and none kept in this same run, whose call just failed.
+KEPT_ENDING=""
+retry_ending() {
+  [ -f "$ENDING" ] && [ -z "$KEPT_ENDING" ] || return 0
+  since=$(sed -n 's/^since=//p' "$ENDING")
+  case "$since" in ''|*[!0-9]*) since=0 ;; esac
+  if [ $(( $(now) - since )) -ge $(( TOKEN_DAYS * 86400 )) ]; then rm -f "$ENDING"; return 0; fi
+  [ "$(sed -n 's/^server=//p' "$ENDING")" = "$SERVER" ] || return 0
+  gone=$(sed -n 's/^token=//p' "$ENDING")
+  if [ "$gone" = "${TOKEN:-}" ] || end_connection "$SERVER" "$gone"; then rm -f "$ENDING"; fi
+}
+
+# Whether the plugin was removed and installed again since it last ran. Neither tool tells a plugin that it is being
+# removed. Claude Code gives each plugin a folder of its own (CLAUDE_PLUGIN_DATA) that updates keep and removing the
+# plugin deletes (unless its person chooses to keep it): a mark the plugin left there, gone, says it was removed and
+# installed again. The mark is a number made once for each such folder, and this computer's settings folder, which
+# removing the plugin leaves, keeps for each folder (by its path) the number last found there (INSTALLS). A folder
+# found unmarked that INSTALLS knows was emptied: installed again. One found unmarked that INSTALLS doesn't know is the
+# first to be marked (a new computer, or the first run after an update from a release that made no mark): nothing
+# changes. Codex keeps a plugin's folder when the plugin is removed, and installs a plugin's files again by itself after
+# each update of the marketplace it came from, so there nothing tells a removed and reinstalled plugin from one Codex
+# refreshed, and nothing is done. A session's start ($1 “start”) also brings INSTALLS up to date with the mark; the
+# other hooks only test that the mark is there (one test of a file), and do the rest only when it isn't.
+installed_again() {
+  [ "$CLIENT" = "claude-code" ] || return 1
+  data=${CLAUDE_PLUGIN_DATA:-}
+  # (A full path: on Windows, Git Bash is given one with its drive.)
+  case "$data" in /*|[A-Za-z]:[\\/]*) ;; *) return 1 ;; esac
+  if [ -f "$data/install" ] && [ -z "${1:-}" ]; then return 1; fi
+  key=$(printf '%s' "$data" | cksum | awk '{ print $1 }')
+  known=$(awk -v k="$key" '$1 == k { print $2; exit }' "$INSTALLS" 2>/dev/null)
+  if [ -f "$data/install" ]; then
+    mark=$(sed -n '1p' "$data/install" | tr -cd '0-9a-z')
+    [ -z "$mark" ] || [ "$mark" = "$known" ] || keep_install "$key" "$mark"
+    return 1
+  fi
+  # (Marked first, and the mark read back, before INSTALLS knows it: a folder that can't be written is never taken
+  # for one emptied.)
+  mark=$(new_request_id | tr -cd '0-9a-z')
+  { mkdir -p "$data" && printf '%s\n' "$mark" > "$data/install.$$" && mv -f "$data/install.$$" "$data/install"; } \
+    || { rm -f "$data/install.$$"; return 1; }
+  [ "$(sed -n '1p' "$data/install")" = "$mark" ] || return 1
+  keep_install "$key" "$mark"
+  [ -n "$known" ]
+}
+
+# Keeps in INSTALLS the mark ($2) of the plugin's folder whose path's checksum is $1.
+keep_install() {
+  mkdir -p "$HOME_DIR" && chmod 700 "$HOME_DIR" || return 0
+  { awk -v k="$1" '$1 != k' "$INSTALLS" 2>/dev/null; printf '%s %s\n' "$1" "$2"; } > "$INSTALLS.$$" \
+    && mv -f "$INSTALLS.$$" "$INSTALLS"
+  rm -f "$INSTALLS.$$"
+}
+
+# A plugin removed and installed again starts as a first install does: nobody signed in on this computer, and the
+# sign-in starting by itself and opening its page. The connection it had is ended (`end_connection`, or kept to be
+# ended later), a sign-out kept from before is forgotten, and this tool greets again. Whom it was signed in as is kept
+# (REINSTALLED) for the line that starts the sign-in to say, once (`reinstalled_said`). $1 as `installed_again` takes it.
+start_again() {
+  installed_again "${1:-}" || return 0
+  if [ -f "$CREDENTIALS" ]; then
+    { printf 'email=%s\n' "$(saved email)"; printf 'workspace=%s\n' "$(saved workspace)"; } > "$REINSTALLED"
+    end_connection "$(saved server)" "$(saved token)" || keep_ending "$(saved server)" "$(saved token)"
+  fi
+  rm -f "$CREDENTIALS" "$PENDING" "$HOME_DIR/signed-out" "$HOME_DIR/guide-emailed" "$WELCOMED"
+  rm -rf "$UNSENT"
+  forget_told
+  TOKEN=""
+}
+
+# Whom this computer was signed in as before the plugin was installed again, as the middle of a sentence (“signed out
+# of …”), once: the file that keeps it goes as it is said. Nothing when nobody was.
+reinstalled_said() {
+  [ -f "$REINSTALLED" ] || return 0
+  printf '%s in %s' "$(person "$(sed -n 's/^email=//p' "$REINSTALLED")")" \
+    "$(person "$(sed -n 's/^workspace=//p' "$REINSTALLED")")"
+  rm -f "$REINSTALLED"
 }
 
 # -- projects, on and off -----------------------------------------------------------------------------------
@@ -1324,7 +1444,9 @@ pending_waiting() {
 }
 
 # A pairing started by sign-in and approved in the browser since: the token is taken now. Quiet either way. A pairing
-# is claimed for a minute after its code ran out, as one approved at its last moment may still be.
+# is claimed for a minute after its code ran out, as one approved at its last moment may still be. One account at a
+# time: the connection this computer had until then (signed in as someone, on this server or another) is ended once the
+# new one is kept, and CONNECTED says so where the account is another one (REPLACED_SAID).
 finish_pairing() {
   [ -f "$PENDING" ] || return 0
   pending_server=$(sed -n 's/^server=//p' "$PENDING")
@@ -1345,11 +1467,20 @@ finish_pairing() {
       case "$new_token" in
         ""|*[!A-Za-z0-9._~+/=-]*) rm -f "$PENDING"; return 0 ;;
       esac
+      old_server=$(saved server); old_token=$(saved token); old_email=$(saved email); old_workspace=$(saved workspace)
       keep_credentials "$SERVER" "$new_token" "$(one_line "$(json_text "$(answer email)")")" \
         "$(one_line "$(json_text "$(answer workspace)")")"
       rm -f "$PENDING"
       TOKEN=$(token_for "$SERVER")
-      CONNECTED="Connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
+      REPLACED_SAID=""
+      retry_ending
+      if [ -n "$old_token" ] && [ "$old_token" != "$new_token" ]; then
+        end_connection "$old_server" "$old_token" || keep_ending "$old_server" "$old_token"
+        if [ "$old_email" != "$(saved email)" ] || [ "$old_workspace" != "$(saved workspace)" ]; then
+          REPLACED_SAID="This computer is no longer signed in as $(person "$old_email") in $(person "$old_workspace"): one account at a time."
+        fi
+      fi
+      CONNECTED="Connected as $(person "$(saved email)") in $(person "$(saved workspace)").${REPLACED_SAID:+ $REPLACED_SAID}"
       # Whether the server emailed its person the guide to every command with this sign-in (`guide_emailed_now`):
       # said here and in the other tool's first welcome, and only then, so it is never said untrue and never said again
       # after a later sign-in. A sign-in the server says sent none, though one was sent before (`guide_emailed`; a
@@ -2157,6 +2288,9 @@ hook_session_start() {
     told="export VYAVASTA_SESSION=$(basename "$dir")"
     grep -qxF "$told" "$CLAUDE_ENV_FILE" || printf '%s\n' "$told" >> "$CLAUDE_ENV_FILE"
   fi
+  # A connection this computer gave up and couldn't end then is ended now: one call, at a session's own start, only
+  # while one waits to be, and not while the server is known to be away.
+  [ -z "$again" ] && [ -f "$ENDING" ] && ! held_off && retry_ending
   if ! project_on; then
     [ "$source" = "compact" ] || welcome "$dir"
     return
@@ -2186,20 +2320,23 @@ $WHATS_NEW
     # (Signed out in the middle of work: the next message says so.)
     [ "$source" = "compact" ] && return
     # Signed out in a project that is on: sign-in starts by itself, once, here (the session's first message then
-    # doesn't start it again); one still waiting is told again, with its code.
+    # doesn't start it again); one still waiting is told again, with its code. After the plugin was installed again,
+    # the line says whom this computer was signed out of, in place of “not signed in”.
+    again_who=$(reinstalled_said)
+    [ -z "$again_who" ] || again_who="the plugin was installed again and this computer was signed out of $again_who"
     if pending_waiting; then
       PAIR_AGAIN=1
-      say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
+      say "${BANNER}Vyavasta: ${again_who:-not signed in yet}, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
     elif [ -f "$HOME_DIR/signed-out" ]; then
       say "${BANNER}Vyavasta: $(out_said), so nothing is checked. $WAY_IN_AGAIN ${AGENT} works as usual.$SUMMARIES_NOTE"
     elif held_off; then
       PAIR_FAILED=$AWAY_SAID
-      say "${BANNER}Vyavasta: not signed in, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
+      say "${BANNER}Vyavasta: ${again_who:-not signed in}, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
     elif start_pairing; then
       true > "$dir/said-sign-in"
-      say "${BANNER}Vyavasta: not signed in yet, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
+      say "${BANNER}Vyavasta: ${again_who:-not signed in yet}, so nothing is checked. To connect, $(code_said). Once you approve, your next message finishes connecting.$SUMMARIES_NOTE"
     else
-      say "${BANNER}Vyavasta: not signed in, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
+      say "${BANNER}Vyavasta: ${again_who:-not signed in}, and sign-in couldn’t start: $(pair_failed_said) $WAY_IN ${AGENT} works as usual.$SUMMARIES_NOTE"
     fi
     return
   fi
@@ -2226,9 +2363,10 @@ $WHATS_NEW
   case "$STATUS" in
     200)
       [ -n "$quiet" ] || remember_me
-      if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)")."
+      if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)").${REPLACED_SAID:+ $REPLACED_SAID}"
       else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
-      greeting="${BANNER}Vyavasta: $who $(reach_said "$(answer repositories)" "$checks")"
+      # (Whom it is signed in as comes first, and how to sign out after what it does here.)
+      greeting="${BANNER}Vyavasta: $who $(reach_said "$(answer repositories)" "$checks") $WAY_OUT"
       if [ -n "$SHARING_ENDED" ]; then
         greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
       fi
@@ -2288,10 +2426,12 @@ $(arrived_context "$listing" "While the developer was away" "your first reply in
 # A session in a project that is off. This tool's first one on this computer, and its first after the plugin was
 # installed again or updated, welcomes the developer in one message under the banner, whatever the other tool did
 # before; after an update it says what is new. On a computer that is connected already (a sign-in is kept, and one serves both
-# tools) it says so and as whom, from what this computer keeps, and starts no sign-in; when nobody is signed in it
-# starts signing in there and then (the Connect page opens and the message gives its code). The project stays off
-# and nothing else is sent. Later sessions say nothing, unless a sign-in is waiting: it is finished when it was
-# approved, and told again with its code when it still waits. $1 is the session folder.
+# tools) it says so and as whom, from what this computer keeps, and how to sign out, and starts no sign-in; when nobody
+# is signed in it starts signing in there and then (the Connect page opens and the message gives its code), and after
+# the plugin was installed again it says whom this computer was signed out of. The project stays off and nothing else
+# is sent. Later sessions say nothing, unless a sign-in is waiting: it is finished when it was approved, and told again
+# with its code when it still waits (one that would sign in as another account, while this computer is signed in, only
+# once it is approved). $1 is the session folder.
 welcome() {
   if greeting_due; then
     top="$(banner)
@@ -2302,27 +2442,30 @@ $TRY_SAID"
 $WHATS_NEW$foot"
     mark_greeted || return 0
     held_off || finish_pairing
+    installed="Vyavasta is installed"
+    again_who=$(reinstalled_said)
+    [ -z "$again_who" ] || installed="Vyavasta is installed again, so this computer was signed out of $again_who"
     if [ -n "$TOKEN" ]; then
-      say "${top}Vyavasta is installed in ${TOOL}. This computer is already connected as $(person "$(saved email)") in $(person "$(saved workspace)"): one connection serves both Claude Code and Codex. It stays off in this project until you send “vyavasta on”. $(guide_said)$foot"
+      say "${top}Vyavasta is installed in ${TOOL}. This computer is already connected as $(person "$(saved email)") in $(person "$(saved workspace)"): one connection serves both Claude Code and Codex.${REPLACED_SAID:+ $REPLACED_SAID} $WAY_OUT It stays off in this project until you send “vyavasta on”. $(guide_said)$foot"
     elif pending_waiting; then
       PAIR_AGAIN=1
-      say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
+      say "${top}$installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
     elif [ -f "$HOME_DIR/signed-out" ]; then
       say "${top}Vyavasta is installed, and sends nothing, because $(out_said). $WAY_IN_AGAIN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
     elif ! held_off && start_pairing; then
       true > "$1/said-sign-in"
-      say "${top}Vyavasta is installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
+      say "${top}$installed. To connect this computer, $(code_said). $(finish_said) “vyavasta help” shows everything.$foot"
     else
       [ -n "$PAIR_FAILED" ] || PAIR_FAILED=${AWAY_SAID:-}
-      say "${top}Vyavasta is installed, but sign-in couldn’t start: $(pair_failed_said) $WAY_IN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
+      say "${top}$installed, but sign-in couldn’t start: $(pair_failed_said) $WAY_IN Then send “vyavasta on” in each project you want it in. “vyavasta help” shows everything.$foot"
     fi
     return 0
   fi
-  [ -f "$PENDING" ] && [ -z "$TOKEN" ] || return 0
+  [ -f "$PENDING" ] || return 0
   held_off || finish_pairing
-  if [ -n "$TOKEN" ]; then
+  if [ -n "$CONNECTED" ]; then
     say "Vyavasta: $(printf '%s' "$CONNECTED" | sed 's/^Connected/connected/') It is off in this project: send “vyavasta on” to use it here, and “vyavasta help” to see everything it does."
-  elif pending_waiting; then
+  elif [ -z "$TOKEN" ] && pending_waiting; then
     PAIR_AGAIN=1
     say "Vyavasta: a sign-in is waiting. To connect this computer, $(code_said). $(finish_said)"
   fi
@@ -2854,11 +2997,11 @@ hook_expansion() {
 }
 
 # What a message in a project that is off gets: the line saying a waiting sign-in was finished, once it was approved
-# (a file test when none waits), and the guidance in GUIDE when the message asks how to use the plugin. The message
-# itself goes through as it is.
+# (a file test when none waits; one that signs in as another account too), and the guidance in GUIDE when the message
+# asks how to use the plugin. The message itself goes through as it is.
 off_answer() {
   FINISHED_LINE=""
-  [ -f "$PENDING" ] && [ -z "$TOKEN" ] && finish_waiting_sign_in
+  [ -f "$PENDING" ] && finish_waiting_sign_in
   if [ -n "$GUIDE" ] && [ -n "$FINISHED_LINE" ]; then
     printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
       "$(json_quote "$FINISHED_LINE")" "$(json_quote "$GUIDE")"
@@ -2942,8 +3085,12 @@ handle_message() {
   if [ -z "$TOKEN" ]; then
     # Signed out: sign-in starts by itself on the first message of a session (unless the session's start began it),
     # and never again in it; one still waiting is told again with its code, and its page isn't opened again. A
-    # computer that signed out, or whose connection ended, starts none: the developer signs in when they choose.
+    # computer that signed out, or whose connection ended, starts none: the developer signs in when they choose. After
+    # the plugin was installed again, the line says whom this computer was signed out of, and sign-in starts as it
+    # does on a session's first message.
     why="you aren’t signed in"
+    again_who=$(reinstalled_said)
+    if [ -n "$again_who" ]; then why="the plugin was installed again, so this computer was signed out of $again_who"; rm -f "$dir/said-sign-in"; fi
     if pending_waiting; then
       outcome="Enter the code $PAIR_CODE on the sign-in page ($PAIR_PAGE) to connect. Once you approve, your next message finishes connecting. ${AGENT} works as usual until then."
     elif [ -f "$HOME_DIR/signed-out" ]; then
@@ -3756,22 +3903,33 @@ not_sent() {
   esac
 }
 
+# Signing in. A computer is signed in to one account at a time: signed in already, signing in again (as another
+# account, or the same one) starts a sign-in that replaces the connection once it is approved (`finish_pairing` ends
+# the one it replaces); until then the computer stays signed in as it is.
 command_sign_in() {
   command_here
   finish_pairing
+  if [ -n "$CONNECTED" ]; then echo "$CONNECTED"; return; fi
+  signed=""
   if [ -n "$TOKEN" ]; then
+    # (A connection that ended is forgotten by this call, and signing in goes on as on a computer signed out.)
     api GET /me "" "$QUICK_SECONDS"
-    if [ "$STATUS" = "200" ]; then
-      echo "${CONNECTED:-Already signed in to Vyavasta ($SERVER) as $(person "$(json_text "$(answer email)")").} ${VERB} ${CMD_SIGN_OUT} first to switch accounts."
-      return
-    fi
+    [ -z "$TOKEN" ] || signed="$(person "$(saved email)") in $(person "$(saved workspace)")"
   fi
   # A sign-in still waiting is told again, never started a second time. (Asked for, it starts on a computer that
   # signed out too.)
   ASKED_SIGN_IN=1
   if ! start_pairing; then
     echo "Couldn’t start connecting to Vyavasta at $SERVER: ${PAIR_FAILED%.}."
+    [ -z "$signed" ] || echo "This computer is still signed in as $signed."
     [ "$STATUS" = "000" ] && echo "Check the address and your connection. To use another server, set VYAVASTA_SERVER before starting ${TOOL}."
+    return
+  fi
+  lasts_said=$(code_lasts_said)
+  if [ -n "$signed" ]; then
+    if [ -n "$PAIR_AGAIN" ]; then echo "This computer is signed in as $signed, and a sign-in as another account is waiting. To finish it, $(code_said)."
+    else echo "This computer is signed in as $signed. To sign in as another account, $(code_said)."; fi
+    echo "${lasts_said:+$lasts_said }Once you approve, your next message finishes it, and this computer is then signed in as that account only: one account at a time. Until then nothing changes."
     return
   fi
   machine=$(hostname | cut -d. -f1)
@@ -3781,23 +3939,27 @@ command_sign_in() {
   else
     echo "To connect ${TOOL} on $machine to Vyavasta, $(code_said)."
   fi
-  lasts_said=$(code_lasts_said)
   echo "${lasts_said:+$lasts_said }$(finish_said)"
 }
 
 # Signing out is kept to: nothing starts signing in again by itself, and nothing is sent, until the developer sends
-# “vyavasta sign in” (`signed_out_here`).
+# “vyavasta sign in” (`signed_out_here`). The connection this computer holds (on the server set now, or one set before)
+# is ended on its server, now, or when Vyavasta is next reached where it can't be just now (`keep_ending`).
 command_sign_out() {
   rm -f "$PENDING"
-  if [ -z "$TOKEN" ]; then
+  held=$(saved token)
+  if [ -z "$held" ]; then
     signed_out_here out
     echo "Not signed in to Vyavasta on this computer, and nothing starts signing in by itself until you send “vyavasta sign in”."
     return
   fi
-  api POST /signout "" "$QUICK_SECONDS"
+  who="$(person "$(saved email)") in $(person "$(saved workspace)")"
+  ended=1
+  end_connection "$(saved server)" "$held" || { keep_ending "$(saved server)" "$held"; ended=""; }
   signed_out_here out
   rm -f "$HOME_DIR/guide-emailed"
-  echo "Signed out of Vyavasta on this computer. Requests are no longer checked, and nothing is sent from this computer until you send “vyavasta sign in”."
+  echo "Signed out of Vyavasta on this computer, which was signed in as $who. Requests are no longer checked, and nothing is sent from this computer until you send “vyavasta sign in”."
+  [ -n "$ended" ] || echo "Vyavasta couldn’t be reached to end the connection just now, so it is ended the next time Vyavasta is reached."
 }
 
 command_on() {
@@ -3997,7 +4159,7 @@ command_status() {
   # (Found out of reach, or not answering, a moment ago: nothing is asked, as no hook asks anything then, and what
   # that means for the developer's messages is said instead.)
   if held_off; then
-    echo "Signed in as $(person "$(saved email)") in $(person "$(saved workspace)")."
+    echo "Signed in as $(person "$(saved email)") in $(person "$(saved workspace)"). $WAY_OUT"
     echo "$(away_now_said | sed 's/^t/T/'), so requests aren’t being checked. It is tried again in a minute, and “vyavasta check” tries it now."
     return
   fi
@@ -4005,7 +4167,7 @@ command_status() {
   case "$STATUS" in
     200)
       remember_me
-      echo "Signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")"), on $(one_line "$(json_text "$(answer machine)")")."
+      echo "Signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")"), on $(one_line "$(json_text "$(answer machine)")"). $WAY_OUT"
       repositories=$(answer repositories)
       if repository "$HERE" && [ -n "$REMOTE" ]; then
         name=$(repository_name "$REMOTE")
@@ -4031,7 +4193,7 @@ command_settings() {
   else echo "- Code sharing: off. Send “vyavasta share code on” to turn it on."; fi
   if [ "$(summaries)" = "on" ]; then echo "- Summaries: on. Send “vyavasta summaries off” to turn them off."
   else echo "- Summaries: off. Send “vyavasta summaries on” to turn them on."; fi
-  if [ -n "$TOKEN" ]; then echo "- Signed in as: $(person "$(saved email)") in $(person "$(saved workspace)"). Send “vyavasta sign out” to sign out."
+  if [ -n "$TOKEN" ]; then echo "- Signed in as: $(person "$(saved email)") in $(person "$(saved workspace)"). $WAY_OUT"
   else echo "- Signed in as: nobody. $WAY_IN"; fi
   echo "- Server: $SERVER. To use another, run “sh $TOLD_SELF use-server <address>” in a terminal, or set VYAVASTA_SERVER."
 }
@@ -4042,7 +4204,7 @@ command_settings() {
 command_help() {
   command_here
   finish_pairing
-  if [ -n "$TOKEN" ]; then signed="You’re signed in as $(person "$(saved email)") in $(person "$(saved workspace)")."
+  if [ -n "$TOKEN" ]; then signed="You’re signed in as $(person "$(saved email)") in $(person "$(saved workspace)"), one account at a time: signing in as another replaces it. $WAY_OUT"
   elif pending_waiting; then PAIR_AGAIN=1; signed="A sign-in is waiting: $(code_said)."
   else signed="You aren’t signed in yet."; fi
   if project_on; then here="It is on here."; else here="It is off here now."; fi
@@ -4058,7 +4220,7 @@ Your setup
 - “vyavasta status”: whether you’re signed in, and whether this project, code sharing and summaries are on.
 - “vyavasta check”: tests sign-in, the connection, this project and the plugin’s version, and says how to fix each problem.
 - “vyavasta off”: stop using Vyavasta in this project.
-- “vyavasta sign out”: disconnect this computer. Nothing signs in again by itself until you send “vyavasta sign in”.
+- “vyavasta sign out”: disconnect this computer, which ends its connection to Vyavasta. Nothing signs in again by itself until you send “vyavasta sign in”. A connection unused for $TOKEN_DAYS days ends by itself.
 See what is shared
 - “vyavasta settings”: every setting and how to change it.
 - “vyavasta open” / “vyavasta open settings”: open Vyavasta, or your settings there, in your browser.
@@ -4089,7 +4251,7 @@ guide_context() {
     codex) also="" ;;
     *) also=" In Claude Code most of these are also slash commands, such as /vyavasta:sign-in, /vyavasta:on and /vyavasta:help, which the developer can run instead." ;;
   esac
-  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. To tell a teammate something, the developer starts a message with “@” and the teammate’s name, then the words (“@priya the fix is pushed”), and the plugin sends it as written; “@team” and the words reach everyone else in the workspace, and several names at the start reach each of them; “vyavasta ask <name>: <question>” asks a teammate’s agent. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Teammates who read the same repository see which files the developer changes (with code sharing on, a short summary of the change, never the code), and when the developer and a teammate change the same file both of them are told once, as a heads-up that holds nothing. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
+  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Sign this computer out, which ends its connection: “vyavasta sign out”. A computer is signed in to one account at a time: “vyavasta sign in” while signed in starts a sign-in as another account, which replaces it once approved. Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether and as whom they are signed in, and whether it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. To tell a teammate something, the developer starts a message with “@” and the teammate’s name, then the words (“@priya the fix is pushed”), and the plugin sends it as written; “@team” and the words reach everyone else in the workspace, and several names at the start reach each of them; “vyavasta ask <name>: <question>” asks a teammate’s agent. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Teammates who read the same repository see which files the developer changes (with code sharing on, a short summary of the change, never the code), and when the developer and a teammate change the same file both of them are told once, as a heads-up that holds nothing. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
 }
 
 # Whether a message asks how to use the plugin itself: it is short (GUIDE_LONGEST), asks something (a question mark,
@@ -4927,6 +5089,9 @@ main() {
         # An edit's input carries what was written, which may be long: what is needed comes first.
         *) head -c 65536 "$TMP/full" > "$TMP/input" ;;
       esac
+      # The plugin removed and installed again starts signed out, before the hook does anything else (`start_again`):
+      # looked for in full at a session's start, and with one test of a file by the other hooks.
+      case "${2:-}" in session-start) start_again start ;; prompt|expansion|edited|stopped) start_again ;; esac
       case "${2:-}" in
         session-start) hook_session_start ;;
         prompt) hook_prompt ;;

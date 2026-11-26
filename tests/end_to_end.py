@@ -258,7 +258,17 @@ def main() -> int:
         expect("token=vyv-tool-" in credentials and oct((home / "credentials").stat().st_mode & 0o777) == "0o600",
                "the token is kept in a file only Sam can read")
         expect("vyv-tool-" not in welcome + again + status + json.dumps(said), "the token was never printed")
-        expect("Already signed in" in plugin("sign-in"), "“vyavasta sign in” then says it is signed in already")
+        # One account at a time: signing in again while signed in starts a sign-in that replaces the connection once it
+        # is approved, and the connection it replaces is ended on the server.
+        signing = plugin("sign-in")
+        found = re.search(r"code ([A-Z]{4}-[A-Z]{4})", signing)
+        expect(signing.startswith("This computer is signed in as sam@northwind.dev") and found is not None,
+               "“vyavasta sign in” while signed in says as whom, and gives a code to sign in as another account")
+        if found:
+            sam.ok("POST", "/plugin/pairings/approve", {"code": found.group(1), "approve": True})
+        replaced = plugin("status")
+        expect("connected as sam@northwind.dev" in replaced and len(sam.ok("GET", "/plugin/tokens")["tokens"]) == 1,
+               "once approved, the next command finishes it, and the computer has one connection on the server")
 
         step("Off until switched on: a message does nothing, and a question about the plugin only tells Claude how")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
