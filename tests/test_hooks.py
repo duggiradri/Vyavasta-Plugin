@@ -2386,7 +2386,7 @@ def test_under_codex_teammates_messages_that_dont_all_fit_come_as_many_as_fit_or
     signed_in(run, fake)
     switched_on(run, fake, repo)
     words = (LONG_WORDS * 6)[:560]
-    items = [{"n": n, "message_id": f"pm_{n}", "from": {"name": "Manoj Rao"}, "kind": "told", "text": words,
+    items = [{"n": n, "message_id": f"pm_{n}", "from": {"name": "Lena Ortiz"}, "kind": "told", "text": words,
               "answer": None, "at": "x", "at_said": "26 Nov, 09:00"} for n in range(1, 5)]
     said_to_claude = ("While the developer worked, their teammates sent them messages through Vyavasta, which they read "
                       "under their message’s line. There is no room for them here: when the developer asks about them, "
@@ -2394,7 +2394,7 @@ def test_under_codex_teammates_messages_that_dont_all_fit_come_as_many_as_fit_or
     said_to_codex = ("While the developer worked, their teammates sent them messages through Vyavasta. There is no room "
                      "for them here: when the developer asks about them, tell them to send “vyavasta inbox”.")
     for lines in (80, 100):
-        record = "\n".join(f"│ {n}. Manoj Rao said compose.yaml is locked for the production deployment."
+        record = "\n".join(f"│ {n}. Lena Ortiz said compose.yaml is locked for the production deployment."
                            for n in range(lines))
         fake.check = {**fake.check, "context": f"Vyavasta checked this request.\n{QUOTE_TOP}\n{record}\n{QUOTE_END}"}
         fake.extra["/check"] = {"inbox": {"items": items, "count": 4, "more": 0}}
@@ -5767,7 +5767,7 @@ def test_a_full_inbox_never_pushes_a_hooks_answer_past_what_the_tool_passes_on(r
     for told in ("sharing-said", "summaries-told"):
         for mark in run.home.glob(f"projects/*/{told}"):
             mark.unlink()
-    fake.inbox = [{"n": n, "message_id": f"pm_{n}", "from": {"name": "Manoj Rao"}, "kind": "told",
+    fake.inbox = [{"n": n, "message_id": f"pm_{n}", "from": {"name": "Lena Ortiz"}, "kind": "told",
                    "text": LONG_WORDS * 6, "answer": None, "at": "x", "at_said": "26 Nov, 09:00"} for n in range(1, 6)]
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="updated"), tool=tool))
     fits(started, tool)
@@ -7304,10 +7304,10 @@ def test_a_nested_repositorys_work_is_reported_with_its_own_path_and_remote(run,
     git(web, "commit", "-q", "-m", "Web")
     # A clone of another repository put inside this one, which ignores it, with a commit not pushed, a change and a
     # new file; and a submodule with a change of its own.
-    (repo / ".gitignore").write_text("test-clone/\n")
+    (repo / ".gitignore").write_text("inner-clone/\n")
     git(repo, "add", ".gitignore")
     git(repo, "commit", "-q", "-m", "Ignore the scratch clone")
-    clone = repo / "test-clone"
+    clone = repo / "inner-clone"
     git(tmp_path, "clone", "-q", str(web), str(clone))
     git(clone, "remote", "set-url", "origin", "https://dana:ghp_nested_secret@github.com/acme/web.git")
     (clone / "app.ts").write_text("export const signIn = 2\n")
@@ -7322,8 +7322,8 @@ def test_a_nested_repositorys_work_is_reported_with_its_own_path_and_remote(run,
     stop(run, repo)
     (work,) = fake.calls("/work")
     nested = {entry["path"]: entry for entry in work["body"]["git"]["nested"]}
-    assert set(nested) == {"test-clone", "vendored"}
-    inside = nested["test-clone"]
+    assert set(nested) == {"inner-clone", "vendored"}
+    inside = nested["inner-clone"]
     assert inside["remote"] == "https://github.com/acme/web.git" and inside["branch"] == "main"
     assert inside["upstream"] == "origin/main" and inside["head"] == head_of(clone)
     assert [commit["subject"] for commit in inside["unpushed"]] == ["WIP, don't merge: reworking sign-in"]
@@ -7331,14 +7331,14 @@ def test_a_nested_repositorys_work_is_reported_with_its_own_path_and_remote(run,
     assert [entry["path"] for entry in nested["vendored"]["uncommitted"]] == ["app.ts"]
     assert nested["vendored"]["unpushed"] == []
     # Neither is a file of this repository, nor is anything of either one's own address sent.
-    assert not any(entry["path"].startswith(("test-clone", "vendored/")) for entry in work["body"]["files"])
+    assert not any(entry["path"].startswith(("inner-clone", "vendored/")) for entry in work["body"]["files"])
     assert b"ghp_nested_secret" not in work["raw"] and b"dana" not in work["raw"]
     # A session working inside the clone, which is part of the project that is on, tells the project's work the same.
     fake.requests.clear()
     stop(run, clone, session="session-2")
     (work,) = fake.calls("/work")
     assert work["body"]["remote"] == "https://github.com/acme/api.git"
-    assert {entry["path"] for entry in work["body"]["git"]["nested"]} == {"test-clone", "vendored"}
+    assert {entry["path"] for entry in work["body"]["git"]["nested"]} == {"inner-clone", "vendored"}
 
 
 def test_key_files_and_ignored_files_are_never_sent_in_any_field(run, fake, repo):
@@ -7459,7 +7459,7 @@ def test_code_sharing_is_on_unless_turned_off_and_said_before_any_code_goes(run,
 
 # -- a nested repository's own changes, with code sharing on ----------------------------------------------------------
 #
-# A repository nested inside the project (a clone put inside it, as Manoj's test-clone was, or a submodule) is shared as
+# A repository nested inside the project (a clone put inside it, or a submodule) is shared as
 # the project's own is: its entry in `git.nested` carries its own change (its diffs and its files' latest copies), made
 # by the same rules, each copy once until its file changes, and within the facts' budget.
 
@@ -7486,7 +7486,7 @@ def nested_clone(repo: Path, tmp_path: Path, name: str) -> Path:
 
 def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_key_or_ignored_file(run, fake, repo,
                                                                                                    tmp_path):
-    """Manoj works inside test-clone: its changed and new files reach the check with their own diff and latest copy
+    """A developer works inside inner-clone: its changed and new files reach the check with their own diff and latest copy
     under its entry (its path and remote), each copy once however the report goes (with a check, after an edit, with
     a turn's end or with the check of a push the model runs) until the file changes again, and nothing of a key file
     or a file git ignores there ever leaves."""
@@ -7494,7 +7494,7 @@ def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_
 
     signed_in(run, fake)
     fake.combined = True
-    clone = nested_clone(repo, tmp_path, "test-clone")
+    clone = nested_clone(repo, tmp_path, "inner-clone")
     (clone / "app.ts").write_text("export const signIn = 2\n")
     git(clone, "commit", "-q", "-am", "WIP, don't merge: reworking sign-in")
     (clone / "app.ts").write_text("export const signIn = 3\n")
@@ -7503,10 +7503,10 @@ def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_
     (clone / "deploy.pem").write_text(f"{KEY}\n")
     (clone / "debug.log").write_text(f"{SECRET}\n")
     switched_on(run, fake, repo)
-    prompt(run, repo, "Change app.ts in test-clone")
+    prompt(run, repo, "Change app.ts in inner-clone")
     check = fake.calls("/check")[0]["body"]
     (inside,) = check["work"]["git"]["nested"]
-    assert inside["path"] == "test-clone" and inside["remote"] == "https://github.com/acme/test-clone.git"
+    assert inside["path"] == "inner-clone" and inside["remote"] == "https://github.com/acme/inner-clone.git"
     change = inside["change"]
     assert "+export const signIn = 3" in change["diff"] and "+export const banner = 'new'" in change["diff"]
     assert "+export const signIn = 2" in change["unpushed_diff"] and "banner" not in change["unpushed_diff"]
@@ -7521,7 +7521,7 @@ def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_
     # Taken with the check, nothing of it goes again: neither with the turn's end nor with the next message.
     taken = len(fake.requests)
     stop(run, repo, last_assistant_message="Done.")
-    prompt(run, repo, "Change app.ts in test-clone")
+    prompt(run, repo, "Change app.ts in inner-clone")
     reports = [call["body"].get("work") or call["body"] for call in fake.requests[taken:]
                if call["path"] in ("/check", "/turn", "/work")]
     assert len(reports) == 2 and not any("change" in entry for report in reports for entry in report["git"]["nested"])
@@ -7533,7 +7533,7 @@ def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_
     (inside,) = fake.calls("/work")[-1]["body"]["git"]["nested"]
     assert [copy["path"] for copy in inside["change"]["copies"]] == ["app.ts"]
     assert "+export const signIn = 4" in inside["change"]["diff"]
-    prompt(run, repo, "Change app.ts in test-clone")
+    prompt(run, repo, "Change app.ts in inner-clone")
     assert "change" not in fake.calls("/check")[-1]["body"]["work"]["git"]["nested"][0]
     (clone / "banner.ts").write_text("export const banner = 'changed'\n")
     stop(run, repo, last_assistant_message="Done.")
@@ -7543,7 +7543,7 @@ def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_
     before_run(run, repo, "git push origin main")
     (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
     assert [copy["path"] for copy in inside["change"]["copies"]] == ["app.ts"]
-    prompt(run, repo, "Change app.ts in test-clone")
+    prompt(run, repo, "Change app.ts in inner-clone")
     assert "change" not in fake.calls("/check")[-1]["body"]["work"]["git"]["nested"][0]
     # One the server didn't take goes with the next message; a report kept to go later carries the files' names only.
     (clone / "banner.ts").write_text("export const banner = 'changed again'\n")
@@ -7559,7 +7559,7 @@ def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_
     run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"))
     (kept,) = (run.home / "unsent").glob("*-work-session-1.json")
     held = json.loads(kept.read_text())["git"]["nested"]
-    assert [entry["path"] for entry in held] == ["test-clone"] and "change" not in held[0]
+    assert [entry["path"] for entry in held] == ["inner-clone"] and "change" not in held[0]
     # Nothing of a key file, or of a file git ignores, ever left, nor waits to.
     for raw in [call["raw"] for call in fake.requests] + [kept.read_bytes()]:
         for never in (KEY, SECRET, ".env.production", "deploy.pem", "debug.log"):
@@ -7596,18 +7596,18 @@ def test_a_nested_clone_with_a_rename_staged_still_tells_each_file_made_or_chang
     its facts still do."""
     signed_in(run, fake)
     fake.combined = True
-    clone = nested_clone(repo, tmp_path, "test-clone")
+    clone = nested_clone(repo, tmp_path, "inner-clone")
     (clone / "zeta.ts").write_text("export const zeta = 1\n")
     git(clone, "add", "zeta.ts")
     git(clone, "commit", "-q", "-m", "Add zeta")
     git(clone, "mv", "app.ts", "apps.ts")
     switched_on(run, fake, repo)
-    prompt(run, repo, "Rename app.ts in test-clone")
+    prompt(run, repo, "Rename app.ts in inner-clone")
     (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
     assert [entry["path"] for entry in inside["uncommitted"]] == ["apps.ts"] and "change" in inside
     (clone / "zeta.ts").write_text("export const zeta = 2\n")
     (clone / "banner.ts").write_text("export const banner = 'new'\n")
-    prompt(run, repo, "Change zeta.ts in test-clone")
+    prompt(run, repo, "Change zeta.ts in inner-clone")
     (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
     assert sorted(entry["path"] for entry in inside["uncommitted"]) == ["apps.ts", "banner.ts", "zeta.ts"]
     assert "+export const zeta = 2" in inside["change"]["diff"]
@@ -7615,7 +7615,7 @@ def test_a_nested_clone_with_a_rename_staged_still_tells_each_file_made_or_chang
     assert sorted(copy["path"] for copy in inside["change"]["copies"]) == ["banner.ts", "zeta.ts"]
     run("share-code", "off", cwd=repo)
     (clone / "notes.md").write_text("Deploy at 4pm.\n")
-    prompt(run, repo, "Change notes.md in test-clone")
+    prompt(run, repo, "Change notes.md in inner-clone")
     (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
     assert "notes.md" in [entry["path"] for entry in inside["uncommitted"]] and "change" not in inside
 
@@ -7627,7 +7627,7 @@ def test_a_key_file_renamed_in_a_commit_the_facts_dont_list_still_never_leaves(r
     diff, nor as a copy once it is edited again."""
     signed_in(run, fake)
     fake.combined = True
-    clone = nested_clone(repo, tmp_path, "test-clone")
+    clone = nested_clone(repo, tmp_path, "inner-clone")
     for folder in (repo, clone):
         (folder / ".env.production").write_text(f"TOKEN={KEY}\n")
         git(folder, "add", ".env.production")
@@ -7660,7 +7660,7 @@ def test_a_link_to_a_repository_elsewhere_is_never_read_as_one_inside_the_projec
     followed, even to a clone inside the project, which is read once, by its own path."""
     signed_in(run, fake)
     fake.combined = True
-    clone = nested_clone(repo, tmp_path, "test-clone")
+    clone = nested_clone(repo, tmp_path, "inner-clone")
     (clone / "app.ts").write_text("export const signIn = 2\n")
     outside = tmp_path / "elsewhere"
     notes = outside / "notes"
@@ -7678,9 +7678,9 @@ def test_a_link_to_a_repository_elsewhere_is_never_read_as_one_inside_the_projec
     (repo / ".gitmodules").write_text('[submodule "notes"]\n\tpath = elsewhere/notes\n'
                                       '\turl = https://github.com/sam/notes.git\n')
     switched_on(run, fake, repo)
-    prompt(run, repo, "Change app.ts in test-clone")
+    prompt(run, repo, "Change app.ts in inner-clone")
     nested = fake.calls("/check")[0]["body"]["work"]["git"]["nested"]
-    assert [entry["path"] for entry in nested] == ["test-clone"] and "change" in nested[0]
+    assert [entry["path"] for entry in nested] == ["inner-clone"] and "change" in nested[0]
     assert SECRET.encode() not in b"".join(call["raw"] for call in fake.requests)
 
 
