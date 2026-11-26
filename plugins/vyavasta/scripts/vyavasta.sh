@@ -48,6 +48,15 @@ git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 VERSION="0.6.0"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
+# What goes past a hold on something done besides a change: a push, a merge, a deploy, a command the tool runs. Either
+# phrase goes past either hold; the server says which to send. A push the tool's model runs within GO_AHEAD_FOR seconds
+# of going past a hold on one, or of a check that cleared the message asking for it with the same commit, isn't checked
+# again.
+GO_AHEAD="Go ahead anyway"
+GO_AHEAD_FOR=900
+# What the tool's model is told when a message couldn't be checked (the server busy, slow, failing or out of reach):
+# to go on with work on the computer, and to ask the developer before anything leaves it.
+ASK_FIRST="Vyavasta couldn’t check this message against the team’s record just now. Go on with work on this computer, but before you push, merge, release or deploy anything, or do anything else that leaves this computer, ask the developer whether to go ahead, and wait for their answer."
 # Which coding tool runs this script: its hooks file says so (Codex's sets VYAVASTA_TOOL=codex). The tool's own name,
 # what its model is called, and how its developer gives this plugin a command.
 case "${VYAVASTA_TOOL:-}" in
@@ -140,6 +149,14 @@ if [ "${1:-}" = "hook" ] && [ "${2:-}" = "edit-check" ]; then
     [ "$CLIENT" = "codex" ] || rm -f "$SESSIONS/$id/overlap-context"
   fi
   exit 0
+fi
+
+# The check before a command the tool's model runs (PreToolUse, on its shell tool): only a push, or GitHub's merge of a
+# pull request, is checked (`hook_before_run`). Any other command goes on at once: its input is looked at for either
+# word before anything else is set up.
+if [ "${1:-}" = "hook" ] && [ "${2:-}" = "before-run" ]; then
+  RUN_INPUT=$(head -c 65536)
+  case "$RUN_INPUT" in *push*|*merge*) ;; *) exit 0 ;; esac
 fi
 
 # The copy of this script that the tool's model is told to run, one for each tool, in the settings folder: made at a
@@ -937,9 +954,10 @@ plain_words() {
 }
 
 # The phrases that answer the plugin's own questions, never kept for the developer's summary (the README lists the
-# same): “Plan it anyway”, “continue”, “continue anyway”, “go on” and “stop”. $1 is the message's plain words.
+# same): “Plan it anyway”, “Go ahead anyway”, “continue”, “continue anyway”, “go on” and “stop”. $1 is the message's
+# plain words.
 never_kept() {
-  case "$1" in "plan it anyway"|continue|"continue anyway"|"go on"|stop) return 0 ;; esac
+  case "$1" in "plan it anyway"|"go ahead anyway"|continue|"continue anyway"|"go on"|stop) return 0 ;; esac
   return 1
 }
 
@@ -2745,9 +2763,13 @@ hook_prompt() {
     return
   fi
   words=$(plain_words "$text")
-  if [ "$words" = "$(plain_words "$PHRASE")" ] && [ -s "$dir/held" ]; then
+  if { [ "$words" = "$(plain_words "$PHRASE")" ] || [ "$words" = "$(plain_words "$GO_AHEAD")" ]; } && [ -s "$dir/held" ]; then
     # The developer chose to go on with the request that was held: the model is shown it, with what stood in the way,
-    # and the details of teammates changing the same files that came with it (the developer read their line then).
+    # and the details of teammates changing the same files that came with it (the developer read their line then). A
+    # hold on something done besides a change (a push the tool's model was about to run, or a message that asked for
+    # one) lets that push run without being held again, for a while.
+    [ -f "$dir/held-kind" ] && [ "$(cat "$dir/held-kind")" = "action" ] && now > "$dir/go-ahead"
+    rm -f "$dir/held-kind"
     going=$(cat "$dir/held")
     if [ -s "$dir/overlap-context" ]; then
       going=$(json_quote "$(fitted "$(json_text "$going")
@@ -2795,7 +2817,7 @@ The developer was told that something their team has said stands against the cha
         CONFLICT_CONTEXT="$facts" ;;
     esac
   fi
-  rm -f "$dir/held"
+  rm -f "$dir/held" "$dir/held-kind"
   handle_message "$prompt" "$dir"
 }
 
@@ -2942,6 +2964,7 @@ handle_message() {
   if repository "$HERE"; then :; else ROOT=""; REMOTE=""; BRANCH=""; fi
   if held_off; then
     OUT_LINE=$(nothing_line "$AWAY_SAID" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
+    OUT_CONTEXT="$ASK_FIRST"
     emit; return
   fi
   NFILES=0; shared=""; consent=""
@@ -2974,6 +2997,10 @@ handle_message() {
   pick_ride
   api POST /check "$TMP/check" "$CHECK_SECONDS"
   if [ -n "$shared" ] && [ "$STATUS" = "200" ]; then cksum < "$TMP/change" > "$dir/change-sum"; fi
+  # Whatever kept the message from being checked (a server busy, slow, failing or out of reach), the tool's model is
+  # told to ask the developer before anything leaves the computer (`ASK_FIRST`); the developer's line says it wasn't
+  # checked.
+  case "$STATUS" in 200|401) ;; *) OUT_CONTEXT="$ASK_FIRST" ;; esac
   case "$STATUS" in
     200) ;;
     401)
@@ -3016,6 +3043,7 @@ handle_message() {
   # told as checked.
   if [ -z "$(json_text "$(answer verdict)")" ]; then
     OUT_LINE=$(line "your message" "" "Vyavasta’s answer couldn’t be read, so your message wasn’t checked. ${AGENT} works as usual.")
+    OUT_CONTEXT="$ASK_FIRST"
     emit; return
   fi
   LINE_MARK="$dir/lined"
@@ -3168,6 +3196,8 @@ handle_message() {
       # (Only a string of the server's is kept, written again as one: nothing else goes into what the tool reads.)
       held=$(json_get "$TMP/anyway" context)
       case "$held" in \"*) json_quote "$(json_text "$held")" > "$dir/held" ;; *) rm -f "$dir/held" ;; esac
+      # (Whether it holds something done besides a change: going past it then lets the push it asks for run.)
+      json_text "$(answer kind)" | tr -cd 'a-z' > "$dir/held-kind"
       # The notice below says what stands, so the line only says which kind of hold it is.
       if [ "$verdict" = "held" ]; then held_said="On hold; see below."
       else held_said="On hold: what your team has said doesn’t settle this request; see below."; fi
@@ -3177,6 +3207,11 @@ handle_message() {
     fi
     OUT_LINE=$(line "$sent" "$not_sent" "$outcome$consent" "$kept_said")
     OUT_CONTEXT="$context"
+    # Something done besides a change, cleared: the push it asks for, of this very commit, isn't checked again when the
+    # tool's model runs it (`hook_before_run`).
+    if [ "$verdict" = "clear" ] && [ "$(json_text "$(answer kind)")" = "action" ] && [ -n "$ROOT" ]; then
+      printf '%s %s\n' "$(now)" "$(git_read -C "$ROOT" rev-parse -q --verify HEAD)" > "$dir/action-clear"
+    fi
   fi
   [ -n "$CONFLICT_CONTEXT" ] && OUT_CONTEXT="$CONFLICT_CONTEXT${OUT_CONTEXT:+
 
@@ -3295,6 +3330,122 @@ $OUT_CONTEXT}"
     [ -z "$overlap_shown" ] || rm -f "$OVERLAP_DIR/overlap-line" "$OVERLAP_DIR/overlap-edit"
     [ -z "$overlap_given" ] || rm -f "$OVERLAP_DIR/overlap-context"
   fi
+}
+
+# Whether a command the tool's model is about to run pushes to a remote or merges a pull request on GitHub: in any of its
+# parts (split where the shell starts another command), the word git and, after git's own options, push; or gh, pr
+# and merge. It reads the command's own words, never the developer's message. $1 is the command.
+pushes() {
+  printf '%s\n' "$1" | tr ';&|()`' '\n\n\n\n\n\n' | awk '
+    {
+      n = split($0, w, /[ \t]+/)
+      for (i = 1; i <= n; i++) { gsub(/^["\047]+|["\047]+$/, "", w[i]); word = w[i]; sub(/.*\//, "", word); w[i] = word }
+      for (i = 1; i <= n; i++) {
+        if (w[i] == "git") {
+          j = i + 1
+          while (j <= n && w[j] ~ /^-/) { if (w[j] == "-C" || w[j] == "-c" || w[j] == "--git-dir" || w[j] == "--work-tree" || w[j] == "--namespace") j++; j++ }
+          if (j <= n && w[j] == "push") found = 1
+        }
+        if (w[i] == "gh" && w[i + 1] == "pr" && w[i + 2] == "merge") found = 1
+      }
+    }
+    END { exit found ? 0 : 1 }'
+}
+
+# What the hook before a command prints to stop it: a refusal with its reason, which the tool's model reads ($1), and in
+# Claude Code a line the developer reads ($2). Codex takes no more from this hook than a refusal and its reason.
+refuse_run() {
+  if [ "$CLIENT" = "codex" ]; then
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' \
+      "$(json_quote "$1")"
+  else
+    printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' \
+      "$(json_quote "$2")" "$(json_quote "$1")"
+  fi
+}
+
+# A push that couldn't be checked ($1 says why, as a clause): refused, and the tool's model told to ask the developer.
+refuse_unchecked() {
+  refuse_run "Vyavasta couldn’t check this command against the team’s record ($1), so it didn’t run. Ask the developer whether to run it anyway. If they choose to, they send “$GO_AHEAD”, and then you run it again." \
+    "Vyavasta · this push wasn’t checked ($1), so it didn’t run. Send “$GO_AHEAD” to run it without the check."
+}
+
+# The check before a push the tool's model is about to run (PreToolUse, on its shell tool), however the developer asked
+# for it: “push this”, “yes, go ahead”, or not at all. The command is put to the check as something done
+# (``command``), with the work report that would go with a message, and the server answers as for a message. Held: the
+# command is refused, the tool's model is told what stands and how the developer goes past it, and the developer
+# reads the same; going past it lets the push run (`hook_prompt`). Not checked (the server busy, slow, failing or out of
+# reach): refused as well, and the tool's model is told to ask the developer. Cleared, or nothing Vyavasta reads here:
+# nothing is said, and the command runs as the tool's own permissions allow. A push the developer chose to go on with,
+# or that the check of their message cleared with the same commit, within GO_AHEAD_FOR seconds, runs unchecked.
+hook_before_run() {
+  ran=$(field "$(json_get "$TMP/input" tool_input)" command)
+  case "$ran" in
+    \[*) ran=$(json_rows "$ran" | while IFS= read -r one; do json_text "$one"; printf ' '; done) ;;
+    *) ran=$(json_text "$ran") ;;
+  esac
+  pushes "$ran" || return 0
+  HERE=$(input_folder)
+  project_of "$HERE"
+  project_on || return 0
+  { [ -n "$TOKEN" ] && [ -z "$NOCURL" ]; } || return 0
+  repository "$HERE" || return 0
+  [ -n "$REMOTE" ] || return 0
+  dir=$(session_dir "$(json_text "$(json_get "$TMP/input" session_id)")")
+  SESSION=$(basename "$dir")
+  at=$(now)
+  went=""
+  [ -f "$dir/go-ahead" ] && went=$(tr -cd '0-9' < "$dir/go-ahead")
+  [ -n "$went" ] && [ $(( at - went )) -lt "$GO_AHEAD_FOR" ] && return 0
+  if [ -f "$dir/action-clear" ]; then
+    cleared=$(sed -n '1p' "$dir/action-clear")
+    cleared_at=$(printf '%s' "${cleared%% *}" | tr -cd '0-9')
+    head=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
+    [ -n "$cleared_at" ] && [ -n "$head" ] && [ "${cleared#* }" = "$head" ] && \
+      [ $(( at - cleared_at )) -lt "$GO_AHEAD_FOR" ] && return 0
+  fi
+  if held_off; then refuse_unchecked "$AWAY_SAID"; return; fi
+  NFILES=0; shared=""; carried=""
+  changed_files
+  if [ "$(sharing)" = "on" ]; then build_change; shared=1; fi
+  if [ "$NFILES" -gt 0 ] && work_report "$dir" bare; then carried=1; fi
+  {
+    printf '{"request_id":"%s","request":"","command":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":false' \
+      "$(new_request_id)" "$(json_quote "$ran")" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" \
+      "$(json_quote "$SESSION")" "$CLIENT"
+    if [ -n "$shared" ]; then printf ',"change":'; cat "$TMP/change"; fi
+    if [ -n "$carried" ]; then printf ',"work":'; cat "$TMP/report"; fi
+    printf '}'
+  } > "$TMP/check"
+  api POST /check "$TMP/check" "$CHECK_SECONDS"
+  case "$STATUS" in
+    200) ;;
+    # (A connection that ended is the developer's own to sign in again: their message's line says so.)
+    401) return 0 ;;
+    429) refuse_unchecked "$(busy_said Vyavasta)"; return ;;
+    000) if [ -n "$SLOW" ]; then refuse_unchecked "Vyavasta took too long to answer"
+         else refuse_unchecked "Vyavasta’s server can’t be reached"; fi
+         return ;;
+    *) refuse_unchecked "Vyavasta’s server couldn’t check it just now"; return ;;
+  esac
+  verdict=$(json_text "$(answer verdict)")
+  notice=$(json_text "$(answer notice)")
+  if [ "$(answer hold)" = "true" ]; then
+    held=$(field "$(answer anyway)" context)
+    case "$held" in \"*) json_quote "$(json_text "$held")" > "$dir/held"; echo action > "$dir/held-kind" ;; esac
+    refuse_run "$notice
+
+$(json_text "$(answer context)")
+
+Tell the developer what stands in the way, in a few words of your own. Don’t run this command again unless they choose to go ahead anyway." \
+      "Vyavasta · $notice"
+    return
+  fi
+  case "$verdict" in
+    unavailable) refuse_unchecked "$(printf '%s' "$notice" | sed -e 's/^Not checked: //' -e 's/\. .*$//')" ;;
+    "") refuse_unchecked "Vyavasta’s answer couldn’t be read" ;;
+  esac
+  return 0
 }
 
 # Tells the server whether code sharing is on for this project's repository. Quiet; sets SHARING_NOTICE.
@@ -4805,6 +4956,8 @@ main() {
       cat > "$TMP/full"
       case "${2:-}" in
         prompt|session-start|expansion) mv "$TMP/full" "$TMP/input" ;;
+        # (Read before anything was set up, by the look for a push at the script's start.)
+        before-run) printf '%s' "${RUN_INPUT:-}" > "$TMP/input" ;;
         # The Stop hook's input carries the tool's last reply, which may be long: what is needed of it, and the
         # fields before it, come first.
         stopped) head -c 131072 "$TMP/full" > "$TMP/input" ;;
@@ -4815,6 +4968,7 @@ main() {
         session-start) hook_session_start ;;
         prompt) hook_prompt ;;
         expansion) hook_expansion ;;
+        before-run) hook_before_run ;;
         edited|stopped) hook_report "$2" ;;
       esac
       ;;

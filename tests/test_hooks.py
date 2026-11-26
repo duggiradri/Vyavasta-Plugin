@@ -1882,14 +1882,18 @@ def test_a_held_request_under_codex_is_blocked_in_the_form_codex_reads(run, fake
 
 def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
     hooks = json.loads((PLUGIN / "hooks" / "codex.json").read_text())["hooks"]
-    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"}
+    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
     for groups in hooks.values():
         for group in groups:
             for hook in group["hooks"]:
                 assert hook["type"] == "command"
                 # (Through env, which every login shell runs, where some can't give a command a variable before it.)
                 assert hook["command"].startswith('env VYAVASTA_TOOL=codex sh "${PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
-                assert hook["command"].rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check"}
+                assert hook["command"].rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check",
+                                                            "before-run"}
+    # The check before a push runs before each command of Codex's shell tool, in the foreground: it can stop one.
+    ((before,),) = [group["hooks"] for group in hooks["PreToolUse"] if group["matcher"] == "Bash"]
+    assert not before.get("async") and before["command"].endswith("before-run")
     # Only the report after an edit may run in the background: a check that runs there could hold nothing.
     assert [hook.get("async", False) for hook in hooks["UserPromptSubmit"][0]["hooks"]] == [False]
     # The check after an edit tells Codex's model of a conflict at once, so it runs in the foreground, quickly; the end
@@ -1922,13 +1926,15 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
 def test_every_hook_runs_this_script_with_a_command_it_knows():
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())["hooks"]
     commands = [hook["command"] for groups in hooks.values() for group in groups for hook in group["hooks"]]
-    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "Stop", "StopFailure"}
+    assert set(hooks) == {"SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PostToolUse", "Stop",
+                          "StopFailure"}
     # A turn that ended in an error reports its work as one that ended well does; both in the foreground, so that
     # what they send is sent when “claude -p” exits right after (it ends a hook still running in the background).
     assert hooks["StopFailure"] == hooks["Stop"] and not hooks["Stop"][0]["hooks"][0].get("async")
     for command in commands:
         assert command.startswith('sh "${CLAUDE_PLUGIN_ROOT}/scripts/vyavasta.sh" hook ')
-        assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check", "expansion"}
+        assert command.rsplit(" ", 1)[1] in {"session-start", "prompt", "edited", "stopped", "edit-check", "expansion",
+                                             "before-run"}
     # Claude Code shows a word while the hooks that may wait on Vyavasta run, and runs the slash-command hook only
     # for the plugin's own commands.
     assert hooks["SessionStart"][0]["hooks"][0]["statusMessage"] == "Connecting to Vyavasta"
@@ -2553,7 +2559,7 @@ def test_the_script_and_the_readme_list_the_same_phrases_never_kept():
     line = next(line for line in readme.splitlines() if line.startswith("- **Never kept:**"))
     listed = line.split("questions:", 1)[1].split("(", 1)[0]
     in_readme = [phrase.lower() for phrase in __import__("re").findall(r"`([^`]+)`", listed)]
-    assert in_script == in_readme == ["plan it anyway", "continue", "continue anyway", "go on", "stop"]
+    assert in_script == in_readme == ["plan it anyway", "go ahead anyway", "continue", "continue anyway", "go on", "stop"]
 
 
 def test_the_end_of_a_turn_waits_at_most_four_seconds_for_the_reply_to_be_taken(run, fake, repo):
@@ -6507,3 +6513,95 @@ def test_a_turns_end_says_a_conflict_and_waiting_messages_in_one_line(run, fake,
     assert said.startswith(CONFLICT["notice"]) and "Send “continue” to go on" in said
     assert said.endswith("\n\nVyavasta: teammates sent you 3 messages. They come with your next message, or send "
                          "“vyavasta inbox” to read them now.")
+
+
+# -- every action checked: a push held, gone past, and checked as the tool runs it ----------------------------------
+
+ASK_FIRST = ("Vyavasta couldn’t check this message against the team’s record just now. Go on with work on this computer, "
+             "but before you push, merge, release or deploy anything, or do anything else that leaves this computer, ask "
+             "the developer whether to go ahead, and wait for their answer.")
+HELD_PUSH = {"verdict": "held", "hold": True, "kind": "action", "repository": "acme/api",
+             "notice": "On hold: something your team has said stands against this, so it wasn’t sent to Claude.\n"
+                       "• Priya Raman’s email: compose.yaml is locked for the production deployment.\n"
+                       "To go ahead anyway, send “Go ahead anyway”.",
+             "context": "Vyavasta checked this request: Priya’s lock stands.",
+             "anyway": {"phrase": "Go ahead anyway",
+                        "context": "The developer chose to go ahead anyway. Their request: “push this change”"}}
+
+
+def before_run(run, repo: Path, command, tool: str | None = None) -> dict:
+    """The hook before a command of the tool's shell, as each tool sends it."""
+    return output(run("hook", "before-run", stdin=event("PreToolUse", repo, tool_name="Bash",
+                                                        tool_input={"command": command, "description": "Push it"}),
+                      cwd=repo, tool=tool))
+
+
+def test_a_held_push_is_gone_past_with_its_own_words_and_the_push_then_runs_unheld(run, fake, repo):
+    """“push this change” is held where the team locked a file it carries; “Go ahead anyway” gives the model the
+    request with what stood in the way, and the push the model then runs is not held again."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = dict(HELD_PUSH)
+    held = prompt(run, repo, "push this change")
+    assert held["decision"] == "block" and held["reason"] == HELD_PUSH["notice"]
+    going = prompt(run, repo, "Go ahead anyway!")
+    assert going["hookSpecificOutput"]["additionalContext"] == HELD_PUSH["anyway"]["context"]
+    assert "going ahead" in going["systemMessage"] and len(fake.calls("/check")) == 1
+    # The push the developer chose to go on with runs, with no second check.
+    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 1
+
+
+def test_a_push_the_tool_runs_is_checked_however_it_was_asked_for_and_nothing_else_is(run, fake, repo):
+    """The model pushes after “yes, go ahead”, or by itself: the push is checked as it runs, with the command's own
+    words. Held, it doesn't run, the model is told what stands and the developer reads it; any other command runs
+    with no call at all."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    for command in ("git status", "npm test", "git commit -m 'fix the push button'", "echo merged"):
+        assert before_run(run, repo, command) == {}, command
+    assert fake.requests == []
+    fake.check = {**HELD_PUSH, "notice": HELD_PUSH["notice"].replace("it wasn’t sent to Claude", "Claude didn’t run it")}
+    stopped = before_run(run, repo, "cd api && git -C . push --force-with-lease origin main")
+    decided = stopped["hookSpecificOutput"]
+    assert decided["hookEventName"] == "PreToolUse" and decided["permissionDecision"] == "deny"
+    assert decided["permissionDecisionReason"].startswith(fake.check["notice"])
+    assert "Priya’s lock stands." in decided["permissionDecisionReason"]
+    assert stopped["systemMessage"] == "Vyavasta · " + fake.check["notice"]
+    (sent,) = fake.calls("/check")
+    assert sent["body"]["command"] == "cd api && git -C . push --force-with-lease origin main"
+    assert sent["body"]["request"] == "" and sent["body"]["keep"] is False and "ask_now" not in sent["body"]
+    # Codex takes only the refusal and its reason; and GitHub's merge of a pull request is checked too.
+    codex = before_run(run, repo, ["bash", "-lc", "gh pr merge 12 --squash"], tool="codex")
+    assert set(codex) == {"hookSpecificOutput"} and codex["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert fake.calls("/check")[-1]["body"]["command"] == "bash -lc gh pr merge 12 --squash "
+    # Gone past by the developer, the push runs.
+    assert "going ahead" in prompt(run, repo, "go ahead anyway")["systemMessage"]
+    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 2
+
+
+def test_what_could_not_be_checked_has_the_model_ask_the_developer_before_anything_leaves_the_computer(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.status["/check"] = 503
+    said = prompt(run, repo, "push this change")
+    assert "so it wasn’t checked" in said["systemMessage"]
+    assert said["hookSpecificOutput"]["additionalContext"] == ASK_FIRST
+    refused = before_run(run, repo, "git push")
+    assert refused["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert refused["hookSpecificOutput"]["permissionDecisionReason"].startswith(
+        "Vyavasta couldn’t check this command against the team’s record (Vyavasta’s server couldn’t check it just "
+        "now), so it didn’t run. Ask the developer whether to run it anyway.")
+    assert refused["systemMessage"] == ("Vyavasta · this push wasn’t checked (Vyavasta’s server couldn’t check it just "
+                                        "now), so it didn’t run. Send “Go ahead anyway” to run it without the check.")
+
+
+def test_a_push_its_message_cleared_runs_without_a_second_check_until_it_carries_another_commit(run, fake, repo):
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = {"verdict": "clear", "hold": False, "kind": "action", "repository": "acme/api",
+                  "notice": "Checked against your team’s record: nothing stands against this.", "context": "Clear."}
+    prompt(run, repo, "push this")
+    assert before_run(run, repo, "git push") == {} and len(fake.calls("/check")) == 1
+    (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    git(repo, "commit", "-qam", "Swap the order")
+    assert before_run(run, repo, "git push") == {} and len(fake.calls("/check")) == 2
