@@ -2102,7 +2102,9 @@ repo_facts() {
 # one to a line, and NESTED says how many. Each is read as this one is, by git alone and with nothing its own settings
 # could run, and its own ignored and key files are never named. At most NESTED_MOST are looked at, in their paths'
 # order (submodules from .gitmodules, the folders git lists as repositories it doesn't go into, and folders right inside
-# this one that are repositories); one with no remote, or with nothing changed and nothing unpushed, is left out.
+# this one that are repositories); one with no remote, or with nothing changed and nothing unpushed, is left out. Only
+# a folder the file system itself has inside this one counts: a symbolic link, or a folder reached through one, may
+# lead to any repository on the computer, and is never read, wherever its path came from.
 nested_facts() {
   NESTED=0
   true > "$TMP/nested"; true > "$TMP/nested-list"
@@ -2119,9 +2121,13 @@ nested_facts() {
     for nested_dir in "$ROOT"/*/; do [ -e "${nested_dir}.git" ] && printf '%s\n' "${nested_dir#"$ROOT"/}"; done
   } | awk '{ sub(/\/+$/, "") } $0 != "" && $0 !~ /^\// && $0 !~ /(^|\/)\.\.(\/|$)/ && !seen[$0]++' | sort > "$TMP/nested-paths"
   nested_looked=0
+  # (Each path as the file system has it, with every link in it followed, to be compared with this folder's own.)
+  nested_here=$(cd -P "$ROOT" && pwd -P)
+  [ -n "$nested_here" ] || return 0
   while IFS= read -r nested_path; do
     [ "$nested_looked" -lt "$NESTED_MOST" ] || break
-    [ -e "$ROOT/$nested_path/.git" ] || continue
+    [ -e "$ROOT/$nested_path/.git" ] && [ ! -L "$ROOT/$nested_path" ] || continue
+    case "$(cd -P "$ROOT/$nested_path" && pwd -P)" in "$nested_here"/?*) ;; *) continue ;; esac
     nested_looked=$((nested_looked + 1))
     nested_one "$nested_path" "$nested_looked" > "$TMP/nested.$nested_looked.json"
     [ -s "$TMP/nested.$nested_looked.json" ] || continue
@@ -2184,7 +2190,7 @@ nested_one() (
       /^# branch\.ab / { split($0, p, " "); ahead = substr(p[3], 2) + 0 }
       $0 != "" && substr($0, 1, 1) != "#" { work = 1 }
       /^1 / { print past($0, 8) > NAMED }
-      /^2 / { p = past($0, 9); sub(/\t.*/, "", p); print p > NAMED }
+      /^2 / { name = past($0, 9); sub(/\t.*/, "", name); print name > NAMED }
       /^u / { print past($0, 10) > NAMED }
       /^\? / { print substr($0, 3) > NAMED }
       END { print (work ? "work" : (up && ahead == 0) ? "clean" : "look") }')
@@ -2370,6 +2376,14 @@ build_change() {
   fi
   gitx -c core.quotePath=false -c core.bigFileThreshold="$BIG_FILE" diff $DIFF_OPTIONS --no-color \
     --src-prefix=a/ --dst-prefix=b/ --submodule=short "$ch_base" -- . "$OWN_SETTINGS" > "$TMP/change-diff"
+  # The renames made by every commit since the base, by name only, however many commits there are: the diffs cover
+  # them all, while the facts list only the newest that no branch on GitHub has. A key file renamed in any of them is
+  # still a key file under its new name (`key_renames`).
+  true > "$TMP/base-renames"
+  if [ -n "$HEAD_SHA" ] && [ "$ch_base" != "$HEAD_SHA" ]; then
+    git_read -C "$ROOT" -c core.bigFileThreshold="$BIG_FILE" log -z --format= --raw $DIFF_OPTIONS --diff-filter=RC \
+      "$ch_base..HEAD" -- | tr '\000' '\001' > "$TMP/base-renames"
+  fi
   key_renames
   safe_diff "$TMP/left-untracked" "$TMP/change-raw" "$TMP/change-diff" change
   clean_utf8 "$TMP/change-kept" "$TMP/change-clean"
@@ -2410,18 +2424,23 @@ build_change() {
 }
 
 # The files whose text is a key file's by a rename, under whatever name: written to $TMP/secret-names, one to a line.
-# A rename made in a commit not pushed, or in the working tree since, joins its two names: where either is a key
-# file's (by its name, or by such a rename of its own), so is the other. Against a base older than such a commit a
-# renamed file looks new under its new name, and the commits' own diff shows the name a later rename gave up: either
-# way it is a key file for `safe_diff` and `build_copies`.
+# A rename made in a commit not pushed (those the facts list, $TMP/commit-renames), in any commit since the base
+# (`build_change`, $TMP/base-renames), or in the working tree since, joins its two names: where either is a key file's
+# (by its name, or by such a rename of its own), so is the other. Against a base older than such a commit a renamed
+# file looks new under its new name, and the commits' own diff shows the name a later rename gave up: either way it is
+# a key file for `safe_diff` and `build_copies`.
 key_renames() {
   [ -f "$TMP/commit-renames" ] || true > "$TMP/commit-renames"
+  [ -f "$TMP/base-renames" ] || true > "$TMP/base-renames"
   awk "$CLASSIFY$SCAN_AWK"'
     BEGIN {
       while ((getline from < ARGV[1]) > 0 && (getline to < ARGV[1]) > 0) { pair++; was[pair] = from; now[pair] = to }
       close(ARGV[1]); RS = "\001"; n = 0; sstate = 0
     }
+    FNR == 1 { sstate = 0 }
     FILENAME == ARGV[2] { scan_record($0) }
+    # (git may part the records of one commit from those of the next by a line break, or by an empty record.)
+    FILENAME == ARGV[3] { r = $0; if (sstate == 0) { sub(/^\n/, "", r); if (r == "") next }; scan_record(r) }
     END {
       for (e = 1; e <= n; e++)
         if ((st[e] == "R" || st[e] == "C") && !index(old[e], "\n") && !index(new[e], "\n")) { pair++; was[pair] = old[e]; now[pair] = new[e] }
@@ -2434,7 +2453,7 @@ key_renames() {
         }
       }
       for (path in key) print path
-    }' "$TMP/commit-renames" "$TMP/scan" > "$TMP/secret-names"
+    }' "$TMP/commit-renames" "$TMP/scan" "$TMP/base-renames" > "$TMP/secret-names"
 }
 
 # The change's fields but its copies, in $TMP/change-head (without the object's closing brace), as `build_change` left

@@ -7128,6 +7128,100 @@ def test_past_the_facts_budget_a_nested_change_waits_and_no_nested_fact_is_cut(r
     assert len(json.dumps(facts, ensure_ascii=False).encode()) <= 800_000
 
 
+def test_a_nested_clone_with_a_rename_staged_still_tells_each_file_made_or_changed_after_it(run, fake, repo, tmp_path):
+    """git's account of a nested clone that has a rename staged (as `git mv` leaves it) is read to its end: a file made
+    or changed after the first message reaches the next one with its facts and its change, and with code sharing off
+    its facts still do."""
+    signed_in(run, fake)
+    fake.combined = True
+    clone = nested_clone(repo, tmp_path, "test-clone")
+    (clone / "zeta.ts").write_text("export const zeta = 1\n")
+    git(clone, "add", "zeta.ts")
+    git(clone, "commit", "-q", "-m", "Add zeta")
+    git(clone, "mv", "app.ts", "apps.ts")
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Rename app.ts in test-clone")
+    (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
+    assert [entry["path"] for entry in inside["uncommitted"]] == ["apps.ts"] and "change" in inside
+    (clone / "zeta.ts").write_text("export const zeta = 2\n")
+    (clone / "banner.ts").write_text("export const banner = 'new'\n")
+    prompt(run, repo, "Change zeta.ts in test-clone")
+    (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
+    assert sorted(entry["path"] for entry in inside["uncommitted"]) == ["apps.ts", "banner.ts", "zeta.ts"]
+    assert "+export const zeta = 2" in inside["change"]["diff"]
+    assert "+export const banner = 'new'" in inside["change"]["diff"]
+    assert sorted(copy["path"] for copy in inside["change"]["copies"]) == ["banner.ts", "zeta.ts"]
+    run("share-code", "off", cwd=repo)
+    (clone / "notes.md").write_text("Deploy at 4pm.\n")
+    prompt(run, repo, "Change notes.md in test-clone")
+    (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
+    assert "notes.md" in [entry["path"] for entry in inside["uncommitted"]] and "change" not in inside
+
+
+def test_a_key_file_renamed_in_a_commit_the_facts_dont_list_still_never_leaves(run, fake, repo, tmp_path):
+    """A key file committed and then renamed to a plain name stays a key file whichever commits the facts list: in a
+    nested clone, behind the 20 newest commits not pushed; in the project, in commits another branch on GitHub has
+    (so none of them is listed as not pushed), while the diff reaches back past them. Nothing of it goes in either
+    diff, nor as a copy once it is edited again."""
+    signed_in(run, fake)
+    fake.combined = True
+    clone = nested_clone(repo, tmp_path, "test-clone")
+    for folder in (repo, clone):
+        (folder / ".env.production").write_text(f"TOKEN={KEY}\n")
+        git(folder, "add", ".env.production")
+        git(folder, "commit", "-q", "-m", "Add the production settings")
+        git(folder, "mv", ".env.production", "settings.txt")
+        git(folder, "commit", "-q", "-m", "Rename the settings")
+    git(repo, "update-ref", "refs/remotes/origin/settings", "HEAD")
+    (clone / "log.md").write_text("")
+    git(clone, "add", "log.md")
+    for number in range(20):
+        (clone / "log.md").write_text(f"Entry {number}\n")
+        git(clone, "commit", "-q", "-am", f"Note {number}")
+    for folder in (repo, clone):
+        (folder / "settings.txt").write_text(f"TOKEN={KEY}\nREGION=eu\n")
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change settings.txt")
+    check = fake.calls("/check")[0]["body"]
+    (inside,) = check["work"]["git"]["nested"]
+    assert check["work"]["git"]["unpushed"] == [] and len(inside["unpushed"]) == 20
+    for change in (check["change"], inside["change"]):
+        assert {"path": "", "why": "secret"} in change["left_out"]
+        assert "settings.txt" not in change["diff"] + change["unpushed_diff"]
+        assert "settings.txt" not in [copy["path"] for copy in change["copies"]]
+    assert KEY.encode() not in b"".join(call["raw"] for call in fake.requests)
+
+
+def test_a_link_to_a_repository_elsewhere_is_never_read_as_one_inside_the_project(run, fake, repo, tmp_path):
+    """A symbolic link in the project to a repository elsewhere on the computer, or a submodule's path through a link
+    to the folder that holds it, is no repository inside the project: nothing of it is read or sent. A link is never
+    followed, even to a clone inside the project, which is read once, by its own path."""
+    signed_in(run, fake)
+    fake.combined = True
+    clone = nested_clone(repo, tmp_path, "test-clone")
+    (clone / "app.ts").write_text("export const signIn = 2\n")
+    outside = tmp_path / "elsewhere"
+    notes = outside / "notes"
+    notes.mkdir(parents=True)
+    git(notes, "init", "-q", "--initial-branch=main")
+    (notes / "notes.md").write_text("start\n")
+    git(notes, "add", "--all")
+    git(notes, "commit", "-q", "-m", "Start")
+    git(notes, "remote", "add", "origin", "https://github.com/sam/notes.git")
+    git(notes, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (notes / "notes.md").write_text(f"start\n{SECRET}\n")
+    os.symlink(notes, repo / "notes")
+    os.symlink(outside, repo / "elsewhere")
+    os.symlink(clone, repo / "clone-link")
+    (repo / ".gitmodules").write_text('[submodule "notes"]\n\tpath = elsewhere/notes\n'
+                                      '\turl = https://github.com/sam/notes.git\n')
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change app.ts in test-clone")
+    nested = fake.calls("/check")[0]["body"]["work"]["git"]["nested"]
+    assert [entry["path"] for entry in nested] == ["test-clone"] and "change" in nested[0]
+    assert SECRET.encode() not in b"".join(call["raw"] for call in fake.requests)
+
+
 # -- every action checked: a push held, gone past, and checked as the tool runs it ----------------------------------
 
 ASK_FIRST = ("Vyavasta couldn’t check this message against the team’s record just now. Go on with work on this computer, "
