@@ -17,9 +17,9 @@
 # remote-tracking branch has, each with its message and its files; the branch, its upstream and where it left origin's
 # default branch; and the same for each repository nested inside this one (a submodule, or a clone put inside it).
 # With code sharing on (on unless the developer turns it off, and said where the project is turned on), also the
-# changes themselves and the latest copy of each changed file, each copy once until it changes again. Never a file git
-# ignores or one that looks like a key, in any of it; never what a machine-written file or a file that is not text
-# holds. A message that asks about the team is sent on as a question to the developer's own assistant in
+# changes themselves and the latest copy of each changed file, this repository's and each nested one's, each copy once
+# until it changes again. Never a file git ignores or one that looks like a key, in any of it; never what a
+# machine-written file or a file that is not text holds. A message that asks about the team is sent on as a question to the developer's own assistant in
 # Vyavasta. With summaries on (on until the developer turns them off), each message and the tool's last reply of
 # the turn, as written, are kept in the session's own chat in Vyavasta, to be summed up for teammates; a reply can
 # quote code or what a file holds. Never the conversation transcript, the tool's other steps, the commands it ran,
@@ -861,9 +861,12 @@ keep_credentials() {
 # session sent (`forget_sent`).
 forget_told() { rm -f "$PROJECTS"/*/sharing-told; forget_sent; }
 
-# Which changes, and which copies of files, each session last sent: forgotten when what the server kept of them goes
-# (the connection ends, or code sharing is turned off or on), so that the next report sends them again.
-forget_sent() { rm -f "$SESSIONS"/*/change-sum "$SESSIONS"/*/copies-sent; }
+# Which changes, and which copies of files, each session last sent, of this repository and of each one nested in it
+# (with which nested repositories' facts the server has all of: `nested_one`): forgotten when what the server kept of
+# them goes (the connection ends, or code sharing is turned off or on), so that the next report sends them again.
+forget_sent() {
+  rm -rf "$SESSIONS"/*/change-sum "$SESSIONS"/*/copies-sent "$SESSIONS"/*/nested.*.sent "$SESSIONS"/*/nested.*.settled
+}
 
 # Whether a JSON list of repository names (as /me gives it) holds the repository $2, in any letter case, as GitHub
 # itself matches names.
@@ -1845,7 +1848,7 @@ gitx() {
 
 # Looks at the working tree once for the whole run, for both the list of changed files and the shared change.
 # git reads a copy of the developer's index (their own is never written). With code sharing on, new files git does
-# not ignore are added to that copy, only as names, so git lists and compares them as new files. A
+# not ignore are added to that copy, only as names, so git lists and compares them as new files (`adds_new_files`). A
 # new file that looks like a key or credential, or is written by machines, is never added, so nothing of it is
 # even read; nor is a new file over BIG_FILE, or one whose name holds a line break. Leaves git's listing against
 # the last commit in $TMP/scan, the new files left out in $TMP/left-untracked ("why<TAB>path" records) and the
@@ -1897,7 +1900,7 @@ scan_tree() {
   gitdir=$(git_read -C "$ROOT" rev-parse --absolute-git-dir)
   rm -f "$TMP/index"
   if [ -f "$gitdir/index" ] && cp -p "$gitdir/index" "$TMP/index"; then SCAN_INDEX="$TMP/index"; fi
-  if [ -s "$TMP/added" ] && [ -z "${NESTED_SCAN:-}" ] && sharing_now; then
+  if [ -s "$TMP/added" ] && adds_new_files; then
     tr '\n' '\000' < "$TMP/added" > "$TMP/added-nul"
     if (GIT_INDEX_FILE="$TMP/index"; GIT_LITERAL_PATHSPECS=1; export GIT_INDEX_FILE GIT_LITERAL_PATHSPECS
         git_read -C "$ROOT" add -N --pathspec-from-file="$TMP/added-nul" --pathspec-file-nul >/dev/null); then
@@ -1906,6 +1909,13 @@ scan_tree() {
   fi
   gitx -c core.bigFileThreshold="$BIG_FILE" diff --raw --numstat -z $DIFF_OPTIONS "${HEAD_SHA:-$EMPTY_TREE}" \
     -- . "$OWN_SETTINGS" | tr '\000' '\001' > "$TMP/scan"
+}
+
+# Whether the scan adds new files to its copy of the index: in this repository where code sharing is on and the
+# developer was told so (`sharing_now`), and in a nested one where its change is made in this run (NESTED_CHANGES,
+# `nested_one`). A nested repository's facts alone count a new file's lines themselves.
+adds_new_files() {
+  if [ -n "${NESTED_SCAN:-}" ]; then [ -n "${NESTED_CHANGES:-}" ]; else sharing_now; fi
 }
 
 # git's own list of what changed in the working tree and the index since the last commit, as a JSON array of
@@ -2088,14 +2098,14 @@ repo_facts() {
 
 # The repositories nested inside this one that have work of their own (a submodule, or a clone put inside it whether or
 # not git ignores it here, or another worktree of it), each as a JSON object: its path here, its own remote, and its
-# facts as `repo_facts` gives them; written to $TMP/nested, joined by commas, and NESTED says how many. Each is read as
-# this one is, by git alone and with nothing its own settings could run, and its own ignored and key files are never
-# named. At most NESTED_MOST are looked at, in their paths' order (submodules from .gitmodules, the folders git lists as
-# repositories it doesn't go into, and folders right inside this one that are repositories); one with no remote, or
-# with nothing changed and nothing unpushed, is left out.
+# facts as `repo_facts` gives them; written to $TMP/nested, joined by commas, with their numbers in $TMP/nested-list,
+# one to a line, and NESTED says how many. Each is read as this one is, by git alone and with nothing its own settings
+# could run, and its own ignored and key files are never named. At most NESTED_MOST are looked at, in their paths'
+# order (submodules from .gitmodules, the folders git lists as repositories it doesn't go into, and folders right inside
+# this one that are repositories); one with no remote, or with nothing changed and nothing unpushed, is left out.
 nested_facts() {
   NESTED=0
-  true > "$TMP/nested"
+  true > "$TMP/nested"; true > "$TMP/nested-list"
   nested_maybe=""
   [ -f "$ROOT/.gitmodules" ] || [ -s "$TMP/nested-dirs" ] && nested_maybe=1
   for nested_dir in "$ROOT"/*/; do [ -n "$nested_maybe" ] || [ ! -e "${nested_dir}.git" ] || nested_maybe=1; done
@@ -2117,17 +2127,27 @@ nested_facts() {
     [ -s "$TMP/nested.$nested_looked.json" ] || continue
     [ "$NESTED" = "0" ] || printf ',' >> "$TMP/nested"
     cat "$TMP/nested.$nested_looked.json" >> "$TMP/nested"
+    echo "$nested_looked" >> "$TMP/nested-list"
     NESTED=$((NESTED + 1))
   done < "$TMP/nested-paths"
 }
 
 # One nested repository's object for `nested_facts` ($1: its path inside this one; $2: its number), or nothing when it
-# has nothing to tell. Run apart, so that what it sets stays its own. Its remote, and whether its own settings name
-# filters (quieted then as this repository's are), come from one call. A quick look comes next, by one `git status`
-# that writes nothing (GIT_OPTIONAL_LOCKS): nothing changed and an upstream it isn't ahead of is nothing to tell; with
-# no upstream, nothing is to tell when no remote-tracking branch lacks a commit of its own. The facts of one with work
-# are kept in the session's folder (FACTS_DIR) and given again, with no more git, while git's account of it in that
-# look is the same and they are less than NESTED_FRESH seconds old.
+# has nothing to tell. Run apart, so that what it sets stays its own, in a scratch folder of its own ($TMP/nested.$2).
+# Its remote, and whether its own settings name filters (quieted then as this repository's are), come from one call. A
+# quick look comes next, by one `git status` that writes nothing (GIT_OPTIONAL_LOCKS): nothing changed and an upstream
+# it isn't ahead of is nothing to tell; with no upstream, nothing is to tell when no remote-tracking branch lacks a
+# commit of its own. The facts of one with work are kept in the session's folder (FACTS_DIR), named by its path and
+# remote, and given again, with no more git, while git's account of it in that look is the same and they are less
+# than NESTED_FRESH seconds old.
+#
+# Where nested repositories' changes are made in this run (NESTED_CHANGES: code sharing on, for a report that may carry
+# code), its change is made as this repository's is (`build_change`), what it sent kept in a folder of its own beside
+# its facts (`.sent`), and left in its scratch folder for `git_facts`, with `due` naming where its facts are kept when
+# the change moved since it was last sent or a copy is due. Its kept facts are then given again only when nothing of
+# that change is left that could go (`.settled`: nothing of it was due, the server took it, `nested_taken`, or what is
+# left can never fit, `nested_changes`) and no file git's account names changed since that look (`unchanged_since`), so
+# a change is never told late.
 nested_one() (
   ROOT="$ROOT/$1"; TMP="$TMP/nested.$2"
   mkdir "$TMP" || exit 0
@@ -2150,12 +2170,23 @@ nested_one() (
   { read -r own; read -r REMOTE_NAME; IFS= read -r REMOTE; } < "$TMP/config"
   [ -n "$REMOTE" ] || exit 0
   if [ "$own" = "1" ]; then quiet_filters; else FILTERS_QUIET=$ROOT; fi
-  look=$(git_read -C "$ROOT" status --porcelain=v2 --branch --untracked-files=normal --ignore-submodules=all \
-    | NESTED_PATH=$1 awk -v KEYED="$TMP/keyed" 'BEGIN { ahead = -1; print ENVIRON["NESTED_PATH"] > KEYED }
+  # (Made before the look: a file changed while it runs is newer than the facts kept from it.)
+  true > "$TMP/stamp"
+  # git's account names each file as it is, unless the name holds a quote, a backslash or a control character; the
+  # files it names go to $TMP/named, one to a line (a rename by its new name), for `unchanged_since`.
+  look=$(git_read -C "$ROOT" -c core.quotePath=false status --porcelain=v2 --branch --untracked-files=normal \
+      --ignore-submodules=all \
+    | NESTED_PATH=$1 NESTED_REMOTE=$REMOTE awk -v KEYED="$TMP/keyed" -v NAMED="$TMP/named" '
+      function past(s, fields,   i) { for (i = 0; i < fields; i++) sub(/^[^ ]* /, "", s); return s }
+      BEGIN { ahead = -1; print ENVIRON["NESTED_PATH"] > KEYED; print ENVIRON["NESTED_REMOTE"] > KEYED; printf "" > NAMED }
       { print > KEYED }
       /^# branch\.upstream / { up = 1 }
       /^# branch\.ab / { split($0, p, " "); ahead = substr(p[3], 2) + 0 }
       $0 != "" && substr($0, 1, 1) != "#" { work = 1 }
+      /^1 / { print past($0, 8) > NAMED }
+      /^2 / { p = past($0, 9); sub(/\t.*/, "", p); print p > NAMED }
+      /^u / { print past($0, 10) > NAMED }
+      /^\? / { print substr($0, 3) > NAMED }
       END { print (work ? "work" : (up && ahead == 0) ? "clean" : "look") }')
   case "$look" in
     clean) exit 0 ;;
@@ -2163,12 +2194,14 @@ nested_one() (
   esac
   kept=""
   if [ -n "${FACTS_DIR:-}" ]; then
-    kept="$FACTS_DIR/nested.$2"
+    kept=$(printf '%s\n%s\n' "$1" "$REMOTE" | cksum)
+    kept="$FACTS_DIR/nested.${kept%% *}"
     at=""
     [ -f "$kept.at" ] && read -r at < "$kept.at"
     case "$at" in
       ''|*[!0-9]*) ;;
-      *) if [ $((STARTED_AT - at)) -lt "$NESTED_FRESH" ] && [ -f "$kept.json" ] && cmp -s "$TMP/keyed" "$kept.status"; then
+      *) if [ $((STARTED_AT - at)) -lt "$NESTED_FRESH" ] && [ -f "$kept.json" ] && cmp -s "$TMP/keyed" "$kept.status" \
+             && { [ -z "${NESTED_CHANGES:-}" ] || { [ -f "$kept.settled" ] && unchanged_since "$kept.json"; }; }; then
            cat "$kept.json"; exit 0
          fi ;;
     esac
@@ -2180,13 +2213,45 @@ nested_one() (
   [ "$NFILES" -gt 0 ] || [ "$UNPUSHED" -gt 0 ] || exit 0
   { cat "$TMP/facts"; printf '}'; } > "$TMP/object"
   cat "$TMP/object"
-  [ -z "$kept" ] || { cp "$TMP/object" "$kept.json" && cp "$TMP/keyed" "$kept.status" && echo "$STARTED_AT" > "$kept.at"; }
+  [ -n "$kept" ] || exit 0
+  rm -f "$kept.settled"
+  if [ -n "${NESTED_CHANGES:-}" ] && mkdir -p "$kept.sent"; then
+    # (Its facts are made already: `build_change` makes the change alone.)
+    FACTS=1
+    build_change "$kept.sent"
+    sent_sum=""
+    [ -f "$kept.sent/change-sum" ] && read -r sent_sum < "$kept.sent/change-sum"
+    core_sum=$(cksum < "$TMP/change-core")
+    # (Due, with `moved` where its diffs changed since they were last sent; else the server has all that can go.)
+    if [ -n "${COPIES_DUE:-}" ] || [ "$core_sum" != "$sent_sum" ]; then
+      printf '%s\n' "$kept" > "$TMP/due"
+      [ "$core_sum" = "$sent_sum" ] || true > "$TMP/moved"
+    else
+      true > "$kept.settled"
+    fi
+  fi
+  cp "$TMP/object" "$kept.json" && touch -r "$TMP/stamp" "$kept.json" && cp "$TMP/keyed" "$kept.status" \
+    && echo "$STARTED_AT" > "$kept.at"
 )
 
+# Whether no file a nested repository's look named ($TMP/named) changed since $1 was made, by the file system alone: a
+# folder it names (new files git didn't list one by one) is looked through. A name git had to quote can't be looked
+# at here, and counts as changed.
+unchanged_since() {
+  [ -s "$TMP/named" ] || return 0
+  ! grep -q '^"' "$TMP/named" || return 1
+  newer=$(cd "$ROOT" && sed -e 's#^#./#' -e 's/./\\&/g' "$TMP/named" \
+    | xargs sh -c 'exec find "$@" -newer "$0" -print' "$1" | sed -n '1p') || return 1
+  [ -z "$newer" ]
+}
+
 # The facts of the work on this computer that isn't on GitHub yet, as every work report carries them (`git`): this
-# repository's (`repo_facts`) with its nested repositories' (`nested_facts`), in $TMP/git, once in a run. Past
-# FACTS_MOST bytes they are told shorter: the commits without the rest of their messages or their files, and no nested
-# repository. Sets UNPUSHED and NESTED for this repository.
+# repository's (`repo_facts`) with its nested repositories' (`nested_facts`), in $TMP/git, once in a run; and the same
+# without any nested repository's change in $TMP/git-names, for a report that carries nothing of what a file holds.
+# Each nested repository's change that is due goes with its own entry (`nested_changes`), and the facts stay within
+# FACTS_MOST bytes: the nested repositories' changes are left for a later call first, and past FACTS_MOST without them
+# the facts are told shorter: the commits without the rest of their messages or their files, and no nested repository.
+# Sets UNPUSHED and NESTED for this repository.
 git_facts() {
   [ -n "${FACTS:-}" ] && return 0
   FACTS=1
@@ -2196,15 +2261,69 @@ git_facts() {
   # (Without commits or nested repositories they are the files' list, which is clean and short already.)
   if [ "$UNPUSHED" = "0" ] && [ "$NESTED" = "0" ]; then
     { printf '{'; cat "$TMP/facts"; printf ',"nested":[]}'; } > "$TMP/git"
+    cp "$TMP/git" "$TMP/git-names"
     return 0
   fi
   { printf '{'; cat "$TMP/facts"; printf ',"nested":['; cat "$TMP/nested"; printf ']}'; } > "$TMP/git-raw"
-  clean_utf8 "$TMP/git-raw" "$TMP/git"
-  [ $(( $(wc -c < "$TMP/git") )) -le "$FACTS_MOST" ] && return 0
-  repo_facts "$ROOT" "$TMP/files" "$TMP/facts" "$UNPUSHED_MOST" 0 0
-  NESTED=0
-  { printf '{'; cat "$TMP/facts"; printf ',"nested":[]}'; } > "$TMP/git-raw"
-  clean_utf8 "$TMP/git-raw" "$TMP/git"
+  clean_utf8 "$TMP/git-raw" "$TMP/git-names"
+  if [ $(( $(wc -c < "$TMP/git-names") )) -gt "$FACTS_MOST" ]; then
+    repo_facts "$ROOT" "$TMP/files" "$TMP/facts" "$UNPUSHED_MOST" 0 0
+    NESTED=0
+    { printf '{'; cat "$TMP/facts"; printf ',"nested":[]}'; } > "$TMP/git-raw"
+    clean_utf8 "$TMP/git-raw" "$TMP/git-names"
+  fi
+  cp "$TMP/git-names" "$TMP/git"
+  [ "$NESTED" = "0" ] || nested_changes
+}
+
+# The nested repositories' changes that are due (`nested_one`), each in its own entry of $TMP/git, in their order:
+# whole; else, where its diffs moved since they were last sent, without its copies, which wait for a later call; else
+# not at all, waiting for a later call; whatever keeps the facts within FACTS_MOST bytes. How each went is noted in its
+# scratch folder (`went`) for `nested_taken`. Each part is valid text as it is: the facts are made so here, and a change
+# was made so as it was made (its diffs by `clean_utf8`, its copies only of valid text), so a copy's text is never
+# touched again.
+nested_changes() {
+  for nested_due in "$TMP"/nested.*/due; do [ -f "$nested_due" ] && break; done
+  [ -f "$nested_due" ] || return 0
+  nested_full=$(( FACTS_MOST - $(wc -c < "$TMP/git-names") ))
+  nested_room=$nested_full
+  clean_utf8 "$TMP/facts" "$TMP/facts-clean"
+  {
+    printf '{'; cat "$TMP/facts-clean"; printf ',"nested":['
+    nested_first=1
+    while IFS= read -r nested_number; do
+      [ -n "$nested_first" ] || printf ','
+      nested_first=""
+      nested_tmp="$TMP/nested.$nested_number"
+      nested_how=""
+      if [ -f "$nested_tmp/due" ]; then
+        # (Past what the entry holds without a change: the change and its key, and without copies an empty list.)
+        whole_size=$(( $(wc -c < "$nested_tmp/change") + 10 ))
+        core_size=$(( $(wc -c < "$nested_tmp/change-head") + 23 ))
+        if [ "$whole_size" -le "$nested_room" ]; then nested_how=whole; nested_size=$whole_size
+        elif [ -f "$nested_tmp/moved" ] && [ "$core_size" -le "$nested_room" ]; then nested_how=core; nested_size=$core_size
+        fi
+        # Its copies can never go beside these diffs, whatever the others take: once what can go of it went, nothing
+        # more of it goes until it changes or its facts are looked at afresh (its kept facts settle, `nested_one`).
+        if [ "$whole_size" -gt "$nested_full" ]; then
+          if [ "$nested_how" = "core" ]; then nested_how="core settles"
+          elif [ -z "$nested_how" ] && { [ ! -f "$nested_tmp/moved" ] || [ "$core_size" -gt "$nested_full" ]; }; then
+            read -r nested_kept < "$nested_tmp/due"
+            true > "$nested_kept.settled"
+          fi
+        fi
+      fi
+      case "$nested_how" in
+        whole) clean_utf8 "$nested_tmp/facts" "$nested_tmp/facts-clean"
+               cat "$nested_tmp/facts-clean"; printf ',"change":'; cat "$nested_tmp/change"; printf '}' ;;
+        core*) clean_utf8 "$nested_tmp/facts" "$nested_tmp/facts-clean"
+               cat "$nested_tmp/facts-clean"; printf ',"change":'; cat "$nested_tmp/change-head"; printf ',"copies":[]}}' ;;
+        *) clean_utf8 "$TMP/nested.$nested_number.json" "$nested_tmp/object-clean"; cat "$nested_tmp/object-clean" ;;
+      esac
+      [ -z "$nested_how" ] || { nested_room=$((nested_room - nested_size)); echo "$nested_how" > "$nested_tmp/went"; }
+    done < "$TMP/nested-list"
+    printf ']}'
+  } > "$TMP/git"
 }
 
 # The changes not on GitHub yet, for code sharing, written as the `change` object to $TMP/change ($1 is the session's
@@ -2218,7 +2337,8 @@ git_facts() {
 # What is sent is chosen file by file from git's own listing, by each file's exact name (`safe_diff`), and the
 # whole stays within CHANGE_MOST bytes: past it the copies wait for a later call, and then the commits' own diff is
 # left out (the first diff holds them). Sets CH_FILES, CH_LINES, CH_COMPLETE and CH_SECRET, CH_GENERATED, CH_BINARY,
-# CH_LIMIT (how many files were left out of the first diff for each reason).
+# CH_LIMIT (how many files were left out of the first diff for each reason). The facts made with it carry each nested
+# repository's own change, made the same way (NESTED_CHANGES, `nested_one`), where one is due.
 build_change() {
   limit_lines=$CHANGE_LINES; limit_bytes=$CHANGE_BYTES
   if [ -f "$HOME_DIR/limits" ]; then
@@ -2228,6 +2348,7 @@ build_change() {
   fi
   scan_tree
   FACTS_DIR=${1:-}
+  NESTED_CHANGES=1
   git_facts
   # (The upstream, origin's default branch and where this branch left it, as `repo_facts` found them: an upstream
   # that is origin's default branch has that very base.)
@@ -2443,11 +2564,11 @@ hasher() {
 # COPY_MOST bytes or less goes whole, as the file holds it; a file that isn't text, or isn't valid UTF-8, is listed
 # with binary true, a link (never read) too, and a larger file with too_large true, each with no content. Only regular
 # files are ever read, found by the file system as `scan_tree` finds new ones. At most COPIES_BYTES of text go at
-# once: a file that doesn't fit is left for the next call, which finds it not sent yet.
+# once: a file that doesn't fit is left for the next call, which finds it not sent yet ($TMP/copies-left says one was).
 build_copies() {
   printf '[]' > "$TMP/copies"
   COPIES_DUE=""
-  rm -f "$TMP/copies-next"
+  rm -f "$TMP/copies-next" "$TMP/copies-left"
   [ -n "$1" ] && hasher || return 0
   copies_sent="$1/copies-sent"
   [ -f "$copies_sent" ] || { copies_sent="$TMP/copies-none"; true > "$copies_sent"; }
@@ -2480,7 +2601,8 @@ build_copies() {
         > "$TMP/copy-big"
     fi
   fi
-  COPIES_DUE=$(cd "$ROOT" && awk -v OUT="$TMP/copies" -v NEXT="$TMP/copies-next" -v BUDGET="$COPIES_BYTES" "$AWK_ESCAPE"'
+  COPIES_DUE=$(cd "$ROOT" && awk -v OUT="$TMP/copies" -v NEXT="$TMP/copies-next" -v LEFT="$TMP/copies-left" \
+      -v BUDGET="$COPIES_BYTES" "$AWK_ESCAPE"'
     function json(s,   n, p, i, o) {
       n = split(s, p, /\\/); o = p[1]; for (i = 2; i <= n; i++) o = o "\\\\" p[i]; s = o
       n = split(s, p, /"/); o = p[1]; for (i = 2; i <= n; i++) o = o "\\\"" p[i]; s = o
@@ -2534,7 +2656,7 @@ build_copies() {
         if (digest == "too_large") { entry(head ",\"binary\":false,\"too_large\":true}"); done(digest, path); continue }
         head = head ",\"sha256\":\"" digest "\""
         if (!binary) {
-          if (spent + size[path] > BUDGET) continue
+          if (spent + size[path] > BUDGET) { left = 1; continue }
           # The file read a line at a time: every byte valid UTF-8, and all of them read (a byte awk cannot hold,
           # such as NUL, makes the count fall short), else it is told as not text. Whether it ends with a line
           # break is told by its size.
@@ -2561,6 +2683,7 @@ build_copies() {
         done(digest, path)
       }
       printf "]" > OUT
+      if (left) printf "" > LEFT
       if (entries) print entries
     }' "$copies_sent" "$TMP/copy-measured" "$TMP/copy-big" "$TMP/copy-list")
 }
@@ -2573,6 +2696,27 @@ change_taken() {
   [ ! -f "$TMP/copies-next" ] || mv -f "$TMP/copies-next" "$1/copies-sent"
   printf '[]' > "$TMP/copies"; COPIES_DUE=""
   change_whole
+}
+
+# What follows the nested repositories' changes that went with a work report the server took (as `nested_changes` noted
+# them): each change is not sent again until it moves, nor a copy that went with it until its file changes, kept in
+# that repository's own `.sent` as `change_taken` keeps this one's; one with nothing left that could go in a later call
+# leaves its kept facts settled (`nested_one`). None of them goes with a later call of this run.
+nested_taken() {
+  for nested_went in "$TMP"/nested.*/went; do
+    [ -f "$nested_went" ] || continue
+    nested_tmp=${nested_went%/went}
+    read -r nested_how < "$nested_went"
+    read -r nested_kept < "$nested_tmp/due"
+    cksum < "$nested_tmp/change-core" > "$nested_kept.sent/change-sum"
+    case "$nested_how" in
+      whole) [ ! -f "$nested_tmp/copies-next" ] || mv -f "$nested_tmp/copies-next" "$nested_kept.sent/copies-sent"
+             [ -f "$nested_tmp/copies-left" ] || true > "$nested_kept.settled" ;;
+      "core settles") true > "$nested_kept.settled" ;;
+    esac
+    rm -f "$nested_went" "$nested_tmp/due"
+  done
+  cp "$TMP/git-names" "$TMP/git"
 }
 
 # What was left out of the changes and why, as one plain clause ("" when nothing was).
@@ -4220,6 +4364,10 @@ hook_before_run() {
   } > "$TMP/check"
   api POST /check "$TMP/check" "$CHECK_SECONDS"
   if [ -n "$shared" ] && [ "$STATUS" = "200" ]; then change_taken "$dir"; fi
+  # (Nested repositories' changes went with the work report: noted where the server says it took it.)
+  if [ -n "$carried" ] && [ -n "$nested_sent" ] && [ "$STATUS" = "200" ] && [ "$(answer work_recorded)" = "true" ]; then
+    nested_taken
+  fi
   case "$STATUS" in
     200) ;;
     # (A connection that ended is the developer's own to sign in again: their message's line says so.)
@@ -4282,7 +4430,7 @@ work_sent() {
   if [ "$STATUS" = "200" ]; then
     work_taken "$1"
   elif send_later; then
-    [ -z "$with_change" ] || work_report "$1" bare
+    { [ -z "$with_change" ] && [ -z "$nested_sent" ]; } || work_report "$1" names
     keep_unsent work "$(basename "$1")" "$TMP/report"
   fi
   rm -f "$TMP/report"
@@ -4292,19 +4440,27 @@ work_sent() {
 send_later() { case "$STATUS" in 000|5*|429) return 0 ;; esac; return 1; }
 
 # The session's work report as it stands, in $TMP/report: git's list of changed files, the facts of the work not on
-# GitHub yet (`git`: `git_facts`), and with code sharing on the changes when they moved since they were last sent or a
-# file's copy is due (unless $2 is "bare": a check that carries the changes itself carries the report). Fails when
-# there is nothing to tell. $1 is the session folder.
+# GitHub yet (`git`: `git_facts`, with each nested repository's own change that is due where code sharing is on), and
+# with code sharing on the changes when they moved since they were last sent or a file's copy is due. $2 is "bare"
+# for a check, which carries this repository's changes itself, and "names" for a report kept to go along with a later
+# call, which carries nothing of what a file holds, of any repository. Fails when there is nothing to tell. Sets
+# with_change and nested_sent when it carries this repository's changes or a nested one's. $1 is the session folder.
 work_report() {
   [ -f "$TMP/files" ] || changed_files
   FACTS_DIR=$1
+  with_change=""; nested_sent=""; own_change=""
+  case "${2:-}" in bare|names) ;; *) sharing_now && own_change=1 ;; esac
+  # (A nested repository's change is made with its facts, where this report may carry code.)
+  [ -z "$own_change" ] || NESTED_CHANGES=1
   git_facts
   # A session that has nothing open, nothing changed, no commit unpushed and no nested repository with work of its
   # own has nothing to tell.
   [ ! -s "$TMP/files" ] && [ ! -f "$1/open" ] && [ "${UNPUSHED:-0}" = "0" ] && [ "${NESTED:-0}" = "0" ] && return 1
   state=$(work_state "$1")
-  with_change=""
-  if [ "${2:-}" != "bare" ] && sharing_now; then
+  report_git="$TMP/git"
+  if [ "${2:-}" = "names" ]; then report_git="$TMP/git-names"
+  else for nested_went in "$TMP"/nested.*/went; do [ -f "$nested_went" ] && { nested_sent=1; break; }; done; fi
+  if [ -n "$own_change" ]; then
     [ -f "$TMP/change" ] || build_change "$1"
     sent_sum=""
     [ -f "$1/change-sum" ] && read -r sent_sum < "$1/change-sum"
@@ -4313,26 +4469,30 @@ work_report() {
     # drops a change it wasn't told of, and its answer would turn sharing off here.)
     told_sharing=""
     [ -f "$PDIR/sharing-told" ] && read -r told_sharing < "$PDIR/sharing-told"
-    if [ -n "$with_change" ] && [ "$told_sharing" != "on" ]; then tell_sharing on || with_change=""; fi
+    if { [ -n "$with_change" ] || [ -n "$nested_sent" ]; } && [ "$told_sharing" != "on" ]; then
+      tell_sharing on || { with_change=""; nested_sent=""; report_git="$TMP/git-names"; }
+    fi
   fi
   {
     printf '{"remote":%s,"branch":%s,"session":%s,"state":"%s","files":[%s],"tool":"%s","git":' "$(json_quote "$REMOTE")" \
       "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$1")")" "$state" "$(cat "$TMP/files")" "$CLIENT"
-    cat "$TMP/git"
+    cat "$report_git"
     if [ -n "$with_change" ]; then printf ',"change":'; cat "$TMP/change"; fi
     printf '}'
   } > "$TMP/report"
 }
 
 # What follows a work report the server took, from what it answered of it ($TMP/answer): REPORTED, the changes as last
-# sent, whether the session's work is still open, code sharing turned off in the web app, and teammates changing the
-# same files (`keep_overlap`; after an edit, AFTER_EDIT says so). $1 is the session folder.
+# sent (this repository's, and nested ones' that went with it), whether the session's work is still open, code sharing
+# turned off in the web app, and teammates changing the same files (`keep_overlap`; after an edit, AFTER_EDIT says
+# so). $1 is the session folder.
 work_taken() {
   REPORTED=1
   # (A report of this session kept from earlier is older than this one: it is given up.)
   rm -f "$UNSENT"/*-work-"$(basename "$1")".json "$UNSENT"/*-work-"$(basename "$1")".about
   keep_overlap "$TMP/answer" "$1" "${AFTER_EDIT:-}"
   [ -z "$with_change" ] || change_taken "$1"
+  [ -z "$nested_sent" ] || nested_taken
   if [ "$(answer recorded)" = "true" ]; then
     case "$(json_text "$(answer status)")" in
       pushed|abandoned) rm -f "$1/open" ;;
@@ -4380,7 +4540,7 @@ hook_report() {
     if [ -n "$turn" ]; then turn_ready "$dir" "$folder"; keep_turn "$dir"; turn=""; fi
     if repository "$folder"; then
       changed_files
-      if work_report "$dir" bare; then now > "$dir/reported"; keep_unsent work "$(basename "$dir")" "$TMP/report"; fi
+      if work_report "$dir" names; then now > "$dir/reported"; keep_unsent work "$(basename "$dir")" "$TMP/report"; fi
     fi
   elif [ -n "$TOKEN" ] && repository "$folder"; then
     changed_files

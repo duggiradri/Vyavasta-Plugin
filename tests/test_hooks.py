@@ -6995,6 +6995,139 @@ def test_code_sharing_is_on_unless_turned_off_and_said_before_any_code_goes(run,
     assert "change" in fake.calls("/check")[1]["body"] and "Code sharing is now on" not in again
 
 
+# -- a nested repository's own changes, with code sharing on ----------------------------------------------------------
+#
+# A repository nested inside the project (a clone put inside it, as Manoj's test-clone was, or a submodule) is shared as
+# the project's own is: its entry in `git.nested` carries its own change (its diffs and its files' latest copies), made
+# by the same rules, each copy once until its file changes, and within the facts' budget.
+
+def nested_clone(repo: Path, tmp_path: Path, name: str) -> Path:
+    """A clone of another made-up repository (acme/<name>) put inside this one, which ignores it; origin's main is
+    where the clone began."""
+    source = tmp_path / f"{name}-source"
+    source.mkdir()
+    git(source, "init", "-q", "--initial-branch=main")
+    (source / ".gitignore").write_text("debug.log\n")
+    (source / "app.ts").write_text("export const signIn = 1\n")
+    git(source, "add", "--all")
+    git(source, "commit", "-q", "-m", "Start")
+    with open(repo / ".gitignore", "a") as ignored:
+        ignored.write(f"{name}/\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", f"Ignore {name}")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    clone = repo / name
+    git(tmp_path, "clone", "-q", str(source), str(clone))
+    git(clone, "remote", "set-url", "origin", f"https://github.com/acme/{name}.git")
+    return clone
+
+
+def test_a_nested_clones_changes_go_in_its_own_entry_each_copy_once_and_never_a_key_or_ignored_file(run, fake, repo,
+                                                                                                   tmp_path):
+    """Manoj works inside test-clone: its changed and new files reach the check with their own diff and latest copy
+    under its entry (its path and remote), each copy once however the report goes (with a check, after an edit, with
+    a turn's end or with the check of a push the model runs) until the file changes again, and nothing of a key file
+    or a file git ignores there ever leaves."""
+    import hashlib
+
+    signed_in(run, fake)
+    fake.combined = True
+    clone = nested_clone(repo, tmp_path, "test-clone")
+    (clone / "app.ts").write_text("export const signIn = 2\n")
+    git(clone, "commit", "-q", "-am", "WIP, don't merge: reworking sign-in")
+    (clone / "app.ts").write_text("export const signIn = 3\n")
+    (clone / "banner.ts").write_text("export const banner = 'new'\n")
+    (clone / ".env.production").write_text(f"TOKEN={KEY}\n")
+    (clone / "deploy.pem").write_text(f"{KEY}\n")
+    (clone / "debug.log").write_text(f"{SECRET}\n")
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change app.ts in test-clone")
+    check = fake.calls("/check")[0]["body"]
+    (inside,) = check["work"]["git"]["nested"]
+    assert inside["path"] == "test-clone" and inside["remote"] == "https://github.com/acme/test-clone.git"
+    change = inside["change"]
+    assert "+export const signIn = 3" in change["diff"] and "+export const banner = 'new'" in change["diff"]
+    assert "+export const signIn = 2" in change["unpushed_diff"] and "banner" not in change["unpushed_diff"]
+    assert {copy["path"]: copy for copy in change["copies"]} == {
+        "app.ts": {"path": "app.ts", "sha256": hashlib.sha256(b"export const signIn = 3\n").hexdigest(),
+                   "binary": False, "too_large": False, "content": "export const signIn = 3\n"},
+        "banner.ts": {"path": "banner.ts", "sha256": hashlib.sha256(b"export const banner = 'new'\n").hexdigest(),
+                      "binary": False, "too_large": False, "content": "export const banner = 'new'\n"}}
+    assert {"path": "", "why": "secret"} in change["left_out"]
+    # The project's own change holds nothing of the clone's.
+    assert "signIn" not in json.dumps(check["change"])
+    # Taken with the check, nothing of it goes again: neither with the turn's end nor with the next message.
+    taken = len(fake.requests)
+    stop(run, repo, last_assistant_message="Done.")
+    prompt(run, repo, "Change app.ts in test-clone")
+    reports = [call["body"].get("work") or call["body"] for call in fake.requests[taken:]
+               if call["path"] in ("/check", "/turn", "/work")]
+    assert len(reports) == 2 and not any("change" in entry for report in reports for entry in report["git"]["nested"])
+    # A file changed again goes again, alone, though git's account of the clone stays the same: with the report after
+    # the edit, with the turn's end, or with the check of a push the model runs; and what each took goes no more.
+    (clone / "app.ts").write_text("export const signIn = 4\n")
+    (run.home / "sessions" / "session-1" / "reported").unlink()
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"))
+    (inside,) = fake.calls("/work")[-1]["body"]["git"]["nested"]
+    assert [copy["path"] for copy in inside["change"]["copies"]] == ["app.ts"]
+    assert "+export const signIn = 4" in inside["change"]["diff"]
+    prompt(run, repo, "Change app.ts in test-clone")
+    assert "change" not in fake.calls("/check")[-1]["body"]["work"]["git"]["nested"][0]
+    (clone / "banner.ts").write_text("export const banner = 'changed'\n")
+    stop(run, repo, last_assistant_message="Done.")
+    (inside,) = fake.calls("/turn")[-1]["body"]["work"]["git"]["nested"]
+    assert [copy["path"] for copy in inside["change"]["copies"]] == ["banner.ts"]
+    (clone / "app.ts").write_text("export const signIn = 5\n")
+    before_run(run, repo, "git push origin main")
+    (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
+    assert [copy["path"] for copy in inside["change"]["copies"]] == ["app.ts"]
+    prompt(run, repo, "Change app.ts in test-clone")
+    assert "change" not in fake.calls("/check")[-1]["body"]["work"]["git"]["nested"][0]
+    # One the server didn't take goes with the next message; a report kept to go later carries the files' names only.
+    (clone / "banner.ts").write_text("export const banner = 'changed again'\n")
+    fake.status["/check"] = 500
+    prompt(run, repo, "Change banner.ts")
+    del fake.status["/check"]
+    prompt(run, repo, "Change banner.ts")
+    (inside,) = fake.calls("/check")[-1]["body"]["work"]["git"]["nested"]
+    assert [copy["path"] for copy in inside["change"]["copies"]] == ["banner.ts"]
+    (clone / "app.ts").write_text("export const signIn = 6\n")
+    (run.home / "sessions" / "session-1" / "reported").unlink()
+    fake.status["/work"] = 503
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"))
+    (kept,) = (run.home / "unsent").glob("*-work-session-1.json")
+    held = json.loads(kept.read_text())["git"]["nested"]
+    assert [entry["path"] for entry in held] == ["test-clone"] and "change" not in held[0]
+    # Nothing of a key file, or of a file git ignores, ever left, nor waits to.
+    for raw in [call["raw"] for call in fake.requests] + [kept.read_bytes()]:
+        for never in (KEY, SECRET, ".env.production", "deploy.pem", "debug.log"):
+            assert never.encode() not in raw, never
+
+
+def test_past_the_facts_budget_a_nested_change_waits_and_no_nested_fact_is_cut(run, fake, repo, tmp_path):
+    """The facts of the work stay within their budget: a nested repository's change too large to fit waits, while
+    every nested repository's facts go whole and a smaller nested change still goes."""
+    signed_in(run, fake)
+    fake.combined = True
+    big = nested_clone(repo, tmp_path, "big-clone")
+    small = nested_clone(repo, tmp_path, "small-clone")
+    # A commit not pushed that adds nearly 600 KB of text: its two diffs together are past the facts' budget.
+    (big / "fixtures.txt").write_text(("x" * 1990 + "\n") * 300)
+    git(big, "add", "fixtures.txt")
+    git(big, "commit", "-q", "-m", "Add the fixtures")
+    (small / "app.ts").write_text("export const signIn = 2\n")
+    switched_on(run, fake, repo)
+    prompt(run, repo, "Change app.ts in small-clone")
+    facts = fake.calls("/check")[0]["body"]["work"]["git"]
+    nested = {entry["path"]: entry for entry in facts["nested"]}
+    (commit,) = nested["big-clone"]["unpushed"]
+    assert commit["subject"] == "Add the fixtures"
+    assert commit["files"] == [{"path": "fixtures.txt", "status": "added", "additions": 300, "deletions": 0}]
+    assert "change" not in nested["big-clone"]
+    assert "+export const signIn = 2" in nested["small-clone"]["change"]["diff"]
+    assert len(json.dumps(facts, ensure_ascii=False).encode()) <= 800_000
+
+
 # -- every action checked: a push held, gone past, and checked as the tool runs it ----------------------------------
 
 ASK_FIRST = ("Vyavasta couldn’t check this message against the team’s record just now. Go on with work on this computer, "
