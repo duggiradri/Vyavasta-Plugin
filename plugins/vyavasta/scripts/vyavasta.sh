@@ -1240,6 +1240,7 @@ api() {
   connect=5
   [ "$most" -lt "$connect" ] && connect=$most
   again=""
+  began=$(now)
   while :; do
     true > "$TMP/written"
     # One curl for all the calls made together, which stops at the first that fails, waited for in the background so
@@ -1277,13 +1278,19 @@ api() {
     # Whether the request went out: curl got as far as sending it (its time to that moment is above zero).
     case "$went" in *[1-9]*) went=1 ;; *) went="" ;; esac
     # The connection broke after the request went out: a call the server takes only once (it carries a request_id,
-    # first of all its fields) or one that only reads is made once more, at once.
+    # first of all its fields) or one that only reads is made once more, at once, with what is left of the call's own
+    # time and no more (less a second, since the clock counts whole seconds), so that the two never take longer than
+    # the call may: each hook's timeout is counted from its calls' own times. With no time left, it isn't made again.
     case "$code" in
       16|52|55|56|92)
         if [ -z "$probed_out" ] && [ -n "$went" ] && [ -z "$again" ] && \
             { [ -z "$3" ] || [ "$(head -c 14 "$3")" = '{"request_id":' ]; }; then
-          again=1; probe=""; ride=""
-          continue
+          most=$(( $4 - ( $(now) - began ) - 1 ))
+          if [ "$most" -ge 1 ]; then
+            [ "$most" -lt "$connect" ] && connect=$most
+            again=1; probe=""; ride=""
+            continue
+          fi
         fi ;;
     esac
     break
@@ -4657,7 +4664,8 @@ $pushed_line}"
 # A push the developer chose to go on with, or that the check of their message cleared, runs unchecked within
 # GO_AHEAD_FOR seconds while it carries the very commit that was held or cleared: one that carries a commit made since
 # is checked again. Teammates changing a file the push carries, which the server tells once for each push, are told
-# too: in Claude Code on the push's own line, and in Codex, which shows that line nowhere, with its model's next reply.
+# too: in Claude Code on the push's own line, and in Codex, which shows that line nowhere, with the lines a refusal has
+# its model open what it says next with, or else with its model's reply to the next message.
 hook_before_run() {
   ran=$(field "$(json_get "$TMP/input" tool_input)" command)
   case "$ran" in
@@ -4719,17 +4727,30 @@ hook_before_run() {
          return ;;
     *) refuse_unchecked "Vyavasta’s server couldn’t check it just now"; return ;;
   esac
-  # (The lines of teammates changing a file the push carries wait in the session's folder for the next message, as
-  # every such line does (`keep_overlap`): Claude Code's developer reads them on this push's line instead, and its
-  # model is given their details with the next message.)
-  if keep_overlap "$TMP/answer" "$dir" && [ "$CLIENT" != "codex" ]; then
-    pushed_line=$(cat "$dir/overlap-line")
-    rm -f "$dir/overlap-line"
-  fi
   verdict=$(json_text "$(answer verdict)")
   notice=$(json_text "$(answer notice)")
   context=$(json_text "$(answer context)")
-  if [ "$(answer hold)" = "true" ]; then
+  hold=$(answer hold)
+  # Teammates changing a file the push carries, as its check told them (`keep_overlap`), are told with the push, and
+  # with them any such lines still waiting to be shown. Claude Code's developer reads them on the push's own line,
+  # whatever came of the check. Codex shows nothing of this hook but a refusal's reason: a push refused (held, or not
+  # checked after all) gives its model the lines to open what it says next with (`refuse_run`), before the developer
+  # chooses whether to go past it, and a push that runs leaves them for its reply to the next message, where every such
+  # line waits. Once told, they aren't told again, at the next edit either; their details go to the tool's model with
+  # the next message.
+  refused=""
+  [ "$hold" = "true" ] && refused=1
+  case "$verdict" in unavailable|"") refused=1 ;; esac
+  if keep_overlap "$TMP/answer" "$dir"; then
+    if [ "$CLIENT" != "codex" ]; then lines_from="$dir/overlap-line"
+    elif [ -n "$refused" ]; then lines_from="$dir/relay"
+    else lines_from=""; fi
+    if [ -n "$lines_from" ] && [ -s "$lines_from" ] && mv -f "$lines_from" "$lines_from.$$"; then
+      pushed_line=$(cat "$lines_from.$$")
+      rm -f "$lines_from.$$" "$dir/overlap-line" "$dir/overlap-edit"
+    fi
+  fi
+  if [ "$hold" = "true" ]; then
     held=$(field "$(answer anyway)" context)
     case "$held" in
       \"*)

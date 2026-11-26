@@ -155,8 +155,10 @@ class Fake:
                 parts = urlsplit(self.path.removeprefix("/api/v1/plugin"))
                 path = parts.path
                 body = json.loads(raw) if raw else None
+                # (``at``: when the request reached the server, by the clock that only goes forward.)
                 fake.requests.append({"method": self.command, "path": path, "query": parse_qs(parts.query),
-                                      "headers": dict(self.headers), "raw": raw, "body": body})
+                                      "headers": dict(self.headers), "raw": raw, "body": body,
+                                      "at": time.monotonic()})
                 if path in fake.delay:
                     time.sleep(fake.delay[path])
                 if fake.drop.get(path):
@@ -7956,11 +7958,26 @@ printf '%s\\n' "$told" | sed {edits} | exec "{shutil.which('curl')}" "$@"
 
 def test_the_check_before_a_push_never_runs_past_the_time_its_tool_gives_it(run, fake, repo, tmp_path):
     """A hook that runs past its timeout is ended by the tool, and the push then runs, unchecked and unsaid. So the
-    longest the hook before a push can wait stays inside the timeout both tools give it: here the server was slow a
-    moment ago, so the quick question goes first, before telling the server again that code sharing is on and before
-    the check, and every call runs out."""
+    longest the hook before a push can wait stays inside the timeout both tools give it. A check whose connection broke
+    after it went out is made once more, within what is left of its own time, so that it adds nothing to that wait; and
+    at the longest, the server was slow a moment ago, so the quick question goes first, before telling the server again
+    that code sharing is on and before the check, and every call runs out."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
+    # The check's connection breaks 2 seconds after it went out: it is made once more, as the same request, with what
+    # was left of its 75 seconds once the whole seconds gone are counted, and no more.
+    fake.delay["/check"] = 2
+    fake.drop["/check"] = 1
+    fake.check = dict(HELD_PUSH)
+    (tmp_path / "again").mkdir()
+    path, limits = curl_limits(tmp_path / "again", {})
+    said = before_run(run, repo, "git push origin main", extra={"PATH": path})
+    assert denied(said) and said["systemMessage"] == f"Vyavasta · {HELD_PUSH['notice']}"
+    first, second = fake.calls("/check")
+    assert second["body"]["request_id"] == first["body"]["request_id"]
+    *_, once, again = (int(limit) for limit in limits.read_text().split())
+    assert once == 75 and again <= once - int(second["at"] - first["at"])
+    # At the longest, the quick question goes first, code sharing is told again, and every call runs out.
     for told in run.home.glob("projects/*/sharing-told"):
         told.unlink()
     aged(run, "slow", 10)
@@ -8010,9 +8027,12 @@ def test_a_push_that_couldnt_be_checked_runs_once_the_developer_says_go_ahead_an
 def test_a_push_that_carries_a_teammates_file_says_so_once(run, fake, repo):
     """Teammates changing the same file are told again when one of them is about to push it, once for each push. The
     server says it with the push's own check (its ``overlap``): Claude Code's developer reads the line on the push's
-    own line, held or not, and nothing else stops; Codex shows its developer nothing of that hook, so its model opens
-    its reply to the next message with the line, as it does with every line of teammates changing the same files. The
-    details come to the tool's model with that next message, and the line is not shown again."""
+    own line, held or not, with any such line still waiting, and nothing else stops. Codex shows its developer nothing
+    of that hook but a refusal's reason: held, the push gives its model the line with the hold's own, to open what it
+    says next with, before the developer chooses whether to go past it; a push that runs leaves the line for its model
+    to open its reply to the next message with, as it does with every line of teammates changing the same files. The
+    details come to the tool's model with the next message, and a line told is not told again, at the next edit
+    either."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
@@ -8036,6 +8056,30 @@ def test_a_push_that_carries_a_teammates_file_says_so_once(run, fake, repo):
     fake.check = {**HELD_PUSH, "overlap": {**OVERLAP_LINES, "lines": LINES[1:]}}
     stopped = before_run(run, repo, "git push origin main", session="s-held")
     assert denied(stopped) and stopped["systemMessage"] == f"Vyavasta · {HELD_PUSH['notice']}\n\n{line}"
+    # Held in Codex, the line comes with the hold's own lines, before the developer goes past it, and isn't told again
+    # once the push has run.
+    held = before_run(run, repo, "git push origin main", tool="codex", session="s-codex-held")
+    shown, _ = relayed_reason(held)
+    assert shown == f"Vyavasta · {HELD_PUSH['notice']}".split("\n") + [line]
+    assert "going ahead" in prompt(run, repo, "Go ahead anyway", session="s-codex-held", tool="codex")["systemMessage"]
+    assert before_run(run, repo, "git push origin main", tool="codex", session="s-codex-held") == {}
+    fake.check = dict(clear)
+    assert relayed(prompt(run, repo, "Add another test", session="s-codex-held", tool="codex")) == []
+    # A line that a report after an edit kept for the check after the next edit is told on the push's line, before the
+    # push's own: neither is told again at that edit, and the push's details still come to Claude with the next message.
+    theo = OVERLAP["context"].replace("Priya Raman", "Theo Okafor")
+    (repo / "old.py").write_text("x = 2\n")
+    fake.extra["/work"] = {"overlap": {**OVERLAP_LINES, "lines": LINES[:1]}}
+    run("hook", "edited", stdin=event("PostToolUse", repo, session="s-edit", tool_name="Edit"), cwd=repo)
+    fake.extra.clear()
+    fake.check = {**clear, "overlap": {**OVERLAP_LINES, "lines": LINES[1:], "context": theo}}
+    assert before_run(run, repo, "git push origin main", session="s-edit") == {
+        "systemMessage": f"Vyavasta: {LINES[0]}\n{line}"}
+    fake.check = dict(clear)
+    assert run("hook", "edit-check", stdin=event("PostToolUse", repo, session="s-edit", tool_name="Edit"),
+               cwd=repo).stdout == ""
+    after = prompt(run, repo, "Add a test for old.py", session="s-edit")
+    assert LINES[0] not in after["systemMessage"] and theo in after["hookSpecificOutput"]["additionalContext"]
 
 
 def test_a_push_its_message_cleared_runs_without_a_second_check_until_it_carries_another_commit(run, fake, repo):
