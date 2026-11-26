@@ -2653,6 +2653,22 @@ def test_with_summaries_off_nothing_is_kept_and_no_reply_is_sent(run, fake, repo
     assert not fake.calls("/turn")
 
 
+def test_a_turns_end_with_no_reply_to_send_says_its_report_ends_the_turn(run, fake, repo):
+    """Where no reply goes with a turn's end (summaries off), its work report goes on its own and says it ends the
+    turn, so that the server tells then of teammates changing the same files; a report after an edit never says so."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    run("summaries", "off", cwd=repo)
+    prompt(run, repo, "Change calc.py")
+    (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    run("hook", "edited", stdin=event("PostToolUse", repo, tool_name="Edit"))
+    assert fake.calls("/work") and "turn_end" not in fake.calls("/work")[-1]["body"]
+    fake.requests.clear()
+    stop(run, repo, last_assistant_message="Done.")
+    assert not fake.calls("/turn")
+    assert fake.calls("/work")[-1]["body"]["turn_end"] is True
+
+
 def test_the_plugins_own_commands_and_answers_to_its_questions_are_never_kept(run, fake, repo):
     signed_in(run, fake)
     switched_on(run, fake, repo)

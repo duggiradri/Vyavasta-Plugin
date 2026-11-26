@@ -4550,6 +4550,9 @@ work_report() {
       "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$1")")" "$state" "$(cat "$TMP/files")" "$CLIENT"
     cat "$report_git"
     if [ -n "$with_change" ]; then printf ',"change":'; cat "$TMP/change"; fi
+    # (A turn's end that sends the report on its own says so: teammates changing the same files are then told at once,
+    # not held as after an edit.)
+    [ -z "${TURN_END:-}" ] || printf ',"turn_end":true'
     printf '}'
   } > "$TMP/report"
 }
@@ -4616,7 +4619,11 @@ hook_report() {
     fi
   elif [ -n "$TOKEN" ] && repository "$folder"; then
     changed_files
-    if [ -z "$turn" ]; then report_work "$dir"
+    if [ -z "$turn" ]; then
+      # (The turn's end with no reply to go with it: its report on its own, saying it ends the turn.)
+      [ "$1" = "stopped" ] && TURN_END=1
+      report_work "$dir"
+      TURN_END=""
     elif work_report "$dir"; then
       send_turn "$dir" "$folder" work
       turn=""
