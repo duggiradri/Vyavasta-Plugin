@@ -79,6 +79,8 @@ class Fake:
                       "url": "http://127.0.0.1/c/cnv_1"}
         self.slow = 0
         self.approved = False
+        # The tokens that work: those it gave (/token) and ``signed_in``'s, less those signed out (/signout).
+        self.tokens = {TOKEN}
         self.status: dict[str, int] = {}
         # What the newer routes answer.
         self.latest = "0.6.0"
@@ -174,7 +176,8 @@ class Fake:
                 if fake.combined and isinstance(body, dict) and body.get("request_id") and \
                         (path, body["request_id"]) in fake.answered:
                     return self._answer(*fake.answered[(path, body["request_id"])])
-                signed = self.headers.get("Authorization") == f"Bearer {TOKEN}"
+                bearer = self.headers.get("Authorization") or ""
+                signed = bearer.startswith("Bearer ") and bearer[7:] in fake.tokens
                 if path == "/hello":
                     return self._answer(200, {"ok": True, "latest": fake.latest, "minimum": fake.minimum})
                 if path == "/pair":
@@ -184,8 +187,11 @@ class Fake:
                 if path == "/token":
                     if not fake.approved:
                         return self._answer(202, {"status": "pending"})
-                    return self._answer(200, {"token": TOKEN, "email": "sam@acme.test", "workspace": "Acme",
-                                              "machine": "laptop", **fake.extra.get("/token", {})})
+                    given = {"token": TOKEN, "email": "sam@acme.test", "workspace": "Acme", "machine": "laptop",
+                             **fake.extra.get("/token", {})}
+                    if isinstance(given["token"], str):
+                        fake.tokens.add(given["token"])
+                    return self._answer(200, given)
                 if not signed:
                     return self._answer(401, {"detail": {"code": "signed_out", "message": "Ended."}})
                 if path == "/me":
@@ -271,6 +277,7 @@ class Fake:
                         told.setdefault("context", told_context(told["to"]["name"], told["answer"]))
                     return self._answer(200, told)
                 if path == "/signout":
+                    fake.tokens.discard(bearer[7:])
                     return self._answer(200, {"ok": True})
                 return self._answer(404, {"detail": {"code": "not_found", "message": "No."}})
 
@@ -388,6 +395,7 @@ def prompt(run, repo: Path, text: str, session: str = "session-1", **kwargs) -> 
 def signed_in(run, fake: Fake) -> None:
     run.home.mkdir(parents=True, exist_ok=True)
     (run.home / "credentials").write_text(f"server={fake.url}\ntoken={TOKEN}\nemail=sam@acme.test\nworkspace=Acme\n")
+    fake.tokens.add(TOKEN)
 
 
 # The plugin's version, the banner a greeting opens with, what it offers to try and what the version brought, as the
@@ -398,6 +406,8 @@ TRY_THESE = "“What is my team working on?” · “Push this, then tell @priya
     "summary”"
 TRY = f"\nSend “vyavasta on” in a project, then try: {TRY_THESE}"
 AGENTS = {"Claude Code": "Claude", "Codex": "Codex"}
+# How the plugin says to sign out, wherever it says whom the computer is signed in as.
+WAY_OUT = "Send “vyavasta sign out” to sign this computer out."
 
 
 def banner(tool: str = "Claude Code") -> str:
@@ -425,8 +435,8 @@ def greeted() -> str:
 def already_connected(tool: str) -> str:
     """What a tool's first session says in a project that is off, on a computer that ``signed_in`` connected."""
     return (f"{banner(tool)}Vyavasta is installed in {tool}. This computer is already connected as sam@acme.test in "
-            "Acme: one connection serves both Claude Code and Codex. It stays off in this project until you send "
-            f"“vyavasta on”. “vyavasta help” shows the commands any time.{TRY}")
+            f"Acme: one connection serves both Claude Code and Codex. {WAY_OUT} It stays off in this project until you "
+            f"send “vyavasta on”. “vyavasta help” shows the commands any time.{TRY}")
 
 
 def switched_on(run, fake: Fake, folder: Path, greeted_in: tuple[str, ...] = ("claude-code", "codex")) -> None:
@@ -555,10 +565,101 @@ def test_the_first_message_while_signed_out_opens_sign_in_by_itself_once_a_sessi
     assert "Connected as sam@acme.test in Acme." in said and fake.calls("/check")
 
 
-def test_signing_out_ends_the_token_on_the_server_and_forgets_it(run, fake, repo):
+@pytest.mark.parametrize("tool", [None, "codex"], ids=["claude-code", "codex"])
+def test_signing_out_works_from_both_tools_and_always_ends_the_connection(run, fake, repo, tool):
+    """“vyavasta sign out” (in Claude Code /vyavasta:sign-out too) says whom it signed out, ends the connection on the
+    server, and forgets it here. Where the server can't be reached just then, the connection is ended at the next
+    session's start, never left open."""
     signed_in(run, fake)
-    assert "Signed out" in run("sign-out", cwd=repo).stdout
-    assert fake.calls("/signout") and not (run.home / "credentials").exists()
+    said = prompt(run, repo, "vyavasta sign out", tool=tool)["reason"]
+    assert said.startswith("Signed out of Vyavasta on this computer, which was signed in as sam@acme.test in Acme.")
+    (ended,) = fake.calls("/signout")
+    assert ended["headers"]["Authorization"] == f"Bearer {TOKEN}" and TOKEN not in fake.tokens
+    assert not (run.home / "credentials").exists() and "Not signed in." in run("status", cwd=repo, tool=tool).stdout
+    # Signed in again, and signed out while the server fails: signed out here at once, and ended once it answers.
+    signed_in(run, fake)
+    fake.status["/signout"] = 503
+    if tool is None:
+        said = output(run("hook", "expansion", stdin=event("UserPromptExpansion", repo,
+                                                            command_name="vyavasta:sign-out")))["reason"]
+    else:
+        said = prompt(run, repo, "vyavasta sign out", tool=tool)["reason"]
+    assert said.endswith("Vyavasta couldn’t be reached to end the connection just now, so it is ended the next time "
+                         "Vyavasta is reached.") and not (run.home / "credentials").exists()
+    assert TOKEN in fake.tokens
+    del fake.status["/signout"]
+    start(run, repo, tool, "s2")
+    assert len(fake.calls("/signout")) == 3 and TOKEN not in fake.tokens and not (run.home / "ending").exists()
+
+
+PRIYA_TOKEN = "vyv-tool-priya-token-value"
+
+
+def test_signing_in_as_another_account_replaces_the_first_and_ends_its_connection(run, fake, repo):
+    """One account at a time on a computer: “vyavasta sign in” while signed in starts a sign-in that replaces the
+    account once it is approved, and the connection it replaces is ended on the server, never left open. Until then
+    nothing changes."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    said = prompt(run, repo, "vyavasta sign in")["reason"]
+    assert said.startswith("This computer is signed in as sam@acme.test in Acme. To sign in as another account, "
+                           f"enter the code BCDF-GHJK on the page that just opened in your browser ({CONNECT}).")
+    assert said.endswith("this computer is then signed in as that account only: one account at a time. Until then "
+                         "nothing changes.") and run.opened() == [CONNECT]
+    prompt(run, repo, "Change calc.py")
+    assert fake.calls("/check")[-1]["headers"]["Authorization"] == f"Bearer {TOKEN}" and not fake.calls("/signout")
+    # Approved as Priya: the next message finishes it, says so, and Sam's connection is ended on the server.
+    fake.approved = True
+    fake.extra["/token"] = {"token": PRIYA_TOKEN, "email": "priya@acme.test"}
+    line = prompt(run, repo, "Change calc.py")["systemMessage"]
+    assert ("Connected as priya@acme.test in Acme. This computer is no longer signed in as sam@acme.test in Acme: one "
+            "account at a time.") in line
+    (ended,) = fake.calls("/signout")
+    assert ended["headers"]["Authorization"] == f"Bearer {TOKEN}" and TOKEN not in fake.tokens
+    assert fake.calls("/check")[-1]["headers"]["Authorization"] == f"Bearer {PRIYA_TOKEN}"
+    kept = (run.home / "credentials").read_text()
+    assert f"token={PRIYA_TOKEN}\n" in kept and TOKEN not in kept and "email=priya@acme.test\n" in kept
+
+
+def test_a_plugin_removed_and_installed_again_starts_signed_out_and_opens_the_sign_in_page(run, fake, repo, tmp_path):
+    """No tool tells a plugin it is being removed. Claude Code gives a plugin a folder of its own that updates keep and
+    removing the plugin deletes: the plugin's mark there, gone, says it was installed again. Its connection is then
+    ended on the server, and the plugin starts as a first install does, signed out, with the sign-in page open. An
+    update keeps the sign-in, and so does the first run of a release that marks the folder. Codex keeps a removed
+    plugin's folder, and installs plugins again by itself, so nothing there signs anyone out."""
+    data = tmp_path / "claude" / "plugins" / "data" / "vyavasta-vyavasta"
+    claude = {"CLAUDE_PLUGIN_DATA": str(data)}
+    signed_in(run, fake)
+    # The first run of a release that marks the folder, on a computer signed in before it: nobody is signed out.
+    assert start(run, repo, None, "s1", extra=claude) == {"systemMessage": already_connected("Claude Code")}
+    assert (data / "install").exists()
+    # Updated, the folder kept: still signed in.
+    (run.home / "welcomed-claude-code").write_text("0.5.4 1\n")
+    assert "already connected as sam@acme.test" in start(run, repo, None, "s2", extra=claude)["systemMessage"]
+    assert not fake.calls("/signout") and not fake.calls("/pair")
+    # Removed (the folder deleted with it) and installed again: signed out, the connection ended, the page open.
+    shutil.rmtree(data)
+    again = start(run, repo, None, "s3", extra=claude)["systemMessage"]
+    assert again.startswith(banner() + "Vyavasta is installed again, so this computer was signed out of "
+                            "sam@acme.test in Acme. To connect this computer, enter the code BCDF-GHJK on the page that "
+                            "just opened in your browser")
+    (ended,) = fake.calls("/signout")
+    assert ended["headers"]["Authorization"] == f"Bearer {TOKEN}" and TOKEN not in fake.tokens
+    assert not (run.home / "credentials").exists() and run.opened() == [CONNECT]
+    # The same when it is installed again in the middle of a session (/reload-plugins), in a project that is on: the
+    # next message says so, and starts the sign-in.
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    shutil.rmtree(data)
+    line = prompt(run, repo, "Change calc.py", extra=claude)["systemMessage"]
+    assert line.startswith("Vyavasta · nothing sent (the plugin was installed again, so this computer was signed out of "
+                           "sam@acme.test in Acme) · The sign-in page is open in your browser: enter the code BCDF-GHJK")
+    assert len(fake.calls("/signout")) == 1 and not fake.calls("/check") and not (run.home / "credentials").exists()
+    # Codex: a folder found unmarked signs nobody out.
+    signed_in(run, fake)
+    fresh = str(tmp_path / "codex" / "plugins" / "data" / "vyavasta-vyavasta")
+    start(run, repo, "codex", "c1", extra={"CLAUDE_PLUGIN_DATA": fresh, "PLUGIN_DATA": fresh})
+    assert (run.home / "credentials").exists() and len(fake.calls("/signout")) == 1
 
 
 def test_a_token_is_never_sent_to_a_server_other_than_the_one_that_gave_it(run, fake, repo, tmp_path):
@@ -1642,13 +1743,21 @@ def test_a_session_starts_with_what_teammates_asked_while_away_each_under_its_he
     assert fake.calls("/inbox")[0]["query"] == {"told": ["1"]}
 
 
-def test_a_session_starts_by_saying_where_it_is_signed_in(run, fake, repo):
+@pytest.mark.parametrize("tool", [None, "codex"], ids=["claude-code", "codex"])
+def test_whom_the_computer_is_signed_in_as_and_how_to_sign_out_are_said_at_every_start_and_in_status_and_help(
+        run, fake, repo, tool):
     switched_on(run, fake, repo)
-    assert "not signed in" in output(run("hook", "session-start", stdin=event("SessionStart", repo)))["systemMessage"]
+    assert "not signed in" in output(run("hook", "session-start", stdin=event("SessionStart", repo),
+                                         tool=tool))["systemMessage"]
     signed_in(run, fake)
-    said = output(run("hook", "session-start", stdin=event("SessionStart", repo)))["systemMessage"]
+    said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool=tool))["systemMessage"]
     assert said == ("Vyavasta: signed in as sam@acme.test in Acme. Requests are checked against your team’s record "
-                    "before Claude changes code, and questions about your team are answered from it.")
+                    f"before {AGENTS[NAMED[tool]]} changes code, and questions about your team are answered from it. "
+                    f"{WAY_OUT}")
+    assert f"Signed in as sam@acme.test in Acme, on laptop. {WAY_OUT}" in run("status", cwd=repo, tool=tool).stdout
+    assert ("1. Sign in: send “vyavasta sign in”. You’re signed in as sam@acme.test in Acme, one account at a time: "
+            f"signing in as another replaces it. {WAY_OUT}") in run("help", cwd=repo, tool=tool).stdout
+    assert f"- Signed in as: sam@acme.test in Acme. {WAY_OUT}" in run("settings", cwd=repo, tool=tool).stdout
 
 
 def test_a_server_that_checks_no_request_is_never_said_to_check_one(run, fake, repo):
@@ -1660,7 +1769,7 @@ def test_a_server_that_checks_no_request_is_never_said_to_check_one(run, fake, r
     fake.extra["/me"] = {"checks": False}
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo)))
     assert started["systemMessage"] == (f"Vyavasta: signed in as sam@acme.test in Acme. {unchecked} Questions about "
-                                        "your team are answered from its record.")
+                                        f"your team are answered from its record. {WAY_OUT}")
     assert "checked against the record before it reaches you" not in started["hookSpecificOutput"]["additionalContext"]
     for said in (run("on", cwd=repo).stdout, run("status", cwd=repo).stdout, run("check", cwd=repo).stdout):
         assert unchecked in said or unchecked[0].lower() + unchecked[1:] in said, said
@@ -2233,14 +2342,15 @@ def test_a_session_start_says_connected_once_and_what_a_folder_not_read_does(run
     git(repo, "remote", "set-url", "origin", "https://github.com/acme/web.git")
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s2")))["systemMessage"]
     assert said == ("Vyavasta: signed in as sam@acme.test in Acme. Vyavasta doesn’t read acme/web for you, so "
-                    "requests here aren’t checked; questions about your team are still answered.")
+                    f"requests here aren’t checked; questions about your team are still answered. {WAY_OUT}")
 
 
 def test_signing_out_says_nothing_is_sent_and_help_names_the_typed_only_commands(run, fake, repo):
     signed_in(run, fake)
-    assert run("sign-out", cwd=repo).stdout.strip() == ("Signed out of Vyavasta on this computer. Requests are no "
-                                                        "longer checked, and nothing is sent from this computer until "
-                                                        "you send “vyavasta sign in”.")
+    assert run("sign-out", cwd=repo).stdout.strip() == ("Signed out of Vyavasta on this computer, which was signed in "
+                                                        "as sam@acme.test in Acme. Requests are no longer checked, and "
+                                                        "nothing is sent from this computer until you send “vyavasta "
+                                                        "sign in”.")
     text = run("help", cwd=repo).stdout
     assert "ask, tell, reply, and searching and reading documents are typed only" in text
     assert "It answers only from what you can both already see" in text
@@ -2864,7 +2974,7 @@ def test_help_starts_with_what_it_does_and_three_steps_that_say_where_you_stand(
     signed_in(run, fake)
     switched_on(run, fake, repo)
     text = run("help", cwd=repo).stdout
-    assert "You’re signed in as sam@acme.test in Acme." in text and "It is on here." in text
+    assert "You’re signed in as sam@acme.test in Acme, one account at a time" in text and "It is on here." in text
     assert "/vyavasta:" not in run("help", cwd=repo, tool="codex").stdout
 
 
@@ -2872,11 +2982,11 @@ def test_help_starts_with_what_it_does_and_three_steps_that_say_where_you_stand(
 def test_a_question_about_using_vyavasta_gives_the_model_the_phrases_and_sends_nothing_when_off(run, fake, repo, tool):
     signed_in(run, fake)
     for asked in ("How do I sign in to Vyavasta?", "what does the vyavasta plugin send", "How do I turn vyavasta off?",
-                  "Can you help me connect Vyavasta?"):
+                  "Can you help me connect Vyavasta?", "How do I sign out of Vyavasta on this laptop?"):
         said = prompt(run, repo, asked, tool=tool)
         assert set(said) == {"hookSpecificOutput"}, asked
         context = said["hookSpecificOutput"]["additionalContext"]
-        for phrase in ("“vyavasta sign in”", "“vyavasta on”", "“vyavasta help”", "“vyavasta status”",
+        for phrase in ("“vyavasta sign in”", "“vyavasta sign out”", "“vyavasta on”", "“vyavasta help”", "“vyavasta status”",
                        "“vyavasta check”", "“vyavasta settings”", "“vyavasta summaries on”",
                        "“vyavasta share code on”"):
             assert phrase in context
@@ -3547,7 +3657,7 @@ def test_signed_in_as_names_the_address_and_workspace_cut_to_40_characters_and_k
     assert shown + ", on laptop." in run("status", cwd=repo).stdout
     assert "ok: s" + shown[1:] + "." in run("check", cwd=repo).stdout
     assert "- " + shown.replace("Signed in as", "Signed in as:") + ". Send" in run("settings", cwd=repo).stdout
-    assert "You’re s" + shown[1:] + "." in run("help", cwd=repo).stdout
+    assert "You’re s" + shown[1:] + ", one account at a time" in run("help", cwd=repo).stdout
     for said in (run("status", cwd=repo).stdout, run("check", cwd=repo).stdout, run("settings", cwd=repo).stdout,
                  run("help", cwd=repo).stdout):
         assert "before anything else" not in said and email not in said
@@ -3809,10 +3919,10 @@ ORDER_IDS = ["claude-code-then-codex", "codex-then-claude-code"]
 NAMED = {None: "Claude Code", "codex": "Codex"}
 
 
-def start(run, folder: Path, tool: str | None, session: str) -> dict:
+def start(run, folder: Path, tool: str | None, session: str, extra: dict | None = None) -> dict:
     """What a session's start prints in ``folder``, under one tool."""
     return output(run("hook", "session-start", stdin=event("SessionStart", folder, session=session), cwd=folder,
-                      tool=tool))
+                      tool=tool, extra=extra))
 
 
 @pytest.mark.parametrize("first, second", ORDERS, ids=ORDER_IDS)
@@ -4400,10 +4510,10 @@ def test_vyavasta_summary_shows_the_developers_own_summaries_with_who_sees_them_
 
 
 def test_the_plugin_greets_again_after_it_is_installed_again_or_updated_and_then_says_what_is_new(run, fake, repo):
-    """A plugin removed and installed again keeps its sign-in (the settings folder is not the plugin's to remove), so
-    nothing needs signing in to: it still greets, once, and says who the computer is connected as. After an update
-    it says what the version brought. The file of who greeted last holds the version and which copy of the script
-    it was."""
+    """Where the tool gives the plugin no folder of its own to tell by (Codex, or a Claude Code from before it gave
+    one), a plugin removed and installed again can't be told from one updated, and keeps its sign-in: it still greets,
+    once, and says who the computer is connected as. After an update it says what the version brought. The file of
+    who greeted last holds the version and which copy of the script it was."""
     signed_in(run, fake)
     first = start(run, repo, None, "s1")["systemMessage"]
     assert first == already_connected("Claude Code") and (run.home / "welcomed-claude-code").read_text() == greeted()
@@ -5183,7 +5293,8 @@ def test_other_ways_of_typing_a_command_are_the_same_command(run, fake, repo, ty
         if command in ("sign-in", "sign-out"):
             said = prompt(run, repo, typed)
             assert said["decision"] == "block"
-            assert ("Already signed in" in said["reason"]) if command == "sign-in" else ("Signed out" in said["reason"])
+            assert ("This computer is signed in as sam@acme.test in Acme" in said["reason"]) if command == "sign-in" \
+                else ("Signed out" in said["reason"])
             signed_in(run, fake)
             continue
         # (On and off each answer from the state before them: the same state before both.)
@@ -5295,7 +5406,8 @@ def test_each_slash_command_is_answered_by_the_hook_with_what_the_command_says(r
     skills = sorted(path.parent.name for path in (PLUGIN / "skills").glob("*/SKILL.md") if path.parent.name != "guide")
     assert skills == sorted(COMMANDS)
     for skill in skills:
-        if skill in ("sign-out", "on", "off", "share-code-on", "share-code-off", "summaries-on", "summaries-off"):
+        if skill in ("sign-in", "sign-out", "on", "off", "share-code-on", "share-code-off", "summaries-on",
+                     "summaries-off"):
             continue
         said = expansion(run, repo, f"vyavasta:{skill}")
         # Held back from the model, with the command's own answer as what the developer reads.
@@ -5304,6 +5416,9 @@ def test_each_slash_command_is_answered_by_the_hook_with_what_the_command_says(r
         assert said["reason"] == run(*words.split(), cwd=repo).stdout.rstrip("\n"), skill
     assert fake.calls("/check") == []
     # The ones that change something do it once, as the skill would.
+    assert expansion(run, repo, "vyavasta:sign-in")["reason"].startswith(
+        "This computer is signed in as sam@acme.test in Acme. To sign in as another account, enter the code BCDF-GHJK")
+    assert len(fake.calls("/pair")) == 1
     assert expansion(run, repo, "vyavasta:off")["reason"].startswith("Vyavasta is off for api")
     assert not list((run.home / "projects").glob("*/on"))
     assert expansion(run, repo, "vyavasta:on")["reason"].startswith("Vyavasta is on for api")
@@ -5828,7 +5943,7 @@ def test_status_in_the_minute_after_the_server_was_missed_says_so_and_check_trie
                          ("unanswered", "The server didn’t answer a moment ago")):
         aged(run, marker, 5)
         status = run("status", cwd=repo).stdout
-        assert "Signed in as sam@acme.test in Acme.\n" in status and fake.requests == []
+        assert f"Signed in as sam@acme.test in Acme. {WAY_OUT}\n" in status and fake.requests == []
         assert f"{said}, so requests aren’t being checked. It is tried again in a minute, and “vyavasta check” " \
                "tries it now." in status
         assert "ok: Vyavasta’s server answers." in run("check", cwd=repo).stdout
