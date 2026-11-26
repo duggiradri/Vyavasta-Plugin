@@ -12,10 +12,14 @@
 # sign-in's own reference, never the message.
 #
 # What it sends from a project that is on: the words of each message to the check, the repository's GitHub remote
-# (without any credentials in it), the branch, the tool's session id, and for each changed file its path, git's
-# status and line counts. With code sharing on (off until the developer turns it on), also the uncommitted changes
-# themselves, never from files git ignores, files that look like keys, machine-written files or files that are
-# not text. A message that asks about the team is sent on as a question to the developer's own assistant in
+# (without any credentials in it), the branch, the tool's session id, and the facts of the work on this computer that
+# isn't on GitHub yet: for each changed file (new files too) its path, git's status and line counts; the commits no
+# remote-tracking branch has, each with its message and its files; the branch, its upstream and where it left origin's
+# default branch; and the same for each repository nested inside this one (a submodule, or a clone put inside it).
+# With code sharing on (on unless the developer turns it off, and said where the project is turned on), also the
+# changes themselves and the latest copy of each changed file, each copy once until it changes again. Never a file git
+# ignores or one that looks like a key, in any of it; never what a machine-written file or a file that is not text
+# holds. A message that asks about the team is sent on as a question to the developer's own assistant in
 # Vyavasta. With summaries on (on until the developer turns them off), each message and the tool's last reply of
 # the turn, as written, are kept in the session's own chat in Vyavasta, to be summed up for teammates; a reply can
 # quote code or what a file holds. Never the conversation transcript, the tool's other steps, the commands it ran,
@@ -238,10 +242,30 @@ UNSENT_FOR=3000
 UNSENT_MOST=10
 RIDE_SECONDS=4
 RIDE_AFTER=60
-# How much of the uncommitted changes is sent at most, unless the server says otherwise, and the longest line.
+# How much of the uncommitted changes is sent at most, unless the server says otherwise, and the longest line. The
+# commits not pushed yet are sent as a diff of their own within the same limits.
 CHANGE_LINES=5000
 CHANGE_BYTES=600000
 LONGEST_LINE=2000
+# A changed file's latest copy goes whole when it is text of COPY_MOST bytes or less, and at most COPIES_BYTES of such
+# text go in one call (the rest go with the next). However the parts add up, a call's changes stay within CHANGE_MOST
+# bytes of JSON and the facts of the work within FACTS_MOST, so that a call never grows past the 4 MB a server takes
+# (whatever doesn't fit waits for a later call, or is left for the diff above to say).
+COPY_MOST=262144
+COPIES_BYTES=400000
+CHANGE_MOST=2400000
+FACTS_MOST=800000
+# The commits not pushed yet that are listed at most (newest first), how much of each message, and how many of their
+# files in all; and the repositories nested inside this one that are looked at, with fewer of their commits.
+UNPUSHED_MOST=50
+SUBJECT_CHARACTERS=500
+BODY_CHARACTERS=2000
+COMMIT_FILES=300
+COMMITS_FILES=1000
+NESTED_MOST=8
+NESTED_UNPUSHED=20
+NESTED_FILES=200
+NESTED_FRESH=120
 # How much of the tool's reply at the end of a turn is kept for the developer's summary, in characters.
 REPLY_CHARACTERS=4000
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -806,8 +830,13 @@ keep_credentials() {
 }
 
 # What each project last told the server about code sharing belongs to one connection: the server forgets it when
-# the connection ends, so a new one is told again with the next message.
-forget_told() { rm -f "$PROJECTS"/*/sharing-told; }
+# the connection ends, so a new one is told again with the next message. So do the changes and the files' copies each
+# session sent (`forget_sent`).
+forget_told() { rm -f "$PROJECTS"/*/sharing-told; forget_sent; }
+
+# Which changes, and which copies of files, each session last sent: forgotten when what the server kept of them goes
+# (the connection ends, or code sharing is turned off or on), so that the next report sends them again.
+forget_sent() { rm -f "$SESSIONS"/*/change-sum "$SESSIONS"/*/copies-sent; }
 
 # Whether a JSON list of repository names (as /me gives it) holds the repository $2, in any letter case, as GitHub
 # itself matches names.
@@ -896,11 +925,29 @@ out_said() {
 
 # Sets PROJECT (the git top-level folder of a folder, or the folder itself outside git) and PDIR, where this
 # computer keeps the project's choices: `on` (there when the plugin is on here), `sharing` (on or off; not there
-# when never chosen), `summaries` (on or off; not there when never chosen, which is on).
+# when never chosen, which is on), `summaries` (on or off; not there when never chosen, which is on). A repository
+# nested inside a project that is on (a submodule, or a clone put inside it), and not on itself, is part of that
+# project: the tool working inside it reports the project's work, the nested repository's with it (`nested_facts`).
 project_of() {
+  NESTED_IN=""
   PROJECT=$(git_read -C "$1" rev-parse --show-toplevel 2>/dev/null)
   [ -n "$PROJECT" ] || PROJECT="$1"
   PDIR="$PROJECTS/$(printf '%s' "$PROJECT" | cksum | awk '{ print $1 }')"
+  [ -f "$PDIR/on" ] || enclosing_project
+}
+
+# The project that is on and holds PROJECT within it (the nearest, where several do), when it is a git repository
+# itself: PROJECT and PDIR become it, and NESTED_IN names its folder, which `repository` then reads. Found with the
+# shell's own words alone, so a folder that is off costs what it did. Nothing changes where there is none.
+enclosing_project() {
+  outer_path=""
+  for on_file in "$PROJECTS"/*/on; do
+    [ -f "$on_file" ] && read -r on_path < "${on_file%/on}/path" || continue
+    case "$PROJECT" in "$on_path"/*) ;; *) continue ;; esac
+    [ -e "$on_path/.git" ] && [ "${#on_path}" -gt "${#outer_path}" ] && { outer_path=$on_path; outer_pdir=${on_file%/on}; }
+  done
+  [ -n "$outer_path" ] || return 0
+  PROJECT=$outer_path; PDIR=$outer_pdir; NESTED_IN=$outer_path
 }
 
 project_on() { [ -f "$PDIR/on" ]; }
@@ -909,10 +956,24 @@ project_keep() {
   mkdir -p "$PDIR" && chmod 700 "$PROJECTS" && printf '%s\n' "$PROJECT" > "$PDIR/path"
 }
 
+# Code sharing is on unless the developer turned it off: a project that never chose has it on. Its code goes only
+# once the developer has been told so (`sharing_now`).
 sharing() {
-  [ -f "$PDIR/sharing" ] && [ "$(cat "$PDIR/sharing")" = "on" ] && { echo on; return; }
-  echo off
+  sharing_chosen=""
+  [ -f "$PDIR/sharing" ] && read -r sharing_chosen < "$PDIR/sharing"
+  [ "$sharing_chosen" = "off" ] && { echo off; return; }
+  echo on
 }
+
+# Whether the developer knows code sharing is on in this project: they chose it (`sharing` is there), or were told it
+# is on (`sharing-said`, beside the setting) by the answer to “vyavasta on”, or, in a project turned on before it was
+# on by default, once on the first line a session or message gets (`sharing_note`).
+sharing_said() { [ -f "$PDIR/sharing" ] || [ -f "$PDIR/sharing-said" ]; }
+mark_sharing_said() { project_keep && true > "$PDIR/sharing-said"; }
+
+# Whether this project's code goes now: code sharing on, and the developer told so before this run (the run whose
+# line first tells them sends none of it).
+sharing_now() { [ -z "${SHARING_NOTE:-}" ] && [ "$(sharing)" = "on" ] && sharing_said; }
 
 # Summaries are on unless the developer turned them off: a project turned on before this setting existed has them
 # on as well.
@@ -1467,20 +1528,28 @@ unopened_said() { printf '%s' "It wasn’t opened, because $UNOPENED. Open it yo
 # -- the repository it is in ------------------------------------------------------------------------------------
 
 # Sets ROOT, REMOTE (the GitHub remote, without any user name or token in it) and BRANCH for a folder; fails when
-# the folder isn't in a git repository, or git isn't installed (NOGIT).
+# the folder isn't in a git repository, or git isn't installed (NOGIT). Inside a repository nested in a project that
+# is on (NESTED_IN, from `project_of`), the project's own repository is the one read.
 repository() {
   [ -z "$NOGIT" ] || { ROOT=""; return 1; }
-  ROOT=$(git_read -C "$1" rev-parse --show-toplevel) || return 1
+  ROOT=$(git_read -C "${NESTED_IN:-$1}" rev-parse --show-toplevel) || return 1
   [ -n "$ROOT" ] || return 1
   quiet_filters
-  REMOTE=$(git_read -C "$ROOT" remote get-url origin)
-  if [ -z "$REMOTE" ]; then
-    first=$(git_read -C "$ROOT" remote | sed -n '1p')
-    [ -n "$first" ] && REMOTE=$(git_read -C "$ROOT" remote get-url "$first")
-  fi
-  REMOTE=$(printf '%s' "$REMOTE" | sed -E 's#^([A-Za-z+]+://)[^@/]*@#\1#')
+  remote_of "$ROOT"
   BRANCH=$(git_read -C "$ROOT" symbolic-ref --short -q HEAD)
   return 0
+}
+
+# Sets REMOTE for the repository at $1 (its origin, else its first remote, as an address without any user name or
+# token in it), and REMOTE_NAME to that remote's name; REMOTE is empty for a repository with no remote.
+remote_of() {
+  REMOTE_NAME=origin
+  REMOTE=$(git_read -C "$1" remote get-url origin)
+  if [ -z "$REMOTE" ]; then
+    REMOTE_NAME=$(git_read -C "$1" remote | sed -n '1p')
+    [ -n "$REMOTE_NAME" ] && REMOTE=$(git_read -C "$1" remote get-url "$REMOTE_NAME")
+  fi
+  REMOTE=$(printf '%s' "$REMOTE" | sed -E 's#^([A-Za-z+]+://)[^@/]*@#\1#')
 }
 
 # The filters a repository's own settings name (its .git/config and its worktree's, with what they include) are
@@ -1611,19 +1680,21 @@ gitx() {
 # new file that looks like a key or credential, or is written by machines, is never added, so nothing of it is
 # even read; nor is a new file over BIG_FILE, or one whose name holds a line break. Leaves git's listing against
 # the last commit in $TMP/scan, the new files left out in $TMP/left-untracked ("why<TAB>path" records) and the
-# others in $TMP/added.
+# others in $TMP/added. A repository put inside this one is listed by git as its folder, never its files: those go
+# to $TMP/nested-dirs, for `nested_facts` to read as repositories of their own, and are no file of this one.
 scan_tree() {
   [ -n "${SCANNED:-}" ] && return 0
   SCANNED=1
   SCAN_INDEX=""
   HEAD_SHA=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
   true > "$TMP/add"; true > "$TMP/big"; true > "$TMP/left-untracked"; true > "$TMP/added"; true > "$TMP/countable"
-  true > "$TMP/links"
+  true > "$TMP/links"; true > "$TMP/nested-dirs"
   git_read -C "$ROOT" ls-files --others --exclude-standard -z -- . "$OWN_SETTINGS" | tr '\000' '\001' \
-    | awk -v ADD="$TMP/add" -v LEFT="$TMP/left-untracked" -v MOST="$NEW_FILES" "$CLASSIFY"'
+    | awk -v ADD="$TMP/add" -v LEFT="$TMP/left-untracked" -v MOST="$NEW_FILES" -v NESTED="$TMP/nested-dirs" "$CLASSIFY"'
       BEGIN { RS = "\001"; added = 0 }
       $0 == "" { next }
       index($0, "\n") { printf "binary\t%s%c", $0, 1 > LEFT; next }
+      /\/$/ { print > NESTED; next }
       { w = why($0)
         if (w == "" && added >= MOST) w = "limit"
         if (w == "") { print $0 > ADD; added++ } else printf "%s\t%s%c", w, $0, 1 > LEFT }'
@@ -1657,7 +1728,7 @@ scan_tree() {
   gitdir=$(git_read -C "$ROOT" rev-parse --absolute-git-dir)
   rm -f "$TMP/index"
   if [ -f "$gitdir/index" ] && cp -p "$gitdir/index" "$TMP/index"; then SCAN_INDEX="$TMP/index"; fi
-  if [ -s "$TMP/added" ] && [ "$(sharing)" = "on" ]; then
+  if [ -s "$TMP/added" ] && [ -z "${NESTED_SCAN:-}" ] && sharing_now; then
     tr '\n' '\000' < "$TMP/added" > "$TMP/added-nul"
     if (GIT_INDEX_FILE="$TMP/index"; GIT_LITERAL_PATHSPECS=1; export GIT_INDEX_FILE GIT_LITERAL_PATHSPECS
         git_read -C "$ROOT" add -N --pathspec-from-file="$TMP/added-nul" --pathspec-file-nul >/dev/null); then
@@ -1669,42 +1740,57 @@ scan_tree() {
 }
 
 # git's own list of what changed in the working tree and the index since the last commit, as a JSON array of
-# paths, statuses and line counts, written to $TMP/files without its brackets. Nothing of any file is sent. A new
-# file git didn't compare has its lines counted here (each is a regular file under BIG_FILE, and at most 200 are
-# counted); a link, and one left out by name or size, is listed with no counts. NFILES is how many there are.
+# paths, statuses (a renamed file with the path it came `from`) and line counts, written to $TMP/files without its
+# brackets. Nothing of any file is sent. A new file git didn't compare has its lines counted here (each is a regular
+# file under BIG_FILE, and at most 200 are counted); a link, and one left out by size, is listed with no counts. A
+# file that looks like a key or credential, by its name now or the name it was renamed from, is never listed at all.
+# NFILES is how many there are. The files whose latest copy code sharing may send (`build_copies`) are noted in
+# $TMP/copy-candidates ("file" or "link", whether git found it isn't text, and the path), and those deleted from the
+# working tree in $TMP/copy-gone: never a key file, a machine-written one, a submodule or a file that changed type.
 changed_files() {
   scan_tree
   tr '\n' '\001' < "$TMP/countable" > "$TMP/added-list"
   tr '\n' '\001' < "$TMP/links" > "$TMP/links-list"
-  (cd "$ROOT" && awk -v COUNT="$TMP/files-count" "$AWK_ESCAPE$SCAN_AWK"'
+  (cd "$ROOT" && awk -v COUNT="$TMP/files-count" -v CAND="$TMP/copy-candidates" -v GONE="$TMP/copy-gone" \
+      "$CLASSIFY$AWK_ESCAPE$SCAN_AWK"'
     function lines(path,   count, line) {
       count = 0; RS = "\n"
       while ((getline line < path) > 0) count++
       close(path); RS = "\001"
       return count
     }
-    function show(path, status, a, d) {
+    function show(path, status, a, d, from) {
       if (path in seen) return
       seen[path] = 1
+      if (why(path) == "secret" || (from != "" && why(from) == "secret")) return
       if (shown >= 300) return
-      printf "%s{\"path\":\"%s\",\"status\":\"%s\",\"additions\":%d,\"deletions\":%d}", (shown ? "," : ""), esc(path), status, a, d
+      printf "%s{\"path\":\"%s\",\"status\":\"%s\",%s\"additions\":%d,\"deletions\":%d}", (shown ? "," : ""), esc(path), \
+        status, (from != "" ? "\"from\":\"" esc(from) "\"," : ""), a, d
       shown++
     }
-    BEGIN { RS = "\001"; n = 0; sstate = 0; shown = 0; extra = 0 }
+    function cand(path, s, mode, b, from) {
+      if (s == "D") { print path > GONE; return }
+      if (why(path) != "" || (from != "" && why(from) == "secret") || mode == "160000" || s == "T" || s == "U") return
+      if (index(path, "\n") || index(path, "\\")) return
+      printf "%s\t%d\t%s\n", (mode == "120000") ? "link" : "file", b, path > CAND
+    }
+    BEGIN { RS = "\001"; n = 0; sstate = 0; shown = 0; extra = 0; printf "" > CAND; printf "" > GONE }
     FILENAME == ARGV[1] { scan_record($0); next }
-    FILENAME == ARGV[2] { k = index($0, "\t"); if (k) more[++extra] = substr($0, k + 1); next }
+    FILENAME == ARGV[2] { k = index($0, "\t"); if (k) { more[++extra] = substr($0, k + 1); kind[extra] = substr($0, 1, k - 1) }; next }
     FILENAME == ARGV[3] { if ($0 != "") small[++smalls] = $0; next }
     FILENAME == ARGV[4] { if ($0 != "") link[++links] = $0; next }
     END {
       for (e = 1; e <= n; e++) {
         s = st[e]
         status = (s == "A") ? "added" : (s == "D") ? "deleted" : (s == "R" || s == "C") ? "renamed" : "changed"
-        show(new[e], status, adds[new[e]], dels[new[e]])
+        from = (s == "R" || s == "C") ? old[e] : ""
+        show(new[e], status, adds[new[e]], dels[new[e]], from)
+        cand(new[e], s, m2[e], bin[new[e]], from)
       }
       # New files git was not asked to compare: counted here, or listed by name only.
-      for (e = 1; e <= smalls; e++) if (!(small[e] in seen)) show(small[e], "added", (counted++ < 200) ? lines(small[e]) : 0, 0)
-      for (e = 1; e <= links; e++) show(link[e], "added", 0, 0)
-      for (e = 1; e <= extra; e++) show(more[e], "added", 0, 0)
+      for (e = 1; e <= smalls; e++) if (!(small[e] in seen)) show(small[e], "added", (counted++ < 200) ? lines(small[e]) : 0, 0, "")
+      for (e = 1; e <= links; e++) { if (!(link[e] in seen)) cand(link[e], "A", "120000", 0, ""); show(link[e], "added", 0, 0, "") }
+      for (e = 1; e <= extra; e++) { if (kind[e] == "limit") cand(more[e], "A", "100644", 1, ""); show(more[e], "added", 0, 0, "") }
       printf "%d\n", shown > COUNT
     }' "$TMP/scan" "$TMP/left-untracked" "$TMP/added-list" "$TMP/links-list") > "$TMP/files-raw"
   clean_utf8 "$TMP/files-raw" "$TMP/files"
@@ -1712,18 +1798,258 @@ changed_files() {
   [ -n "$NFILES" ] || NFILES=0
 }
 
-# The uncommitted changes as one unified diff of the working tree against the GitHub copy, for code sharing:
-# written as the `change` object to $TMP/change. The base is where this branch last matched GitHub: the
-# merge-base with its upstream, else with origin's default branch, else the last commit, else nothing. Untracked
-# files git does not ignore are new files.
+# -- the facts of the work: commits not pushed, the branch, nested repositories ----------------------------------------
+
+# The facts of a repository's work that aren't on GitHub yet, as git shows them, written to $3 as the fields of a JSON
+# object without its braces: its branch, the commit it is at, its upstream, origin's default branch (from origin/HEAD,
+# else origin's main or master) and where this branch left it (`base`), the commits on it that no remote-tracking
+# branch has (`unpushed`: newest first, each with its subject, the rest of its message, when it was made and its files),
+# and the files changed and not committed (`uncommitted`, the list in $2 that `changed_files` made). $1 is the
+# repository's folder, with REMOTE_NAME, BRANCH and HEAD_SHA set for it; $4 is how many commits to list at most, $5 how
+# many of their files in all, and $6, when given, how much of each message past its subject. A file that looks like a
+# key or credential is never named. Sets UNPUSHED to how many commits it lists, and notes in
+# $TMP/copy-candidates-commits the commits' files whose latest copy code sharing may send, as `changed_files` notes the
+# working tree's; and in $TMP/commit-renames each rename these commits made, its old path and its new one on lines of
+# their own (`key_renames`).
+repo_facts() {
+  F_UPSTREAM=""; F_DEFAULT=""; F_BASE=""; ref_main=""; ref_master=""
+  if [ -n "$REMOTE_NAME" ]; then
+    git_read -C "$1" for-each-ref --format='%(refname):%(upstream:short):%(symref:short)' ${BRANCH:+"refs/heads/$BRANCH"} \
+      "refs/remotes/$REMOTE_NAME/HEAD" "refs/remotes/$REMOTE_NAME/main" "refs/remotes/$REMOTE_NAME/master" > "$TMP/refs"
+    # (No name of a branch holds a colon, so each line splits into its three parts.)
+    while IFS=: read -r ref_name ref_up ref_target; do
+      case "$ref_name" in
+        "refs/heads/$BRANCH") [ -z "$BRANCH" ] || F_UPSTREAM=$ref_up ;;
+        "refs/remotes/$REMOTE_NAME/HEAD") case "$ref_target" in "$REMOTE_NAME"/?*) F_DEFAULT=${ref_target#"$REMOTE_NAME"/} ;; esac ;;
+        "refs/remotes/$REMOTE_NAME/main") ref_main=1 ;;
+        "refs/remotes/$REMOTE_NAME/master") ref_master=1 ;;
+      esac
+    done < "$TMP/refs"
+    [ -n "$F_DEFAULT" ] || { [ -n "$ref_main" ] && F_DEFAULT=main; } || { [ -n "$ref_master" ] && F_DEFAULT=master; }
+    [ -z "$F_DEFAULT" ] || [ -z "$HEAD_SHA" ] || F_BASE=$(git_read -C "$1" merge-base HEAD "refs/remotes/$REMOTE_NAME/$F_DEFAULT")
+  fi
+  # The commits: their messages first, each in four fields that end with NUL, and only where there are any, their
+  # files (git's raw listing and line counts, after each commit's id). A byte 1 in a message becomes a space, as the
+  # fields are read apart at it.
+  true > "$TMP/commits"; true > "$TMP/commit-files"
+  if [ -n "$HEAD_SHA" ]; then
+    git_read -C "$1" log -z --max-count="$4" --format='%H%x00%cI%x00%s%x00%b' HEAD --not --remotes \
+      | tr '\000\001' '\001 ' > "$TMP/commits"
+    [ -s "$TMP/commits" ] && git_read -C "$1" -c core.bigFileThreshold="$BIG_FILE" log -z --max-count="$4" --format=%H \
+      --raw --numstat $DIFF_OPTIONS HEAD --not --remotes | tr '\000\001' '\001 ' > "$TMP/commit-files"
+  fi
+  {
+    awk -v BRANCH="$BRANCH" -v HEAD="$HEAD_SHA" -v UP="$F_UPSTREAM" -v DEF="$F_DEFAULT" -v BASE="$F_BASE" -v ALL="$5" \
+        -v ONE="$COMMIT_FILES" -v SUBJECT="$SUBJECT_CHARACTERS" -v BODY="${6:-$BODY_CHARACTERS}" \
+        -v COUNT="$TMP/unpushed-count" -v CAND="$TMP/copy-candidates-commits" -v RENAMES="$TMP/commit-renames" \
+        "$CLASSIFY$AWK_ESCAPE"'
+      function chars(s) { return length(s) - gsub(CONT, "", s) }
+      # The longest start of s of at most `most` characters: it ends where a character does.
+      function cut(s, most,   lo, hi, mid) {
+        if (chars(s) <= most) return s
+        s = substr(s, 1, most * 4); lo = 0; hi = length(s)
+        while (lo < hi) { mid = int((lo + hi + 1) / 2); if (chars(substr(s, 1, mid)) <= most) lo = mid; else hi = mid - 1 }
+        return substr(s, 1, lo)
+      }
+      function keep(o, nw,   k) { k = ++nf[cur]; fp[cur, k] = nw; fo[cur, k] = o; fs[cur, k] = s; fm[cur, k] = mode }
+      BEGIN { RS = "\001"; CONT = "[" sprintf("%c", 128) "-" sprintf("%c", 191) "]"; st = 0; listed_all = 0; printf "" > CAND }
+      FILENAME == ARGV[1] {
+        k = (FNR - 1) % 4
+        if (k == 0) sha[++commits] = $0; else if (k == 1) at[commits] = $0; else if (k == 2) subject[commits] = $0
+        else body[commits] = $0
+        next
+      }
+      {
+        # Each record of the files: a path where one is due, else a raw line, a count of lines, or a commit id.
+        r = $0; sub(/^\n/, "", r)
+        if (st == 1) { o = r; nw = r; if (s == "R" || s == "C") st = 2; else { st = 0; keep(o, nw) }; next }
+        if (st == 2) { nw = r; st = 0; keep(o, nw); next }
+        if (st == 3) { st = 4; next }
+        if (st == 4) { na[cur, r] = pa; nd[cur, r] = pd; nb[cur, r] = pb; st = 0; next }
+        if (r ~ /^:[0-7]+ [0-7]+ [0-9a-f.]+ [0-9a-f.]+ [A-Z][0-9]*$/) {
+          split(substr(r, 2), p, " "); mode = p[2]; s = substr(p[5], 1, 1); st = 1; next
+        }
+        if (r ~ /^[0-9-]+\t[0-9-]+\t/) {
+          split(r, p, /\t/); a = (p[1] == "-") ? 0 : p[1] + 0; d = (p[2] == "-") ? 0 : p[2] + 0
+          if (p[3] == "" && substr(r, length(r)) == "\t") { pa = a; pd = d; pb = (p[1] == "-"); st = 3; next }
+          path = substr(r, length(p[1]) + length(p[2]) + 3); na[cur, path] = a; nd[cur, path] = d; nb[cur, path] = (p[1] == "-")
+          next
+        }
+        if (r != "") cur = r
+      }
+      END {
+        # (A nested repository opens its object with its path and remote, given in the environment as they are.)
+        if (ENVIRON["FACTS_PATH"] != "") printf "{\"path\":\"%s\",\"remote\":\"%s\",", esc(ENVIRON["FACTS_PATH"]), esc(ENVIRON["FACTS_REMOTE"])
+        printf "\"branch\":\"%s\",\"head\":\"%s\",\"upstream\":\"%s\",\"default_branch\":\"%s\",\"base\":\"%s\",\"unpushed\":[", \
+          esc(BRANCH), esc(HEAD), esc(UP), esc(DEF), esc(BASE)
+        for (c = 1; c <= commits; c++) {
+          id = sha[c]; text = body[c]; sub(/[ \t\r\n]+$/, "", text)
+          printf "%s{\"sha\":\"%s\",\"subject\":\"%s\",\"body\":\"%s\",\"at\":\"%s\",\"files\":[", (c > 1 ? "," : ""), esc(id), \
+            esc(cut(subject[c], SUBJECT)), esc(cut(text, BODY)), esc(at[c])
+          listed = 0
+          for (k = 1; k <= nf[id]; k++) {
+            path = fp[id, k]; o = fo[id, k]; s = fs[id, k]; mode = fm[id, k]
+            if (why(path) == "secret" || why(o) == "secret") continue
+            if (s != "D" && why(path) == "" && mode != "160000" && s != "T" && !index(path, "\n") && !index(path, "\\"))
+              printf "%s\t%d\t%s\n", (mode == "120000") ? "link" : "file", nb[id, path], path > CAND
+            if (listed >= ONE || listed_all >= ALL) continue
+            status = (s == "A") ? "added" : (s == "D") ? "deleted" : (s == "R" || s == "C") ? "renamed" : "changed"
+            printf "%s{\"path\":\"%s\",\"status\":\"%s\",%s\"additions\":%d,\"deletions\":%d}", (listed ? "," : ""), esc(path), \
+              status, ((s == "R" || s == "C") ? "\"from\":\"" esc(o) "\"," : ""), na[id, path], nd[id, path]
+            listed++; listed_all++
+          }
+          printf "]}"
+        }
+        printf "]"
+        printf "%d\n", commits > COUNT
+        printf "" > RENAMES
+        for (c = 1; c <= commits; c++)
+          for (k = 1; k <= nf[sha[c]]; k++) {
+            id = sha[c]; s = fs[id, k]
+            if ((s == "R" || s == "C") && !index(fo[id, k], "\n") && !index(fp[id, k], "\n")) printf "%s\n%s\n", fo[id, k], fp[id, k] > RENAMES
+          }
+      }' "$TMP/commits" "$TMP/commit-files"
+    printf ',"uncommitted":['
+    cat "$2"
+    printf ']'
+  } > "$3"
+  read -r UNPUSHED < "$TMP/unpushed-count" || UNPUSHED=0
+  case "$UNPUSHED" in ''|*[!0-9]*) UNPUSHED=0 ;; esac
+}
+
+# The repositories nested inside this one that have work of their own (a submodule, or a clone put inside it whether or
+# not git ignores it here, or another worktree of it), each as a JSON object: its path here, its own remote, and its
+# facts as `repo_facts` gives them; written to $TMP/nested, joined by commas, and NESTED says how many. Each is read as
+# this one is, by git alone and with nothing its own settings could run, and its own ignored and key files are never
+# named. At most NESTED_MOST are looked at, in their paths' order (submodules from .gitmodules, the folders git lists as
+# repositories it doesn't go into, and folders right inside this one that are repositories); one with no remote, or
+# with nothing changed and nothing unpushed, is left out.
+nested_facts() {
+  NESTED=0
+  true > "$TMP/nested"
+  nested_maybe=""
+  [ -f "$ROOT/.gitmodules" ] || [ -s "$TMP/nested-dirs" ] && nested_maybe=1
+  for nested_dir in "$ROOT"/*/; do [ -n "$nested_maybe" ] || [ ! -e "${nested_dir}.git" ] || nested_maybe=1; done
+  [ -n "$nested_maybe" ] || return 0
+  {
+    if [ -f "$ROOT/.gitmodules" ]; then
+      git_read -C "$ROOT" config --file .gitmodules -z --get-regexp '^submodule\..*\.path$' | tr '\000' '\001' \
+        | awk 'BEGIN { RS = "\001" } { k = index($0, "\n"); if (k) print substr($0, k + 1) }'
+    fi
+    cat "$TMP/nested-dirs"
+    for nested_dir in "$ROOT"/*/; do [ -e "${nested_dir}.git" ] && printf '%s\n' "${nested_dir#"$ROOT"/}"; done
+  } | awk '{ sub(/\/+$/, "") } $0 != "" && $0 !~ /^\// && $0 !~ /(^|\/)\.\.(\/|$)/ && !seen[$0]++' | sort > "$TMP/nested-paths"
+  nested_looked=0
+  while IFS= read -r nested_path; do
+    [ "$nested_looked" -lt "$NESTED_MOST" ] || break
+    [ -e "$ROOT/$nested_path/.git" ] || continue
+    nested_looked=$((nested_looked + 1))
+    nested_one "$nested_path" "$nested_looked" > "$TMP/nested.$nested_looked.json"
+    [ -s "$TMP/nested.$nested_looked.json" ] || continue
+    [ "$NESTED" = "0" ] || printf ',' >> "$TMP/nested"
+    cat "$TMP/nested.$nested_looked.json" >> "$TMP/nested"
+    NESTED=$((NESTED + 1))
+  done < "$TMP/nested-paths"
+}
+
+# One nested repository's object for `nested_facts` ($1: its path inside this one; $2: its number), or nothing when it
+# has nothing to tell. Run apart, so that what it sets stays its own. Its remote, and whether its own settings name
+# filters (quieted then as this repository's are), come from one call. A quick look comes next, by one `git status`
+# that writes nothing (GIT_OPTIONAL_LOCKS): nothing changed and an upstream it isn't ahead of is nothing to tell; with
+# no upstream, nothing is to tell when no remote-tracking branch lacks a commit of its own. The facts of one with work
+# are kept in the session's folder (FACTS_DIR) and given again, with no more git, while git's account of it in that
+# look is the same and they are less than NESTED_FRESH seconds old.
+nested_one() (
+  ROOT="$ROOT/$1"; TMP="$TMP/nested.$2"
+  mkdir "$TMP" || exit 0
+  git_read -C "$ROOT" config --show-scope --includes -z --get-regexp '^(remote\..*\.url|filter\..*\.(clean|smudge|process))$' \
+    | tr '\000' '\001' | awk 'BEGIN { RS = "\001"; own = 0 }
+      NR % 2 == 1 { scope = $0; next }
+      { k = index($0, "\n"); key = substr($0, 1, k - 1); value = substr($0, k + 1)
+        if (key ~ /^filter\./ && (scope == "local" || scope == "worktree")) own = 1
+        if (key ~ /^remote\..*\.url$/ && !(key in seen)) {
+          seen[key] = 1; name = substr(key, 8, length(key) - 11)
+          if (name == "origin") { origin = value } else if (firstname == "") { first = value; firstname = name }
+        } }
+      END {
+        if (origin != "") { url = origin; name = "origin" } else { url = first; name = firstname }
+        # (Any user name or token in the address is taken out, as `remote_of` does.)
+        if (match(url, /^[A-Za-z+]+:\/\/[^@\/]*@/)) url = substr(url, 1, index(url, "://") + 2) substr(url, RLENGTH + 1)
+        gsub(/[\r\n]/, "", url)
+        print own; print name; print url
+      }' > "$TMP/config"
+  { read -r own; read -r REMOTE_NAME; IFS= read -r REMOTE; } < "$TMP/config"
+  [ -n "$REMOTE" ] || exit 0
+  if [ "$own" = "1" ]; then quiet_filters; else FILTERS_QUIET=$ROOT; fi
+  look=$(git_read -C "$ROOT" status --porcelain=v2 --branch --untracked-files=normal --ignore-submodules=all \
+    | NESTED_PATH=$1 awk -v KEYED="$TMP/keyed" 'BEGIN { ahead = -1; print ENVIRON["NESTED_PATH"] > KEYED }
+      { print > KEYED }
+      /^# branch\.upstream / { up = 1 }
+      /^# branch\.ab / { split($0, p, " "); ahead = substr(p[3], 2) + 0 }
+      $0 != "" && substr($0, 1, 1) != "#" { work = 1 }
+      END { print (work ? "work" : (up && ahead == 0) ? "clean" : "look") }')
+  case "$look" in
+    clean) exit 0 ;;
+    look) [ -n "$(git_read -C "$ROOT" log -1 --format=%H HEAD --not --remotes)" ] || exit 0 ;;
+  esac
+  kept=""
+  if [ -n "${FACTS_DIR:-}" ]; then
+    kept="$FACTS_DIR/nested.$2"
+    at=""
+    [ -f "$kept.at" ] && read -r at < "$kept.at"
+    case "$at" in
+      ''|*[!0-9]*) ;;
+      *) if [ $((STARTED_AT - at)) -lt "$NESTED_FRESH" ] && [ -f "$kept.json" ] && cmp -s "$TMP/keyed" "$kept.status"; then
+           cat "$kept.json"; exit 0
+         fi ;;
+    esac
+  fi
+  NESTED_SCAN=1; SCANNED=""; FACTS=""
+  BRANCH=$(git_read -C "$ROOT" symbolic-ref --short -q HEAD)
+  changed_files
+  FACTS_PATH=$1 FACTS_REMOTE=$REMOTE repo_facts "$ROOT" "$TMP/files" "$TMP/facts" "$NESTED_UNPUSHED" "$NESTED_FILES"
+  [ "$NFILES" -gt 0 ] || [ "$UNPUSHED" -gt 0 ] || exit 0
+  { cat "$TMP/facts"; printf '}'; } > "$TMP/object"
+  cat "$TMP/object"
+  [ -z "$kept" ] || { cp "$TMP/object" "$kept.json" && cp "$TMP/keyed" "$kept.status" && echo "$STARTED_AT" > "$kept.at"; }
+)
+
+# The facts of the work on this computer that isn't on GitHub yet, as every work report carries them (`git`): this
+# repository's (`repo_facts`) with its nested repositories' (`nested_facts`), in $TMP/git, once in a run. Past
+# FACTS_MOST bytes they are told shorter: the commits without the rest of their messages or their files, and no nested
+# repository. Sets UNPUSHED and NESTED for this repository.
+git_facts() {
+  [ -n "${FACTS:-}" ] && return 0
+  FACTS=1
+  [ -f "$TMP/files" ] || changed_files
+  repo_facts "$ROOT" "$TMP/files" "$TMP/facts" "$UNPUSHED_MOST" "$COMMITS_FILES"
+  nested_facts
+  # (Without commits or nested repositories they are the files' list, which is clean and short already.)
+  if [ "$UNPUSHED" = "0" ] && [ "$NESTED" = "0" ]; then
+    { printf '{'; cat "$TMP/facts"; printf ',"nested":[]}'; } > "$TMP/git"
+    return 0
+  fi
+  { printf '{'; cat "$TMP/facts"; printf ',"nested":['; cat "$TMP/nested"; printf ']}'; } > "$TMP/git-raw"
+  clean_utf8 "$TMP/git-raw" "$TMP/git"
+  [ $(( $(wc -c < "$TMP/git") )) -le "$FACTS_MOST" ] && return 0
+  repo_facts "$ROOT" "$TMP/files" "$TMP/facts" "$UNPUSHED_MOST" 0 0
+  NESTED=0
+  { printf '{'; cat "$TMP/facts"; printf ',"nested":[]}'; } > "$TMP/git-raw"
+  clean_utf8 "$TMP/git-raw" "$TMP/git"
+}
+
+# The changes not on GitHub yet, for code sharing, written as the `change` object to $TMP/change ($1 is the session's
+# folder). `diff` is one unified diff of the working tree against where this branch last matched GitHub: the
+# merge-base with its upstream, else with origin's copy of the same branch, else with origin's default branch, else the
+# last commit, else nothing; so it holds the commits not pushed yet too, and untracked files git does not ignore are
+# new files in it. `unpushed_diff` is the diff of those commits alone against the same base ("" when there are none):
+# what a push would carry. `copies` are the latest copies of changed files the server wasn't sent yet
+# (`build_copies`). $TMP/change-core is the same object without the copies: what `change-sum` says was sent.
 #
-# What is sent is chosen file by file from git's own listing, by each file's exact name: a file's part of the diff
-# is kept only when its first line is the one git writes for a file listed as safe, so a file nothing can vouch for
-# is left out, never sent. Left out: files that look like keys or credentials (by their old or new name), machine-
-# written files, files git finds aren't text, symbolic links (whatever they point to), files that changed type,
-# and any file that would take the whole past the limit. Long lines are cut, and bytes that are not UTF-8 dropped.
-# Sets CH_FILES, CH_LINES, CH_COMPLETE and CH_SECRET, CH_GENERATED, CH_BINARY, CH_LIMIT (how many files were left
-# out for each reason).
+# What is sent is chosen file by file from git's own listing, by each file's exact name (`safe_diff`), and the
+# whole stays within CHANGE_MOST bytes: past it the copies wait for a later call, and then the commits' own diff is
+# left out (the first diff holds them). Sets CH_FILES, CH_LINES, CH_COMPLETE and CH_SECRET, CH_GENERATED, CH_BINARY,
+# CH_LIMIT (how many files were left out of the first diff for each reason).
 build_change() {
   limit_lines=$CHANGE_LINES; limit_bytes=$CHANGE_BYTES
   if [ -f "$HOME_DIR/limits" ]; then
@@ -1732,15 +2058,19 @@ build_change() {
     case "$kept_bytes" in ''|*[!0-9]*) ;; *) limit_bytes=$kept_bytes ;; esac
   fi
   scan_tree
+  FACTS_DIR=${1:-}
+  git_facts
+  # (The upstream, origin's default branch and where this branch left it, as `repo_facts` found them: an upstream
+  # that is origin's default branch has that very base.)
   ch_base=""
-  upstream=$(git_read -C "$ROOT" rev-parse -q --verify '@{u}')
-  [ -n "$upstream" ] && ch_base=$(git_read -C "$ROOT" merge-base HEAD "$upstream")
-  if [ -z "$ch_base" ]; then
-    for ref in origin/HEAD origin/main origin/master; do
-      found=$(git_read -C "$ROOT" rev-parse -q --verify "$ref^{commit}") || continue
-      ch_base=$(git_read -C "$ROOT" merge-base HEAD "$found") && [ -n "$ch_base" ] && break
-    done
+  if [ -n "$F_UPSTREAM" ] && [ -n "$F_BASE" ] && [ "$F_UPSTREAM" = "$REMOTE_NAME/$F_DEFAULT" ]; then ch_base=$F_BASE
+  elif [ -n "$F_UPSTREAM" ]; then ch_base=$(git_read -C "$ROOT" merge-base HEAD '@{u}')
   fi
+  if [ -z "$ch_base" ] && [ -n "$REMOTE_NAME" ] && [ -n "$BRANCH" ] && [ -n "$HEAD_SHA" ]; then
+    branch_ref=$(git_read -C "$ROOT" rev-parse -q --verify "refs/remotes/$REMOTE_NAME/$BRANCH^{commit}") \
+      && ch_base=$(git_read -C "$ROOT" merge-base HEAD "$branch_ref")
+  fi
+  [ -n "$ch_base" ] || ch_base=$F_BASE
   [ -n "$ch_base" ] || ch_base=$HEAD_SHA
   [ -n "$ch_base" ] || ch_base=$EMPTY_TREE
   if [ "$ch_base" = "${HEAD_SHA:-$EMPTY_TREE}" ]; then cp "$TMP/scan" "$TMP/change-raw"
@@ -1750,9 +2080,111 @@ build_change() {
   fi
   gitx -c core.quotePath=false -c core.bigFileThreshold="$BIG_FILE" diff $DIFF_OPTIONS --no-color \
     --src-prefix=a/ --dst-prefix=b/ --submodule=short "$ch_base" -- . "$OWN_SETTINGS" > "$TMP/change-diff"
-  true > "$TMP/change-kept"
-  awk -v KEPT="$TMP/change-kept" -v META="$TMP/change-meta" -v LEFTJSON="$TMP/change-left-raw" -v LIMIT="$limit_lines" \
-      -v BYTES="$limit_bytes" -v LONGEST="$LONGEST_LINE" -v DIFF="$TMP/change-diff" \
+  key_renames
+  safe_diff "$TMP/left-untracked" "$TMP/change-raw" "$TMP/change-diff" change
+  clean_utf8 "$TMP/change-kept" "$TMP/change-clean"
+  clean_utf8 "$TMP/change-left-raw" "$TMP/change-left"
+  CH_FILES=0; CH_LINES=0; CH_SECRET=0; CH_GENERATED=0; CH_BINARY=0; CH_LIMIT=0
+  while IFS== read -r meta_key meta_value; do
+    case "$meta_key" in
+      files) CH_FILES=$meta_value ;; lines) CH_LINES=$meta_value ;; secret) CH_SECRET=$meta_value ;;
+      generated) CH_GENERATED=$meta_value ;; binary) CH_BINARY=$meta_value ;; limit) CH_LIMIT=$meta_value ;;
+    esac
+  done < "$TMP/change-meta"
+  CH_COMPLETE=true
+  [ "${CH_LIMIT:-0}" -gt 0 ] && CH_COMPLETE=false
+  # The commits not pushed yet, against the same base, chosen file by file the same way. (Where nothing on GitHub
+  # is known to compare with, the base is the last commit itself, and they have no diff of their own.)
+  true > "$TMP/unpushed-clean"
+  if [ "${UNPUSHED:-0}" -gt 0 ] && [ -n "$HEAD_SHA" ] && [ "$ch_base" != "$HEAD_SHA" ]; then
+    git_read -C "$ROOT" -c core.bigFileThreshold="$BIG_FILE" diff --raw -z $DIFF_OPTIONS "$ch_base" HEAD -- \
+      | tr '\000' '\001' > "$TMP/unpushed-raw"
+    git_read -C "$ROOT" -c core.quotePath=false -c core.bigFileThreshold="$BIG_FILE" diff $DIFF_OPTIONS --no-color \
+      --src-prefix=a/ --dst-prefix=b/ --submodule=short "$ch_base" HEAD -- > "$TMP/unpushed-diff"
+    true > "$TMP/no-untracked"
+    safe_diff "$TMP/no-untracked" "$TMP/unpushed-raw" "$TMP/unpushed-diff" unpushed
+    clean_utf8 "$TMP/unpushed-kept" "$TMP/unpushed-clean"
+  fi
+  change_head
+  build_copies "${1:-}"
+  change_whole
+  if [ $(( $(wc -c < "$TMP/change") )) -gt "$CHANGE_MOST" ]; then
+    printf '[]' > "$TMP/copies"; rm -f "$TMP/copies-next"; COPIES_DUE=""
+    change_whole
+    if [ $(( $(wc -c < "$TMP/change") )) -gt "$CHANGE_MOST" ]; then
+      true > "$TMP/unpushed-clean"
+      change_head
+      change_whole
+    fi
+  fi
+}
+
+# The files whose text is a key file's by a rename, under whatever name: written to $TMP/secret-names, one to a line.
+# A rename made in a commit not pushed, or in the working tree since, joins its two names: where either is a key
+# file's (by its name, or by such a rename of its own), so is the other. Against a base older than such a commit a
+# renamed file looks new under its new name, and the commits' own diff shows the name a later rename gave up: either
+# way it is a key file for `safe_diff` and `build_copies`.
+key_renames() {
+  [ -f "$TMP/commit-renames" ] || true > "$TMP/commit-renames"
+  awk "$CLASSIFY$SCAN_AWK"'
+    BEGIN {
+      while ((getline from < ARGV[1]) > 0 && (getline to < ARGV[1]) > 0) { pair++; was[pair] = from; now[pair] = to }
+      close(ARGV[1]); RS = "\001"; n = 0; sstate = 0
+    }
+    FILENAME == ARGV[2] { scan_record($0) }
+    END {
+      for (e = 1; e <= n; e++)
+        if ((st[e] == "R" || st[e] == "C") && !index(old[e], "\n") && !index(new[e], "\n")) { pair++; was[pair] = old[e]; now[pair] = new[e] }
+      for (i = 1; i <= pair; i++) { if (why(was[i]) == "secret") key[was[i]] = 1; if (why(now[i]) == "secret") key[now[i]] = 1 }
+      for (more = 1; more; ) {
+        more = 0
+        for (i = 1; i <= pair; i++) {
+          if ((was[i] in key) && !(now[i] in key)) { key[now[i]] = 1; more = 1 }
+          if ((now[i] in key) && !(was[i] in key)) { key[was[i]] = 1; more = 1 }
+        }
+      }
+      for (path in key) print path
+    }' "$TMP/commit-renames" "$TMP/scan" > "$TMP/secret-names"
+}
+
+# The change's fields but its copies, in $TMP/change-head (without the object's closing brace), as `build_change` left
+# them.
+change_head() {
+  awk -v BASE="$ch_base" -v COUNTS="\"lines\":${CH_LINES:-0},\"files\":${CH_FILES:-0},\"complete\":$CH_COMPLETE" "$AWK_ESCAPE"'
+    # (Each diff a line at a time as it is read, in the order of the fields: the list of what was left out always
+    # has a line, so the first diff is closed there.)
+    BEGIN { printf "{\"base\":\"%s\",\"diff\":\"", BASE; at = 1 }
+    FILENAME == ARGV[1] { printf "%s\\n", esc($0); next }
+    FILENAME == ARGV[2] { if (at == 1) { printf "\",%s,\"left_out\":", COUNTS; at = 2 }; printf "%s", $0; next }
+    { if (at == 2) { printf ",\"unpushed_diff\":\""; at = 3 }; printf "%s\\n", esc($0) }
+    END {
+      if (at == 1) { printf "\",%s,\"left_out\":[]", COUNTS; at = 2 }
+      if (at == 2) printf ",\"unpushed_diff\":\""
+      printf "\""
+    }' \
+    "$TMP/change-clean" "$TMP/change-left" "$TMP/unpushed-clean" > "$TMP/change-head"
+}
+
+# The whole change ($TMP/change, with its copies) and the same without them ($TMP/change-core).
+change_whole() {
+  { cat "$TMP/change-head"; printf '}'; } > "$TMP/change-core"
+  { cat "$TMP/change-head"; printf ',"copies":'; cat "$TMP/copies"; printf '}'; } > "$TMP/change"
+}
+
+# A diff made safe to send, file by file from git's own listing, by each file's exact name: a file's part of the diff
+# ($3) is kept only when its first line is the one git writes for a file in the listing ($2: `diff --raw -z`, its NULs
+# made byte 1) and that file is safe, so a file nothing can vouch for is left out, never sent. Left out: files that
+# look like keys or credentials (by their old or new name, or by a rename that joins them to one: `key_renames`),
+# machine-written files, files git finds aren't text, symbolic links (whatever they point to), files that changed
+# type, a name with a line break, and any file that would take the whole past the limit (limit_lines and
+# limit_bytes). New files left out before git saw them are listed in $1 ("why<TAB>path"). Long lines are cut. Writes
+# $TMP/<$4>-kept (the lines kept), $TMP/<$4>-meta (how many files and lines were kept, and how many files were left
+# out for each reason) and $TMP/<$4>-left-raw (what was left out, as a JSON list of paths and reasons, where a key file
+# is never named: its path is left empty, and only its reason counts).
+safe_diff() {
+  true > "$TMP/$4-kept"
+  awk -v KEPT="$TMP/$4-kept" -v META="$TMP/$4-meta" -v LEFTJSON="$TMP/$4-left-raw" -v LIMIT="$limit_lines" \
+      -v BYTES="$limit_bytes" -v LONGEST="$LONGEST_LINE" -v DIFF="$3" -v RENAMED="$TMP/secret-names" \
       "$CLASSIFY$AWK_ESCAPE$SCAN_AWK$GIT_QUOTE"'
     function flush(   i, size) {
       if (cur > 0 && reason[cur] == "") {
@@ -1772,14 +2204,23 @@ build_change() {
     }
     function leave(w, p) {
       count[w]++
+      if (w == "secret") p = ""
       if (listed < 300) { out = out (listed ? "," : "") "{\"path\":\"" esc(p) "\",\"why\":\"" w "\"}"; listed++ }
     }
-    BEGIN { RS = "\001"; n = 0; sstate = 0; cur = 0; held = 0; lines = 0; bytes = 0; files = 0; listed = 0; out = "" }
+    BEGIN {
+      while ((getline line < RENAMED) > 0) if (line != "") renamed[line] = 1
+      close(RENAMED)
+      RS = "\001"; n = 0; sstate = 0; cur = 0; held = 0; lines = 0; bytes = 0; files = 0; listed = 0; out = ""
+    }
     FILENAME == ARGV[1] { k = index($0, "\t"); if (k) leave(substr($0, 1, k - 1), substr($0, k + 1)); next }
     FILENAME == ARGV[2] { scan_record($0); next }
     END {
       for (e = 1; e <= n; e++) {
         r = why(new[e]); if (r == "") r = why(old[e])
+        # (A file whose text came from a key file by a rename is a key file under any name; and a name that holds a
+        # line break is one this listing cannot vouch for.)
+        if (r == "" && ((new[e] in renamed) || (old[e] in renamed))) r = "secret"
+        if (r == "" && (index(new[e], "\n") || index(old[e], "\n"))) r = "binary"
         link[e] = (m1[e] == "120000" || m2[e] == "120000")
         # A symbolic link holds only where it points, which may be a key file anywhere; a file that changed
         # type is two things at once. Neither is sent.
@@ -1811,24 +2252,158 @@ build_change() {
       printf "files=%d\nlines=%d\nsecret=%d\ngenerated=%d\nbinary=%d\nlimit=%d\n", files, lines, count["secret"], \
         count["generated"], count["binary"], count["limit"] > META
       printf "[%s]", out > LEFTJSON
-    }' "$TMP/left-untracked" "$TMP/change-raw"
-  clean_utf8 "$TMP/change-kept" "$TMP/change-clean"
-  clean_utf8 "$TMP/change-left-raw" "$TMP/change-left"
-  CH_FILES=$(sed -n 's/^files=//p' "$TMP/change-meta"); CH_LINES=$(sed -n 's/^lines=//p' "$TMP/change-meta")
-  CH_SECRET=$(sed -n 's/^secret=//p' "$TMP/change-meta"); CH_GENERATED=$(sed -n 's/^generated=//p' "$TMP/change-meta")
-  CH_BINARY=$(sed -n 's/^binary=//p' "$TMP/change-meta"); CH_LIMIT=$(sed -n 's/^limit=//p' "$TMP/change-meta")
-  CH_COMPLETE=true
-  [ "${CH_LIMIT:-0}" -gt 0 ] && CH_COMPLETE=false
-  {
-    printf '{"base":"%s","diff":' "$ch_base"
-    awk "$AWK_ESCAPE"'
-      BEGIN { printf "\"" }
-      { printf "%s\\n", esc($0) }
-      END { printf "\"" }' "$TMP/change-clean"
-    printf ',"lines":%d,"files":%d,"complete":%s,"left_out":' "${CH_LINES:-0}" "${CH_FILES:-0}" "$CH_COMPLETE"
-    cat "$TMP/change-left"
-    printf '}'
-  } > "$TMP/change"
+    }' "$1" "$2"
+}
+
+# The program that gives a file's SHA-256 for the copies: the first of sha256sum, shasum and openssl this computer
+# has (HASHER). Fails when it has none, and then no copy is sent.
+hasher() {
+  [ -n "${HASHER:-}" ] && return 0
+  if command -v sha256sum >/dev/null 2>&1; then HASHER="sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then HASHER="shasum -a 256"
+  elif command -v openssl >/dev/null 2>&1; then HASHER="openssl dgst -sha256 -r"
+  else return 1; fi
+}
+
+# The latest copy of each changed file not on GitHub yet whose copy the server wasn't sent since it last changed, for
+# code sharing, as the `copies` JSON list in $TMP/copies (COPIES_DUE is set when it lists any); and in
+# $TMP/copies-next what the session ($1, its folder) has sent once the server takes them (`change_taken`: a SHA-256,
+# or what stands in for one, and the path, to a line). The files are the working tree's changed ones, then those of
+# the commits not pushed (newest first), each once, never one the working tree deleted, from what `changed_files` and
+# `repo_facts` noted (never a key file, a machine-written one, a submodule or a file that changed type). Text of
+# COPY_MOST bytes or less goes whole, as the file holds it; a file that isn't text, or isn't valid UTF-8, is listed
+# with binary true, a link (never read) too, and a larger file with too_large true, each with no content. Only regular
+# files are ever read, found by the file system as `scan_tree` finds new ones. At most COPIES_BYTES of text go at
+# once: a file that doesn't fit is left for the next call, which finds it not sent yet.
+build_copies() {
+  printf '[]' > "$TMP/copies"
+  COPIES_DUE=""
+  rm -f "$TMP/copies-next"
+  [ -n "$1" ] && hasher || return 0
+  copies_sent="$1/copies-sent"
+  [ -f "$copies_sent" ] || { copies_sent="$TMP/copies-none"; true > "$copies_sent"; }
+  [ -f "$TMP/copy-candidates-commits" ] || true > "$TMP/copy-candidates-commits"
+  [ -f "$TMP/secret-names" ] || true > "$TMP/secret-names"
+  awk -v FILES="$TMP/copy-files" -v RENAMED="$TMP/secret-names" 'BEGIN { printf "" > FILES
+      while ((getline line < RENAMED) > 0) if (line != "") gone[line] = 1
+      close(RENAMED) }
+    FILENAME == ARGV[1] { gone[$0] = 1; next }
+    { k = index($0, "\t"); rest = substr($0, k + 1); path = substr(rest, index(rest, "\t") + 1)
+      if ((path in gone) || (path in seen)) next
+      seen[path] = 1; print
+      if (substr($0, 1, k - 1) == "file") print path > FILES }' \
+    "$TMP/copy-gone" "$TMP/copy-candidates" "$TMP/copy-candidates-commits" > "$TMP/copy-list"
+  if [ ! -s "$TMP/copy-list" ]; then true > "$TMP/copies-next"; return 0; fi
+  # The regular files small enough to go whole, from the file system alone (every character escaped for xargs, so
+  # any name is passed as it is), each with its size and digest; and only where some weren't, the larger ones.
+  true > "$TMP/copy-measured"; true > "$TMP/copy-big"
+  if [ -s "$TMP/copy-files" ]; then
+    (cd "$ROOT" && sed -e 's#^#./#' -e 's/./\\&/g' "$TMP/copy-files" | xargs sh -c 'exec find "$@" -prune -type f -size -'"$((COPY_MOST + 1))"'c -exec wc -c {} + -exec '"$HASHER"' {} +' sh) \
+      > "$TMP/copy-measured"
+    copy_count=0; while IFS= read -r copy_line; do copy_count=$((copy_count + 1)); done < "$TMP/copy-files"
+    # (Each small file has a line of its size and one of its digest, each naming it; a total names none of ours.)
+    measured_count=0
+    while IFS= read -r copy_line; do
+      case "$copy_line" in *" ./"*|*" *./"*) measured_count=$((measured_count + 1)) ;; esac
+    done < "$TMP/copy-measured"
+    if [ "$measured_count" -lt $((copy_count * 2)) ]; then
+      (cd "$ROOT" && sed -e 's#^#./#' -e 's/./\\&/g' "$TMP/copy-files" | xargs sh -c 'exec find "$@" -prune -type f -size +'"$COPY_MOST"'c -print' sh) \
+        > "$TMP/copy-big"
+    fi
+  fi
+  COPIES_DUE=$(cd "$ROOT" && awk -v OUT="$TMP/copies" -v NEXT="$TMP/copies-next" -v BUDGET="$COPIES_BYTES" "$AWK_ESCAPE"'
+    function json(s,   n, p, i, o) {
+      n = split(s, p, /\\/); o = p[1]; for (i = 2; i <= n; i++) o = o "\\\\" p[i]; s = o
+      n = split(s, p, /"/); o = p[1]; for (i = 2; i <= n; i++) o = o "\\\"" p[i]; s = o
+      n = split(s, p, /\t/); o = p[1]; for (i = 2; i <= n; i++) o = o "\\t" p[i]; s = o
+      n = split(s, p, /\r/); o = p[1]; for (i = 2; i <= n; i++) o = o "\\r" p[i]; s = o
+      o = ""
+      while (match(s, CTRL)) { o = o substr(s, 1, RSTART - 1) sprintf("\\u%04x", ORD[substr(s, RSTART, 1)]); s = substr(s, RSTART + 1) }
+      return o s
+    }
+    function valid(s) { gsub(UTF8, "", s); return s !~ HIGH }
+    function range(a, b) { return "[" sprintf("%c", a) "-" sprintf("%c", b) "]" }
+    function entry(text) { printf "%s%s", (entries++ ? "," : ""), text > OUT }
+    function done(digest, path) { printf "%s\t%s\n", digest, path > NEXT }
+    BEGIN {
+      for (i = 1; i < 32; i++) ORD[sprintf("%c", i)] = i
+      CTRL = "[" sprintf("%c", 1) "-" sprintf("%c", 8) sprintf("%c", 11) sprintf("%c", 12) sprintf("%c", 14) "-" sprintf("%c", 31) "]"
+      HIGH = range(128, 255); TAIL = range(128, 191)
+      UTF8 = range(194, 223) TAIL "|" sprintf("%c", 224) range(160, 191) TAIL "|" range(225, 236) TAIL TAIL "|" \
+        sprintf("%c", 237) range(128, 159) TAIL "|" range(238, 239) TAIL TAIL "|" sprintf("%c", 240) range(144, 191) TAIL TAIL \
+        "|" range(241, 243) TAIL TAIL TAIL "|" sprintf("%c", 244) range(128, 143) TAIL TAIL
+      printf "[" > OUT; printf "" > NEXT; entries = 0; spent = 0
+    }
+    FILENAME == ARGV[1] { k = index($0, "\t"); if (k) was[substr($0, k + 1)] = substr($0, 1, k - 1); next }
+    FILENAME == ARGV[2] {
+      # A digest (64 hexadecimal digits, a space, and a space or a star before the name) or a size (the count wc gives,
+      # then the name; never a total, which names no file of ours).
+      line = $0
+      if (substr(line, 65, 1) == " " && length(substr(line, 1, 64)) == 64 && substr(line, 1, 64) ~ /^[0-9a-f]+$/) {
+        p = substr(line, 67); if (substr(p, 1, 2) == "./") sum[substr(p, 3)] = substr(line, 1, 64)
+        next
+      }
+      sub(/^ +/, "", line); k = index(line, " "); p = substr(line, k + 1)
+      if (substr(p, 1, 2) == "./" && substr(line, 1, k - 1) ~ /^[0-9]+$/) size[substr(p, 3)] = substr(line, 1, k - 1) + 0
+      next
+    }
+    FILENAME == ARGV[3] { if (substr($0, 1, 2) == "./") big[substr($0, 3)] = 1; next }
+    { list[++n] = $0 }
+    END {
+      for (i = 1; i <= n; i++) {
+        k = index(list[i], "\t"); what = substr(list[i], 1, k - 1); rest = substr(list[i], k + 1)
+        k = index(rest, "\t"); binary = substr(rest, 1, k - 1) + 0; path = substr(rest, k + 1)
+        # (A name that is not valid UTF-8 could not be sent as it is: such a file has no copy.)
+        if (path ~ HIGH && !valid(path)) continue
+        if (what == "link") digest = "link"
+        else if ((path in sum) && (path in size)) digest = sum[path]
+        else if (path in big) digest = "too_large"
+        else continue
+        if (was[path] == digest) { done(digest, path); continue }
+        head = "{\"path\":\"" esc(path) "\""
+        if (digest == "link") { entry(head ",\"binary\":true,\"too_large\":false}"); done(digest, path); continue }
+        if (digest == "too_large") { entry(head ",\"binary\":false,\"too_large\":true}"); done(digest, path); continue }
+        head = head ",\"sha256\":\"" digest "\""
+        if (!binary) {
+          if (spent + size[path] > BUDGET) continue
+          # The file read a line at a time: every byte valid UTF-8, and all of them read (a byte awk cannot hold,
+          # such as NUL, makes the count fall short), else it is told as not text. Whether it ends with a line
+          # break is told by its size.
+          lines = 0; total = 0; bad = 0
+          while ((got = (getline line < path)) > 0) {
+            text[++lines] = line; total += length(line) + 1
+            if (line ~ HIGH && !valid(line)) bad = 1
+          }
+          close(path)
+          if (got < 0) bad = 1
+          if (total == size[path]) ends = 1; else if (total == size[path] + 1) ends = 0; else bad = 1
+          if (!bad) {
+            spent += size[path]
+            printf "%s%s,\"binary\":false,\"too_large\":false,\"content\":\"", (entries++ ? "," : ""), head > OUT
+            for (j = 1; j <= lines; j++) printf "%s%s", json(text[j]), ((j < lines || ends) ? "\\n" : "") > OUT
+            printf "\"}" > OUT
+            split("", text)
+            done(digest, path)
+            continue
+          }
+          split("", text)
+        }
+        entry(head ",\"binary\":true,\"too_large\":false}")
+        done(digest, path)
+      }
+      printf "]" > OUT
+      if (entries) print entries
+    }' "$copies_sent" "$TMP/copy-measured" "$TMP/copy-big" "$TMP/copy-list")
+}
+
+# What follows changes the server took ($1, the session's folder): the diffs are not sent again until they change
+# (their digest, `change-sum`), nor a copy until its file changes (`copies-sent`), and the copies taken go with no
+# later call of this run.
+change_taken() {
+  cksum < "$TMP/change-core" > "$1/change-sum"
+  [ ! -f "$TMP/copies-next" ] || mv -f "$TMP/copies-next" "$1/copies-sent"
+  printf '[]' > "$TMP/copies"; COPIES_DUE=""
+  change_whole
 }
 
 # What was left out of the changes and why, as one plain clause ("" when nothing was).
@@ -2158,6 +2733,11 @@ $WHATS_NEW
   if repository "$folder"; then
     [ -f "$dir/start" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD > "$dir/start"
   else ROOT=""; REMOTE=""; fi
+  # (Said with whatever the session's start says, as the summaries' note is.)
+  if [ -z "$again" ] && [ -n "$REMOTE" ] && sharing_note; then
+    mark_sharing_said
+    SUMMARIES_NOTE="$SUMMARIES_NOTE$SHARING_NOTE"
+  fi
   # Sessions over a week old are forgotten.
   find "$SESSIONS" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
   # (Nothing is asked of a server found out of reach, or not answering, a moment ago: `held_off`.)
@@ -2210,7 +2790,7 @@ $WHATS_NEW
       else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
       greeting="${BANNER}Vyavasta: $who $(reach_said "$(answer repositories)" "$checks")"
       if [ -n "$SHARING_ENDED" ]; then
-        greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your uncommitted changes are no longer sent. Send “vyavasta share code on” to turn it on again."
+        greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your changes are no longer sent. Send “vyavasta share code on” to turn it on again."
       fi
       # (A newer plugin is told of from /me's answer, at a start that asked for one: a session that goes on asks
       # nothing and greets nobody.)
@@ -2317,6 +2897,16 @@ summaries_note() {
   mark_summaries_told
 }
 
+# What code sharing does, said once in a project that has it on by default and was never told so (one turned on
+# before it was on by default): SHARING_NOTE is the sentence, with a space before it, or empty. Fails when there is
+# nothing to say. Nothing of the code goes in the run that says it (`sharing_now`), and the project is marked told
+# once the line is shown (`emit`, or a session's start).
+sharing_note() {
+  SHARING_NOTE=""
+  [ "$(sharing)" = "on" ] && ! sharing_said || return 1
+  SHARING_NOTE=" Code sharing is now on in this project: from your next message, your changes that aren’t on GitHub yet go to Vyavasta for its check, and teammates who read this repository see which files you change and a short summary of what the changes do, never the code. Send “vyavasta share code off” to turn it off."
+}
+
 # What a session in this folder does, for the line a session starts with. $1 is /me's list of repositories, $2 its
 # `checks` (false where the server checks no request).
 reach_said() {
@@ -2356,7 +2946,7 @@ remember_me() {
   case "$me_sharing" in \[*) ;; *) return 0 ;; esac
   if [ -n "${REMOTE:-}" ] && [ "$(sharing)" = "on" ] && [ "$(cat "$PDIR/sharing-told")" = "on" ]; then
     if ! lists_repository "$me_sharing" "$(repository_name "$REMOTE")"; then
-      echo off > "$PDIR/sharing"; echo off > "$PDIR/sharing-told"; SHARING_ENDED=1
+      echo off > "$PDIR/sharing"; echo off > "$PDIR/sharing-told"; forget_sent; SHARING_ENDED=1
     fi
   fi
 }
@@ -2885,6 +3475,23 @@ nobody_said() {
   printf '%s' "Vyavasta found no teammate called “$(person "$word")”, so no teammate got this message, and ${AGENT} was given it as written."
 }
 
+# What was sent with a message, joined as a sentence lists things: “A”, “A and B”, “A, B, and C”, leaving out the
+# empty ones.
+sent_list() {
+  sent_items=0
+  for sent_item in "$@"; do [ -z "$sent_item" ] || sent_items=$((sent_items + 1)); done
+  sent_text=""; sent_place=0
+  for sent_item in "$@"; do
+    [ -n "$sent_item" ] || continue
+    sent_place=$((sent_place + 1))
+    if [ "$sent_place" = "1" ]; then sent_text=$sent_item
+    elif [ "$sent_items" = "2" ]; then sent_text="$sent_text and $sent_item"
+    elif [ "$sent_place" = "$sent_items" ]; then sent_text="$sent_text, and $sent_item"
+    else sent_text="$sent_text, $sent_item"; fi
+  done
+  printf '%s' "$sent_text"
+}
+
 # A message in a project that is on: checked, or asked as a question, with its one line. $1 is the message as a JSON
 # string, $2 the session folder.
 handle_message() {
@@ -2944,24 +3551,24 @@ handle_message() {
     OUT_LINE=$(nothing_line "$AWAY_SAID" "${AGENT} works as usual, and Vyavasta is tried again in a minute.")
     emit; return
   fi
-  NFILES=0; shared=""; consent=""
+  NFILES=0; shared=""
   if [ -n "$ROOT" ] && [ -n "$REMOTE" ]; then
+    # (A project that has code sharing on by default and was never told says so on this line, and sends its code
+    # from the next message on: `sharing_note`.)
+    sharing_note
     changed_files
-    if [ "$(sharing)" = "on" ]; then
+    if sharing_now; then
       [ "$(cat "$PDIR/sharing-told")" = "on" ] || tell_sharing on
-      build_change
+      build_change "$dir"
       shared=1
-    elif [ ! -f "$PDIR/sharing" ] && [ "$NFILES" -gt 0 ] && [ ! -f "$PDIR/asked" ]; then
-      # Asked once: code sharing is off until the developer chooses.
-      true > "$PDIR/asked"
-      consent=" Send “vyavasta share code on” to also send your uncommitted changes for the check: teammates see only a summary, and key, ignored, machine-written and non-text files never go. This is asked only once."
     fi
   fi
   # A server that can takes the work report that would follow the check with the check itself, and asks a question
   # about the team as soon as the check finds the message is one (`ask_now`): one or two calls fewer. An older server
-  # leaves both aside, and they are sent on their own below.
+  # leaves both aside, and they are sent on their own below. The report goes whenever there is work to tell, its
+  # commits not pushed yet among it, so that the check of a request to push sees what the push carries.
   carried=""
-  if [ "$NFILES" -gt 0 ] && work_report "$dir" bare; then carried=1; fi
+  if [ -n "$ROOT" ] && [ -n "$REMOTE" ] && work_report "$dir" bare; then carried=1; fi
   {
     printf '{"request_id":"%s","request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s,"ask_now":true' \
       "$(new_request_id)" "$prompt" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" \
@@ -2973,7 +3580,7 @@ handle_message() {
   # (A reply or a report kept from earlier goes along after it.)
   pick_ride
   api POST /check "$TMP/check" "$CHECK_SECONDS"
-  if [ -n "$shared" ] && [ "$STATUS" = "200" ]; then cksum < "$TMP/change" > "$dir/change-sum"; fi
+  if [ -n "$shared" ] && [ "$STATUS" = "200" ]; then change_taken "$dir"; fi
   case "$STATUS" in
     200) ;;
     401)
@@ -3065,13 +3672,13 @@ handle_message() {
   new_conflict=""
   keep_conflict "$dir" && new_conflict=1
   # What was sent, and what was not.
-  sent="your message"; not_sent=""
+  sent="your message"; not_sent=""; sent_also=""
   if [ -n "$shared" ]; then
     if [ "$was_shared" = "off" ] && [ "$verdict" != "not_connected" ]; then
-      echo off > "$PDIR/sharing"; echo off > "$PDIR/sharing-told"
+      echo off > "$PDIR/sharing"; echo off > "$PDIR/sharing-told"; forget_sent
       not_sent="your code changes (code sharing was turned off for this repository in Vyavasta’s web app, so it is off here too; send “vyavasta share code on” to turn it on again)"
     elif [ "${CH_FILES:-0}" -gt 0 ]; then
-      sent="$sent and your uncommitted changes ($(plural "$CH_FILES" file files), $(plural "$CH_LINES" line lines) of changes)"
+      sent_also="your changes not on GitHub yet ($(plural "$CH_FILES" file files), $(plural "$CH_LINES" line lines) of changes)"
     fi
     left=$(left_out_said)
     if [ -n "$left" ] && [ "$was_shared" != "off" ]; then
@@ -3090,12 +3697,20 @@ handle_message() {
   if [ "$NFILES" -gt 0 ] && [ -n "$REMOTE" ] && { [ -n "$carried" ] || [ "$verdict" != "not_connected" ]; }; then
     [ -n "$carried" ] || report_work "$dir" changing
     if [ "$REPORTED" = "1" ] && { [ -z "$shared" ] || [ "$was_shared" = "off" ]; }; then
-      sent="$sent and $(plural "$NFILES" "changed file’s name" "changed files’ names")"
+      sent_also=$(plural "$NFILES" "changed file’s name" "changed files’ names")
       # (Said in the session's first line: it doesn't change from one message to the next.)
       [ -n "$shared" ] || [ -n "$LINE_SHORT" ] || not_sent="${not_sent:+$not_sent; }what the files hold (code sharing is off)"
     fi
     keep_conflict "$dir" && new_conflict=1
   fi
+  # The messages of the commits not pushed yet, and what changed in nested repositories, went with the report too:
+  # said in the session's first line, as what is sent of the files is.
+  unpushed_said=""; nested_said=""
+  if [ "$REPORTED" = "1" ] && [ -z "$LINE_SHORT" ]; then
+    [ "${UNPUSHED:-0}" = "0" ] || unpushed_said=$(plural "$UNPUSHED" "unpushed commit’s message" "unpushed commits’ messages")
+    [ "${NESTED:-0}" = "0" ] || nested_said="what changed in $(plural "$NESTED" "nested repository" "nested repositories")"
+  fi
+  sent=$(sent_list "$sent" "$sent_also" "$unpushed_said" "$nested_said")
   # Teammates changing the same files, as this message's check and work report told it, and what waits of it from an
   # earlier report: under this message's line, and the details for the tool's model (`emit`).
   pending_overlap "$dir"
@@ -3128,14 +3743,14 @@ handle_message() {
       # all, wasn't.)
       if { [ "$STATUS" = "000" ] && [ -n "$WENT" ]; } || \
           { case "$STATUS" in 5*) [ "$(refusal_code)" != "restarting" ] ;; *) false ;; esac; }; then
-        OUT_LINE=$(line "$sent" "$not_sent" "No answer came from Vyavasta, so ${AGENT} answers by itself. If your question reached it, the answer will be in this session’s chat in Vyavasta.$consent" "$kept_said")
+        OUT_LINE=$(line "$sent" "$not_sent" "No answer came from Vyavasta, so ${AGENT} answers by itself. If your question reached it, the answer will be in this session’s chat in Vyavasta." "$kept_said")
       else
-        OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself.$consent" "$kept_said")
+        OUT_LINE=$(line "$sent" "$not_sent" "Your question couldn’t be asked just now, so ${AGENT} answers by itself." "$kept_said")
       fi
     else
       outcome=$(json_text "$(answer notice)")
       [ -n "$outcome" ] || outcome="Vyavasta had no answer to give."
-      OUT_LINE=$(line "$sent" "$not_sent" "$outcome$consent" "$kept_said")
+      OUT_LINE=$(line "$sent" "$not_sent" "$outcome" "$kept_said")
       OUT_CONTEXT=$(json_text "$(answer context)")
       # (And when the answer drew on a document.)
       docs_hint "$TMP/answer"
@@ -3171,11 +3786,11 @@ handle_message() {
       # The notice below says what stands, so the line only says which kind of hold it is.
       if [ "$verdict" = "held" ]; then held_said="On hold; see below."
       else held_said="On hold: what your team has said doesn’t settle this request; see below."; fi
-      OUT_LINE=$(line "$sent" "$not_sent" "$held_said$consent" "$kept_said")
+      OUT_LINE=$(line "$sent" "$not_sent" "$held_said" "$kept_said")
       OUT_REASON="$notice"
       emit; return
     fi
-    OUT_LINE=$(line "$sent" "$not_sent" "$outcome$consent" "$kept_said")
+    OUT_LINE=$(line "$sent" "$not_sent" "$outcome" "$kept_said")
     OUT_CONTEXT="$context"
   fi
   [ -n "$CONFLICT_CONTEXT" ] && OUT_CONTEXT="$CONFLICT_CONTEXT${OUT_CONTEXT:+
@@ -3228,6 +3843,7 @@ emit() {
   # (That a message was cut to what Vyavasta takes is said where it was sent, never on a line that says nothing was.)
   case "$OUT_LINE" in ""|"$NOTHING_SENT ("*) ;; *) [ -z "${CUT_NOTE:-}" ] || OUT_LINE=$(then_said "$OUT_LINE" "$CUT_NOTE") ;; esac
   [ -n "$OUT_LINE" ] && [ -n "${SUMMARIES_NOTE:-}" ] && OUT_LINE=$(then_said "$OUT_LINE" "$SUMMARIES_NOTE")
+  [ -n "$OUT_LINE" ] && [ -n "${SHARING_NOTE:-}" ] && OUT_LINE=$(then_said "$OUT_LINE" "$SHARING_NOTE") && mark_sharing_said
   # (A line after a check gave the session's whole account: its later lines are short.)
   [ -n "$OUT_LINE" ] && [ -n "${LINE_MARK:-}" ] && true > "$LINE_MARK"
   # Teammates changing the same files are read under the line, a heads-up whatever came of the message itself; and
@@ -3338,22 +3954,34 @@ work_sent() {
 # Whether a call that wasn't taken is to be sent again later: no answer came, the server failed, or it was busy.
 send_later() { case "$STATUS" in 000|5*|429) return 0 ;; esac; return 1; }
 
-# The session's work report as it stands, in $TMP/report: git's list of changed files, and with code sharing on the
-# changes when they moved since they were last sent (unless $2 is "bare": a check that carries the changes itself
-# carries the report). Fails when there is nothing to tell. $1 is the session folder.
+# The session's work report as it stands, in $TMP/report: git's list of changed files, the facts of the work not on
+# GitHub yet (`git`: `git_facts`), and with code sharing on the changes when they moved since they were last sent or a
+# file's copy is due (unless $2 is "bare": a check that carries the changes itself carries the report). Fails when
+# there is nothing to tell. $1 is the session folder.
 work_report() {
   [ -f "$TMP/files" ] || changed_files
+  FACTS_DIR=$1
+  git_facts
+  # A session that has nothing open, nothing changed, no commit unpushed and no nested repository with work of its
+  # own has nothing to tell.
+  [ ! -s "$TMP/files" ] && [ ! -f "$1/open" ] && [ "${UNPUSHED:-0}" = "0" ] && [ "${NESTED:-0}" = "0" ] && return 1
   state=$(work_state "$1")
-  # A session that has nothing open and nothing changed has nothing to tell.
-  [ "$state" != "changing" ] && [ ! -f "$1/open" ] && return 1
   with_change=""
-  if [ "$(sharing)" = "on" ] && [ "${2:-}" != "bare" ]; then
-    [ -f "$TMP/change" ] || build_change
-    if [ "$(cksum < "$TMP/change")" != "$(cat "$1/change-sum")" ]; then with_change=1; fi
+  if [ "${2:-}" != "bare" ] && sharing_now; then
+    [ -f "$TMP/change" ] || build_change "$1"
+    sent_sum=""
+    [ -f "$1/change-sum" ] && read -r sent_sum < "$1/change-sum"
+    if [ -n "${COPIES_DUE:-}" ] || [ "$(cksum < "$TMP/change-core")" != "$sent_sum" ]; then with_change=1; fi
+    # (The server is told that code sharing is on before a change goes, once a connection, as a message tells it: it
+    # drops a change it wasn't told of, and its answer would turn sharing off here.)
+    told_sharing=""
+    [ -f "$PDIR/sharing-told" ] && read -r told_sharing < "$PDIR/sharing-told"
+    if [ -n "$with_change" ] && [ "$told_sharing" != "on" ]; then tell_sharing on || with_change=""; fi
   fi
   {
-    printf '{"remote":%s,"branch":%s,"session":%s,"state":"%s","files":[%s],"tool":"%s"' "$(json_quote "$REMOTE")" \
+    printf '{"remote":%s,"branch":%s,"session":%s,"state":"%s","files":[%s],"tool":"%s","git":' "$(json_quote "$REMOTE")" \
       "$(json_quote "$BRANCH")" "$(json_quote "$(basename "$1")")" "$state" "$(cat "$TMP/files")" "$CLIENT"
+    cat "$TMP/git"
     if [ -n "$with_change" ]; then printf ',"change":'; cat "$TMP/change"; fi
     printf '}'
   } > "$TMP/report"
@@ -3367,7 +3995,7 @@ work_taken() {
   # (A report of this session kept from earlier is older than this one: it is given up.)
   rm -f "$UNSENT"/*-work-"$(basename "$1")".json "$UNSENT"/*-work-"$(basename "$1")".about
   keep_overlap "$TMP/answer" "$1" "${AFTER_EDIT:-}"
-  [ -n "$with_change" ] && cksum < "$TMP/change" > "$1/change-sum"
+  [ -z "$with_change" ] || change_taken "$1"
   if [ "$(answer recorded)" = "true" ]; then
     case "$(json_text "$(answer status)")" in
       pushed|abandoned) rm -f "$1/open" ;;
@@ -3375,7 +4003,7 @@ work_taken() {
     esac
   fi
   if [ "$(json_text "$(answer sharing)")" = "off" ] && [ "$(sharing)" = "on" ] && [ -n "$with_change" ]; then
-    echo off > "$PDIR/sharing"; echo off > "$PDIR/sharing-told"
+    echo off > "$PDIR/sharing"; echo off > "$PDIR/sharing-told"; forget_sent
   fi
 }
 
@@ -3735,10 +4363,13 @@ command_on() {
     fi
   fi
   if [ -n "$ROOT" ] && [ -n "$REMOTE" ]; then
+    # Code sharing is on unless the developer turned it off: said here, where the project is turned on, before any
+    # of its code goes.
     if [ "$(sharing)" = "on" ]; then
-      echo "Code sharing is on: your uncommitted changes go with each message and after each edit. Send “vyavasta share code off” to stop."
+      echo "Code sharing is on: what you change and haven’t pushed yet goes to Vyavasta with each message and after each edit, new files and commits not pushed included, so that its check reads the real change. Key and password files, files git ignores, machine-written files and files that aren’t text never leave this computer. Send “vyavasta share code off” to turn it off."
+      [ -f "$PDIR/sharing" ] || mark_sharing_said
     else
-      echo "Code sharing is off: your changed files’ names are sent, not your uncommitted changes. Send “vyavasta share code on” to also send them."
+      echo "Code sharing is off: the names of the files you change and your unpushed commits’ messages are sent, never the changes themselves. Send “vyavasta share code on” to also send them."
     fi
     # What teammates see of this work, and that both are told when they change the same file: said where the
     # developer turns it on, unless Vyavasta doesn't read the repository for them (then nothing of it is kept).
@@ -3810,6 +4441,8 @@ command_share_on() {
     echo "Vyavasta couldn’t save the setting, because its settings folder ($HOME_DIR) can’t be written. Send “vyavasta share code on” as a message instead."
     return
   fi
+  # (What the server kept went when sharing was turned off: everything is sent afresh.)
+  forget_sent
   name=$(repository_name "$REMOTE")
   limit_lines=$CHANGE_LINES
   [ -f "$HOME_DIR/limits" ] && kept_lines=$(sed -n 's/^lines=//p' "$HOME_DIR/limits") && case "$kept_lines" in ''|*[!0-9]*) ;; *) limit_lines=$kept_lines ;; esac
@@ -3819,7 +4452,7 @@ command_share_on() {
   # repository), else the plugin's. The list of what never leaves this computer is always the plugin's: it decides.
   if [ -n "$SHARING_NOTICE" ]; then echo "$SHARING_NOTICE"
   else
-    echo "Code sharing is on for $name: your uncommitted changes (up to $(thousands "$limit_lines") lines) now go to Vyavasta with each message and after each edit, and Vyavasta’s check reads them."
+    echo "Code sharing is on for $name: your changes not on GitHub yet (up to $(thousands "$limit_lines") lines), with the latest copy of each changed file, now go to Vyavasta with each message and after each edit, and Vyavasta’s check reads them."
     echo "Teammates who can already see this work see which files you change and a short summary of what the change does, never the code. When you and a teammate change the same file, both of you are told, as a heads-up. Vyavasta keeps only the latest changes of each session, for 7 days at most."
   fi
   echo "Never sent from this computer: files git ignores, key and password files (such as .env or .pem), machine-written files such as lock files and build output, and files that aren’t text."
@@ -3831,10 +4464,11 @@ command_share_on() {
 command_share_off() {
   command_here
   project_keep && echo off > "$PDIR/sharing"
+  forget_sent
   SHARING_NOTICE=""
   if repository "$HERE" && [ -n "$REMOTE" ] && [ -n "$TOKEN" ] && ! held_off; then tell_sharing off; fi
   if [ -n "$SHARING_NOTICE" ]; then echo "$SHARING_NOTICE"
-  else echo "Code sharing is off: from now on your uncommitted changes aren’t sent, only your changed files’ names."; fi
+  else echo "Code sharing is off: from now on your changes aren’t sent, only your changed files’ names and your unpushed commits’ messages."; fi
   echo "Send “vyavasta share code on” to turn it on again."
 }
 
@@ -3946,7 +4580,7 @@ Your setup
 See what is shared
 - “vyavasta settings”: every setting and how to change it.
 - “vyavasta open” / “vyavasta open settings”: open Vyavasta, or your settings there, in your browser.
-- “vyavasta share code on” / “vyavasta share code off”: start or stop code sharing, which sends your uncommitted changes with each message.
+- “vyavasta share code off” / “vyavasta share code on”: stop or start code sharing (on unless you turn it off), which sends your changes not on GitHub yet with each message.
 - “vyavasta summaries on” / “vyavasta summaries off”: start or stop summaries, which keep your messages and the replies in a chat of your own, summed up for teammates.
 - “vyavasta summary”: your own summaries, with which of them teammates see, and what your teammates are working on.
 - “vyavasta shared”: everything sent from this session.
@@ -3973,7 +4607,7 @@ guide_context() {
     codex) also="" ;;
     *) also=" In Claude Code most of these are also slash commands, such as /vyavasta:sign-in, /vyavasta:on and /vyavasta:help, which the developer can run instead." ;;
   esac
-  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. To tell a teammate something, the developer starts a message with “@” and the teammate’s name, then the words (“@priya the fix is pushed”), and the plugin sends it as written; “@team” and the words reach everyone else in the workspace, and several names at the start reach each of them; “vyavasta ask <name>: <question>” asks a teammate’s agent. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, which also sends their uncommitted changes for the check (teammates see only a short summary, never the code): “vyavasta share code on” and “vyavasta share code off”. What it sends from a project that is on: each message’s words, the repository and branch, changed files’ names, and with code sharing on the uncommitted changes; from a project that is off, nothing of their work. Teammates who read the same repository see which files the developer changes (with code sharing on, a short summary of the change, never the code), and when the developer and a teammate change the same file both of them are told once, as a heads-up that holds nothing. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
+  printf '%s' "The developer’s message asks about the Vyavasta plugin. Vyavasta connects ${TOOL} to the developer’s team: in a project where it is on, it checks each request against what the team has said and decided before you change code, sums each session up for teammates under categories the developer controls, answers questions about the team, and carries messages between the developer and their teammates. It is off in every project until the developer turns it on there. These phrases are the plugin’s own commands. The developer sends each one as a message of its own, and the plugin answers it itself before it reaches you, so you cannot run them: tell the developer which one to send. Sign in: “vyavasta sign in” (the sign-in page opens in their browser with a code to enter). Turn it on in this project: “vyavasta on”, and “vyavasta off” to stop. Everything it does: “vyavasta help”. Whether they are signed in and it is on: “vyavasta status”. Test the setup and say how to fix each problem: “vyavasta check”. Every setting: “vyavasta settings”. To tell a teammate something, the developer starts a message with “@” and the teammate’s name, then the words (“@priya the fix is pushed”), and the plugin sends it as written; “@team” and the words reach everyone else in the workspace, and several names at the start reach each of them; “vyavasta ask <name>: <question>” asks a teammate’s agent. Summaries, which keep the developer’s messages and your replies in a chat of their own in Vyavasta and sum them up for teammates: “vyavasta summaries on” and “vyavasta summaries off”. Code sharing, on unless the developer turns it off, which also sends their changes not on GitHub yet for the check (teammates see only a short summary, never the code): “vyavasta share code off” and “vyavasta share code on”. What it sends from a project that is on: each message’s words, the repository and branch, the changed files’ names (new files too), the messages of commits not pushed yet, the same for repositories nested inside it, and with code sharing on the changes themselves and the latest copy of each changed file; from a project that is off, nothing of their work. Teammates who read the same repository see which files the developer changes (with code sharing on, a short summary of the change, never the code), and when the developer and a teammate change the same file both of them are told once, as a heads-up that holds nothing. Every message in a project that is on gets one line saying what was sent. The team’s documents the developer may read in Vyavasta: “vyavasta documents”, “vyavasta documents search <words>” and “vyavasta documents read <number>”.$also"
 }
 
 # Whether a message asks how to use the plugin itself: it is short (GUIDE_LONGEST), asks something (a question mark,
@@ -4177,7 +4811,7 @@ command_check() {
   if project_on; then echo "ok: Vyavasta is on in this project."
   else echo "Problem: Vyavasta is off in this project. Send “vyavasta on” to use it here."; fi
   if [ "$(sharing)" = "on" ]; then echo "ok: code sharing is on. Send “vyavasta share code off” to stop it."
-  else echo "ok: code sharing is off, so your uncommitted changes aren’t sent, only changed files’ names. Send “vyavasta share code on” to also send your uncommitted changes."; fi
+  else echo "ok: code sharing is off, so your changes aren’t sent, only your changed files’ names and your unpushed commits’ messages. Send “vyavasta share code on” to also send your changes."; fi
   if [ "$(summaries)" = "on" ]; then echo "ok: summaries are on, so your messages and ${TOOL}’s replies, as written, are kept in your own chat and summed up for teammates. Send “vyavasta summaries off” to stop."
   else echo "ok: summaries are off, so $(summaries_off_said) Send “vyavasta summaries on” to turn them on."; fi
   if [ -n "$minimum" ] && older "$VERSION" "$minimum"; then
