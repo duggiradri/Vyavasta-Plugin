@@ -9,7 +9,7 @@
       "name": "vyavasta",
       "source": "./plugins/vyavasta",
       "description": "Checks your requests against what your team has said and decided before Claude changes code, sums each session up for teammates under categories you control, answers your questions about the team, and lets you ask teammates’ agents.",
-      "version": "0.6.0"
+      "version": "0.7.0"
     }
   ]
 }
