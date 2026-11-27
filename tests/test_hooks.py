@@ -3177,6 +3177,35 @@ def test_a_turn_that_never_ended_never_files_a_later_reply_under_its_message(run
     assert "message_id" not in fake.calls("/turn")[-1]["body"]
 
 
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_a_held_message_the_developer_goes_on_with_has_its_turns_reply_filed_under_it(run, fake, repo, tool):
+    """A message held, its words kept for the summary; the developer sends “Go ahead anyway”, and the turn that carries
+    the message out ends: its reply goes under the held message, as any kept message's reply does, so the session's
+    summary is brought up to date with the work. (The turn of “Go ahead anyway” filed nothing: the new message cleared
+    what waited for a reply, and the session's summary stayed as it was before the held request.) A message that
+    doesn't go on forgets it, and a push held as it runs files nothing under an earlier message."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = {"verdict": "held", "hold": True, "kind": "change", "statements": [],
+                  "notice": "On hold: Priya said the export stays.", "context": "Priya’s decision stands.",
+                  "anyway": {"phrase": "Go ahead anyway", "context": "The developer chose to go ahead anyway."}}
+    held = prompt(run, repo, "Remove the export from calc.py", tool=tool)
+    assert held["decision"] == "block"
+    kept_id = f"msg_{len(fake.calls('/check'))}"
+    assert "going ahead" in prompt(run, repo, "Go ahead anyway", tool=tool)["systemMessage"]
+    stop(run, repo, last_assistant_message="Removed the export from calc.py.", tool=tool)
+    (turn,) = fake.calls("/turn")
+    assert turn["body"]["message_id"] == kept_id and turn["body"]["reply"] == "Removed the export from calc.py."
+    # Held again, and the developer sends something else instead: that message is a turn of its own.
+    prompt(run, repo, "Remove the export from calc.py", tool=tool)
+    fake.check = {"verdict": "clear", "hold": False, "kind": "change", "statements": [], "context": "Clear.",
+                  "notice": "Checked against your team’s record: nothing stands against this change."}
+    prompt(run, repo, "Rename add to sum in calc.py", tool=tool)
+    other = f"msg_{len(fake.calls('/check'))}"
+    stop(run, repo, last_assistant_message="Renamed add to sum.", tool=tool)
+    assert fake.calls("/turn")[-1]["body"]["message_id"] == other and len(fake.calls("/turn")) == 2
+
+
 @pytest.mark.parametrize("words", ["Plan it anyway", "plan  it ANYWAY!", "continue", "Continue anyway?",
                                    "go on", "Go\ton.", "stop", "  STOP !"])
 def test_the_phrases_never_kept_are_matched_whatever_their_case_spacing_or_closing_mark(run, fake, repo, words):

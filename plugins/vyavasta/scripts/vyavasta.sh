@@ -3922,7 +3922,10 @@ hook_prompt() {
     fi
     went_said="${AGENT} was shown your request, what stands in the way, and that you chose to go on."
     [ -f "$dir/held-unchecked" ] && went_said="${AGENT} was told you chose to run the command without the check."
-    rm -f "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked"
+    # This turn carries out the message that was held: its reply goes under that message, kept for the summary, as
+    # the reply to any message kept does (the turn's end, `turn_ready`).
+    [ -s "$dir/held-kept" ] && mv -f "$dir/held-kept" "$dir/turn-waiting"
+    rm -f "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept"
     going=$(cat "$dir/held")
     if [ -s "$dir/overlap-context" ]; then
       going=$(json_quote "$(fitted "$(json_text "$going")
@@ -3974,7 +3977,7 @@ The developer was told that something their team has said stands against the cha
         fi ;;
     esac
   fi
-  rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked"
+  rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept"
   handle_message "$prompt" "$dir"
 }
 
@@ -4423,6 +4426,9 @@ handle_message() {
       json_text "$(answer kind)" | tr -cd 'a-z' > "$dir/held-kind"
       { [ -z "$ROOT" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD; } > "$dir/held-head"
       rm -f "$dir/held-unchecked"
+      # (The message held, where its words were kept for the summary: the turn that carries it out once the developer
+      # goes on files its reply under it, `hook_prompt`.)
+      if [ -s "$dir/turn-waiting" ]; then cp "$dir/turn-waiting" "$dir/held-kept"; else rm -f "$dir/held-kept"; fi
       # The notice below says what stands, so the line only says which kind of hold it is.
       if [ "$verdict" = "held" ]; then held_said="On hold; see below."
       else held_said="On hold: what your team has said doesn’t settle this request; see below."; fi
@@ -4650,6 +4656,7 @@ refuse_unchecked() {
   echo action > "$dir/held-kind"
   printf '%s\n' "$head" > "$dir/held-head"
   true > "$dir/held-unchecked"
+  rm -f "$dir/held-kept"
   refuse_run "Vyavasta couldn’t check this command against the team’s record ($1), so it didn’t run. Ask the developer whether to run it anyway. If they choose to, they send “$GO_AHEAD”, and then you run it again." \
     "Vyavasta · this push wasn’t checked ($1), so it didn’t run. Send “$GO_AHEAD” to run it without the check.${pushed_line:+
 
@@ -4781,8 +4788,8 @@ hook_before_run() {
         json_quote "$(json_text "$held")" > "$dir/held"
         echo action > "$dir/held-kind"
         printf '%s\n' "$head" > "$dir/held-head"
-        rm -f "$dir/held-unchecked" ;;
-      *) rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" ;;
+        rm -f "$dir/held-unchecked" "$dir/held-kept" ;;
+      *) rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept" ;;
     esac
     # (Claude Code's developer reads the notice on the line, and its model may say what stands in words of its own.
     # Codex's model opens what it says next with the notice's lines themselves: `refuse_run`.)
