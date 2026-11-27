@@ -7819,9 +7819,11 @@ def unchecked(why: str, tool: str | None) -> dict:
 
 def test_a_held_push_is_gone_past_with_its_own_words_and_the_push_then_runs_unheld(run, fake, repo):
     """“push this change” is held where the team locked a file it carries; “Go ahead anyway” gives the model the
-    request with what stood in the way, and the push the model then runs is not held again. Going past a hold lets that
-    push through and no other: one that carries a commit made since is checked again, with that commit, and so is the
-    same push once 15 minutes have passed. Going past a hold on a change (“Plan it anyway”) lets no push through."""
+    request with what stood in the way, and the push the model then runs is not held again: it is sent marked as
+    decided (``passed``), for teammates changing what it carries to be told, and runs whatever is answered, even a hold
+    from a server that checks it as any command. Going past a hold lets that push through and no other: one that carries
+    a commit made since is checked again, with that commit, and so is the same push once 15 minutes have passed. Going
+    past a hold on a change (“Plan it anyway”) lets no push through."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     fake.check = dict(HELD_PUSH)
@@ -7830,22 +7832,27 @@ def test_a_held_push_is_gone_past_with_its_own_words_and_the_push_then_runs_unhe
     going = prompt(run, repo, "Go ahead anyway!")
     assert going["hookSpecificOutput"]["additionalContext"] == HELD_PUSH["anyway"]["context"]
     assert "going ahead" in going["systemMessage"] and len(fake.calls("/check")) == 1
-    # The push the developer chose to go on with runs, with no second check.
-    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 1
+    # The push the developer chose to go on with runs: sent as decided, never held again, though the server holds it.
+    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 2
+    decided = fake.calls("/check")[-1]["body"]
+    assert decided["passed"] is True and decided["command"] == "git push origin main"
     # One that carries a commit made since is checked again, with that commit, and held.
     (repo / "compose.yaml").write_text("image: worker:2\n")
     git(repo, "add", "compose.yaml")
     git(repo, "commit", "-qm", "Bump the worker image")
-    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 2
+    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 3
+    assert "passed" not in fake.calls("/check")[-1]["body"]
     (commit,) = fake.calls("/check")[-1]["body"]["work"]["git"]["unpushed"]
     assert commit["subject"] == "Bump the worker image"
     # Gone past again, it runs, until 15 minutes have passed.
     assert "going ahead" in prompt(run, repo, "Go ahead anyway")["systemMessage"]
-    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 2
+    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 4
+    assert fake.calls("/check")[-1]["body"]["passed"] is True
     (gone,) = run.home.glob("sessions/*/go-ahead")
     went, commit_held = gone.read_text().split()
     gone.write_text(f"{int(went) - 901} {commit_held}\n")
-    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 3
+    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 5
+    assert "passed" not in fake.calls("/check")[-1]["body"]
     # A change gone past with “Plan it anyway”: the push the model runs after it is checked, and held.
     fake.check = {"verdict": "held", "hold": True, "kind": "change", "statements": [],
                   "notice": "On hold: Priya said the export stays.", "context": "Priya’s decision stands.",
@@ -7853,7 +7860,8 @@ def test_a_held_push_is_gone_past_with_its_own_words_and_the_push_then_runs_unhe
     prompt(run, repo, "Remove the export from calc.py")
     assert "going ahead" in prompt(run, repo, "Plan it anyway")["systemMessage"]
     fake.check = dict(HELD_PUSH)
-    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 5
+    assert denied(before_run(run, repo, "git push origin main")) and len(fake.calls("/check")) == 7
+    assert "passed" not in fake.calls("/check")[-1]["body"]
 
 
 def test_a_push_the_tool_runs_is_checked_however_it_was_asked_for_and_nothing_else_is(run, fake, repo):
@@ -7886,9 +7894,10 @@ def test_a_push_the_tool_runs_is_checked_however_it_was_asked_for_and_nothing_el
     assert told == ("Vyavasta checked this request: Priya’s lock stands.\n\nDon’t run this command again unless the "
                     "developer chooses to go ahead anyway.")
     assert fake.calls("/check")[-1]["body"]["command"] == "bash -lc gh pr merge 12 --squash "
-    # Gone past by the developer, the push runs.
+    # Gone past by the developer, the push runs, sent as decided though the server would hold it.
     assert "going ahead" in prompt(run, repo, "go ahead anyway")["systemMessage"]
-    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 2
+    assert before_run(run, repo, "git push origin main") == {} and len(fake.calls("/check")) == 3
+    assert fake.calls("/check")[-1]["body"]["passed"] is True
 
 
 def test_what_could_not_be_checked_has_the_model_ask_the_developer_before_anything_leaves_the_computer(run, fake, repo):
@@ -7998,8 +8007,8 @@ def test_the_check_before_a_push_never_runs_past_the_time_its_tool_gives_it(run,
 @pytest.mark.parametrize("cause", ["failing", "out of reach"])
 def test_a_push_that_couldnt_be_checked_runs_once_the_developer_says_go_ahead_anyway(run, fake, repo, tool, cause):
     """While the server can't check anything, “Go ahead anyway” is how the developer pushes all the same: the push
-    that was refused then runs, without a check or a call, and the tool's model is told the developer chose to run
-    that command without the check."""
+    that was refused then runs, without a check, and the tool's model is told the developer chose to run that command
+    without the check. It is sent as decided where the server may be reached at all, and runs whatever comes of it."""
     signed_in(run, fake)
     switched_on(run, fake, repo)
     kwargs: dict = {}
@@ -8021,7 +8030,55 @@ def test_a_push_that_couldnt_be_checked_runs_once_the_developer_says_go_ahead_an
             "again because of the check. Their command: “git push origin main”")}}
     checks = len(fake.calls("/check"))
     assert before_run(run, repo, "git push origin main", tool=tool, **kwargs) == {}
-    assert len(fake.calls("/check")) == checks
+    assert all(call["body"]["passed"] is True for call in fake.calls("/check")[checks:])
+    assert len(fake.calls("/check")) == checks + (cause == "failing")
+
+
+def test_a_push_already_decided_runs_whatever_is_answered_and_tells_who_changes_what_it_carries(run, fake, repo,
+                                                                                                    tmp_path):
+    """A push whose message's check cleared it, with this very commit, isn't checked again: it is sent marked as
+    decided (``passed``), within 8 seconds, for teammates changing a file it carries to be told it is about to be pushed
+    (owner decision 11). Claude Code's developer reads the server's line on the push's own line, and Codex's with the
+    reply to the next message; and the push runs whatever is answered: a hold from a server that checks it as any
+    command, an error, or no answer in time."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    git(repo, "commit", "-qam", "Swap the order")
+    line = "Vyavasta: " + LINES[1]
+    clear = {"verdict": "clear", "hold": False, "kind": "action", "statements": [], "context": "Clear.",
+             "notice": "Checked against your team’s record: nothing stands against this."}
+    told = {"verdict": "passed", "hold": False, "statements": [], "notice": "", "context": "",
+            "overlap": {**OVERLAP_LINES, "lines": LINES[1:]}}
+    for tool in (None, "codex"):
+        session = f"s-{tool}"
+        fake.check = dict(clear)
+        prompt(run, repo, "push this change", session=session, tool=tool)
+        fake.check = dict(told)
+        said = before_run(run, repo, "git push origin main", tool=tool, session=session)
+        assert said == ({} if tool else {"systemMessage": line})
+        sent = fake.calls("/check")[-1]["body"]
+        assert sent["passed"] is True and sent["command"] == "git push origin main"
+        assert sent["work"]["git"]["unpushed"][0]["subject"] == "Swap the order"
+        fake.check = dict(clear)
+        assert relayed(prompt(run, repo, "Add a test for calc.py", session=session, tool=tool)) == (
+            [line] if tool else [])
+        # An older server checks it as any command and holds it, or fails: it runs all the same.
+        fake.check = dict(clear)
+        prompt(run, repo, "push this change", session=session, tool=tool)
+        fake.check = dict(HELD_PUSH)
+        assert before_run(run, repo, "git push origin main", tool=tool, session=session) == {}
+        fake.status["/check"] = 503
+        assert before_run(run, repo, "git push origin main", tool=tool, session=session) == {}
+        del fake.status["/check"]
+    # A server slower than the call's 8 seconds (made 1 here) holds the push up no longer than that.
+    path, _ = curl_runs(tmp_path, {8: 1})
+    fake.check = dict(clear)
+    prompt(run, repo, "push this change", session="s-slow")
+    fake.delay["/check"] = 5
+    began = time.monotonic()
+    assert before_run(run, repo, "git push origin main", session="s-slow", extra={"PATH": path}) == {}
+    assert time.monotonic() - began < 4
 
 
 def test_a_push_that_carries_a_teammates_file_says_so_once(run, fake, repo):
@@ -8062,8 +8119,10 @@ def test_a_push_that_carries_a_teammates_file_says_so_once(run, fake, repo):
     shown, _ = relayed_reason(held)
     assert shown == f"Vyavasta · {HELD_PUSH['notice']}".split("\n") + [line]
     assert "going ahead" in prompt(run, repo, "Go ahead anyway", session="s-codex-held", tool="codex")["systemMessage"]
-    assert before_run(run, repo, "git push origin main", tool="codex", session="s-codex-held") == {}
+    # (The push gone past is sent as decided, and the server, which told it once for this push, says nothing more.)
     fake.check = dict(clear)
+    assert before_run(run, repo, "git push origin main", tool="codex", session="s-codex-held") == {}
+    assert fake.calls("/check")[-1]["body"]["passed"] is True
     assert relayed(prompt(run, repo, "Add another test", session="s-codex-held", tool="codex")) == []
     # A line that a report after an edit kept for the check after the next edit is told on the push's line, before the
     # push's own: neither is told again at that edit, and the push's details still come to Claude with the next message.

@@ -239,6 +239,9 @@ case "$CLIENT" in
 esac
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
+# How long the call for a push already decided may take (`hook_before_run`): nothing is checked, and the push runs
+# whatever comes of it, so it never holds a push up for long.
+PASSED_SECONDS=8
 # How long one call for the answer to a question may take, and for how long in all calls go on waiting for an
 # answer that is not ready, from the hook's start: the assistant may read the record and look things up, and after
 # about a minute the tool goes on, the answer left in the developer's chat in Vyavasta.
@@ -4663,7 +4666,8 @@ $pushed_line}"
 # Cleared, or nothing Vyavasta reads here: nothing is said, and the command runs as the tool's own permissions allow.
 # A push the developer chose to go on with, or that the check of their message cleared, runs unchecked within
 # GO_AHEAD_FOR seconds while it carries the very commit that was held or cleared: one that carries a commit made since
-# is checked again. Teammates changing a file the push carries, which the server tells once for each push, are told
+# is checked again. Such a push is still sent, marked `passed`, within PASSED_SECONDS, for teammates changing a file it
+# carries to be told it is about to be pushed (owner decision 11); it runs whatever comes of that. Teammates changing a file the push carries, which the server tells once for each push, are told
 # too: in Claude Code on the push's own line, and in Codex, which shows that line nowhere, with the lines a refusal has
 # its model open what it says next with, or else with its model's reply to the next message.
 hook_before_run() {
@@ -4684,14 +4688,20 @@ hook_before_run() {
   at=$(now)
   head=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
   pushed_line=""
-  for passed in go-ahead action-clear; do
-    [ -f "$dir/$passed" ] || continue
-    passed_with=$(sed -n '1p' "$dir/$passed")
-    passed_at=$(printf '%s' "${passed_with%% *}" | tr -cd '0-9')
-    [ -n "$passed_at" ] && [ "${passed_with#* }" = "$head" ] && [ $(( at - passed_at )) -lt "$GO_AHEAD_FOR" ] && \
-      return 0
+  # A push already decided (gone past, or its message's check cleared it, with this very commit): it runs whatever
+  # is answered, and is sent only for teammates changing a file it carries to be told (`passed`).
+  passed=""
+  for decided in go-ahead action-clear; do
+    [ -f "$dir/$decided" ] || continue
+    decided_with=$(sed -n '1p' "$dir/$decided")
+    decided_at=$(printf '%s' "${decided_with%% *}" | tr -cd '0-9')
+    if [ -n "$decided_at" ] && [ "${decided_with#* }" = "$head" ] && [ $(( at - decided_at )) -lt "$GO_AHEAD_FOR" ]
+    then passed=1; break; fi
   done
-  if held_off; then refuse_unchecked "$AWAY_SAID"; return; fi
+  if held_off; then
+    [ -n "$passed" ] && return 0
+    refuse_unchecked "$AWAY_SAID"; return
+  fi
   # What goes with the command is what goes with a message (`hook_prompt`): the changes where code sharing is on and
   # the developer was told so, and the work report whenever there is work to tell, its commits not pushed yet among it
   # even when nothing is changed and not committed, so that the check sees what the push carries.
@@ -4709,13 +4719,27 @@ hook_before_run() {
       "$(json_quote "$SESSION")" "$CLIENT"
     if [ -n "$shared" ]; then printf ',"change":'; cat "$TMP/change"; fi
     if [ -n "$carried" ]; then printf ',"work":'; cat "$TMP/report"; fi
+    [ -z "$passed" ] || printf ',"passed":true'
     printf '}'
   } > "$TMP/check"
-  api POST /check "$TMP/check" "$CHECK_SECONDS"
+  if [ -n "$passed" ]; then api POST /check "$TMP/check" "$PASSED_SECONDS"
+  else api POST /check "$TMP/check" "$CHECK_SECONDS"; fi
   if [ -n "$shared" ] && [ "$STATUS" = "200" ]; then change_taken "$dir"; fi
   # (Nested repositories' changes went with the work report: noted where the server says it took it.)
   if [ -n "$carried" ] && [ -n "$nested_sent" ] && [ "$STATUS" = "200" ] && [ "$(answer work_recorded)" = "true" ]; then
     nested_taken
+  fi
+  if [ -n "$passed" ]; then
+    # The push runs, whatever was answered: an older server checks it as any command, and none is held again. Only
+    # teammates changing a file it carries are told, as of a cleared push: on its own line in Claude Code, and in
+    # Codex with its model's reply to the next message, where such lines wait.
+    if [ "$STATUS" = "200" ] && keep_overlap "$TMP/answer" "$dir" && [ "$CLIENT" != "codex" ] && \
+        [ -s "$dir/overlap-line" ] && mv -f "$dir/overlap-line" "$dir/overlap-line.$$"; then
+      pushed_line=$(cat "$dir/overlap-line.$$")
+      rm -f "$dir/overlap-line.$$" "$dir/overlap-edit"
+      say "$pushed_line"
+    fi
+    return 0
   fi
   case "$STATUS" in
     200) ;;
