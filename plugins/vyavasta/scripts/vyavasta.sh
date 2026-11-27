@@ -54,8 +54,10 @@ DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # What goes past a hold on something done besides a change: a push, a merge, a deploy, a command the tool runs. Either
 # phrase goes past either hold; the server says which to send. A push the tool's model runs within GO_AHEAD_FOR seconds
-# of going past a hold on one (or a refusal of one that couldn't be checked), or of a check that cleared the message
-# asking for it, isn't checked again while it carries the same commit as then.
+# of going past a hold on one (or a refusal of one that couldn't be checked) isn't checked again while it carries the
+# same commit as then. A push whose message's check cleared it is checked all the same when it runs: what it carries
+# then, and what was said since, may not be what that check saw (a commit made in the push's own command, a teammate's
+# email that came while the model worked).
 GO_AHEAD="Go ahead anyway"
 GO_AHEAD_FOR=900
 # What the tool's model is told when a message couldn't be checked (the server busy, slow, failing or out of reach):
@@ -4431,11 +4433,6 @@ handle_message() {
     OUT_LINE=$(line "$sent" "$not_sent" "$outcome" "$kept_said")
     [ -z "$told_more" ] || RELAY_LINE=1
     OUT_CONTEXT="$context"
-    # Something done besides a change, cleared: the push it asks for, of this very commit, isn't checked again when the
-    # tool's model runs it (`hook_before_run`).
-    if [ "$verdict" = "clear" ] && [ "$(json_text "$(answer kind)")" = "action" ] && [ -n "$ROOT" ]; then
-      printf '%s %s\n' "$(now)" "$(git_read -C "$ROOT" rev-parse -q --verify HEAD)" > "$dir/action-clear"
-    fi
   fi
   [ -n "$CONFLICT_CONTEXT" ] && OUT_CONTEXT="$CONFLICT_CONTEXT${OUT_CONTEXT:+
 
@@ -4666,11 +4663,12 @@ $pushed_line}"
 # reads the same; going past it lets the push run (`hook_prompt`). Not checked (the server busy, slow, failing or out of
 # reach): refused as well, and the tool's model is told to ask the developer, who can go past it the same way.
 # Cleared, or nothing Vyavasta reads here: nothing is said, and the command runs as the tool's own permissions allow.
-# A push the developer chose to go on with, or that the check of their message cleared, runs unchecked within
-# GO_AHEAD_FOR seconds while it carries the very commit that was held or cleared: one that carries a commit made since
-# is checked again. Such a push is still sent, marked `passed`, within PASSED_SECONDS, for teammates changing a file it
-# carries to be told it is about to be pushed (owner decision 11); it runs whatever comes of that. Teammates changing a file the push carries, which the server tells once for each push, are told
-# too: in Claude Code on the push's own line, and in Codex, which shows that line nowhere, with the lines a refusal has
+# A push the developer chose to go on with runs unchecked within GO_AHEAD_FOR seconds while it carries the very commit
+# that was held: one that carries a commit made since is checked again. Such a push is still sent, marked `passed`,
+# within PASSED_SECONDS, for teammates changing a file it carries to be told it is about to be pushed (owner decision
+# 11); it runs whatever comes of that. A push whose message's check cleared it is checked as it runs, whatever that
+# check said: the push's own command may make a commit first, and a teammate may have said something since. Teammates
+# changing a file the push carries, which the server tells once for each push, are told too: in Claude Code on the push's own line, and in Codex, which shows that line nowhere, with the lines a refusal has
 # its model open what it says next with, or else with its model's reply to the next message.
 hook_before_run() {
   ran=$(field "$(json_get "$TMP/input" tool_input)" command)
@@ -4690,16 +4688,16 @@ hook_before_run() {
   at=$(now)
   head=$(git_read -C "$ROOT" rev-parse -q --verify HEAD)
   pushed_line=""
-  # A push already decided (gone past, or its message's check cleared it, with this very commit): it runs whatever
-  # is answered, and is sent only for teammates changing a file it carries to be told (`passed`).
+  # A push the developer already chose to run (gone past its hold, with this very commit): it runs whatever is
+  # answered, and is sent only for teammates changing a file it carries to be told (`passed`). One whose message's
+  # check cleared it is checked as it runs, as any push is.
   passed=""
-  for decided in go-ahead action-clear; do
-    [ -f "$dir/$decided" ] || continue
-    decided_with=$(sed -n '1p' "$dir/$decided")
+  if [ -f "$dir/go-ahead" ]; then
+    decided_with=$(sed -n '1p' "$dir/go-ahead")
     decided_at=$(printf '%s' "${decided_with%% *}" | tr -cd '0-9')
     if [ -n "$decided_at" ] && [ "${decided_with#* }" = "$head" ] && [ $(( at - decided_at )) -lt "$GO_AHEAD_FOR" ]
-    then passed=1; break; fi
-  done
+    then passed=1; fi
+  fi
   if held_off; then
     [ -n "$passed" ] && return 0
     refuse_unchecked "$AWAY_SAID"; return
