@@ -8081,6 +8081,35 @@ def test_a_push_already_decided_runs_whatever_is_answered_and_tells_who_changes_
     assert time.monotonic() - began < 4
 
 
+def test_a_cleared_push_says_when_a_source_its_check_relies_on_was_last_read_a_while_ago(run, fake, repo):
+    """Every check says when a source it relies on was last read a while ago (owner decision 4): a lock emailed a
+    minute ago may not be in what it read. A push its check cleared runs, and the check's line with that sentence is
+    shown: on the push's own line in Claude Code, above any line of teammates changing what it carries; in Codex, which
+    shows nothing of a push that runs, at the top of the reply to the next message. A cleared push with nothing behind
+    says nothing."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    git(repo, "commit", "-qam", "Swap the order")
+    late = "Outlook was last read 12 minutes ago, so anything newer there isn’t part of this check."
+    notice = f"Checked against your team’s record: nothing stands against this. {late}"
+    clear = {"verdict": "clear", "hold": False, "kind": "action", "statements": [], "context": "Clear.",
+             "notice": "Checked against your team’s record: nothing stands against this."}
+    behind = {**clear, "notice": notice, "late": late}
+    for tool in (None, "codex"):
+        session = f"s-{tool}"
+        fake.check = dict(behind)
+        said = before_run(run, repo, "git push origin main", tool=tool, session=session)
+        assert said == ({} if tool else {"systemMessage": f"Vyavasta · {notice}"})
+        fake.check = dict(clear)
+        assert relayed(prompt(run, repo, "Add a test for calc.py", session=session, tool=tool)) == (
+            [f"Vyavasta · {notice}"] if tool else [])
+        assert before_run(run, repo, "git push origin main", tool=tool, session=session) == {}
+    fake.check = {**behind, "overlap": {**OVERLAP_LINES, "lines": LINES[1:]}}
+    assert before_run(run, repo, "git push origin main", session="s-both") == {
+        "systemMessage": f"Vyavasta · {notice}\nVyavasta: {LINES[1]}"}
+
+
 def test_a_push_that_carries_a_teammates_file_says_so_once(run, fake, repo):
     """Teammates changing the same file are told again when one of them is about to push it, once for each push. The
     server says it with the push's own check (its ``overlap``): Claude Code's developer reads the line on the push's

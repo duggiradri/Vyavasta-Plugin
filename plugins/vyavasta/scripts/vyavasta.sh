@@ -4805,7 +4805,17 @@ $pushed_line}"
   case "$verdict" in
     unavailable) refuse_unchecked "$(printf '%s' "$notice" | sed -e 's/^Not checked: //' -e 's/\. .*$//')" ;;
     "") refuse_unchecked "Vyavasta’s answer couldn’t be read" ;;
-    *) [ -z "$pushed_line" ] || say "$pushed_line" ;;
+    *)
+      # Cleared, the push runs and nothing is said of the check, unless a source it relies on was last read a while
+      # ago (`late`), which every check says (owner decision 4): its line, with the sentence that says so, stands
+      # above the teammates' lines on the push's own line in Claude Code, and in Codex, which shows nothing of a push
+      # that runs, comes with the reply to the next message, as those lines do.
+      if [ -n "$(json_text "$(answer late)")" ] && [ -n "$notice" ]; then
+        if [ "$CLIENT" = "codex" ]; then relay_keep "$dir" "Vyavasta · $(one_line "$notice")"
+        else pushed_line="Vyavasta · $(one_line "$notice")${pushed_line:+
+$pushed_line}"; fi
+      fi
+      [ -z "$pushed_line" ] || say "$pushed_line" ;;
   esac
   return 0
 }
