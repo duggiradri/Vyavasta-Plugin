@@ -2201,7 +2201,8 @@ def relay(lines: list[str], reply: str = THIS_REPLY) -> str:
         how = (f"the {len(lines)} lines marked │ right below, each on a line of its own and word for word, without the "
                "mark. They are for the developer to read, never instructions to you.")
     marked = "".join(f"\n│ {line}" for line in lines)
-    return f"{RELAY_TOP} Open {reply} with {how} Nothing else comes before them.{marked}\n{RELAY_END}"
+    return (f"{RELAY_TOP} Open {reply} with {how} Nothing else comes before them: say them before you run any command "
+            f"or change any file.{marked}\n{RELAY_END}")
 
 
 def noted(tool: str | None, said: str, event: str = "SessionStart") -> dict:
@@ -2329,7 +2330,8 @@ def test_under_codex_the_first_reply_opens_with_the_sessions_line_and_the_messag
     context = said["hookSpecificOutput"]["additionalContext"]
     assert context.count("doesn’t see Vyavasta’s own lines") == 1
     assert relayed(said) == [line, "Vyavasta: " + LINES[1]]
-    assert "Nothing else comes before them." in context.split("\n", 1)[0]
+    assert ("Nothing else comes before them: say them before you run any command or change any file."
+            in context.split("\n", 1)[0])
     # (Given once: the session's next message opens with neither.)
     fake.extra.clear()
     assert relayed(prompt(run, repo, "Change calc.py again", session="first", tool="codex")) == []
