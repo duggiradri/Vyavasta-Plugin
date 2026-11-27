@@ -8178,10 +8178,14 @@ def test_a_push_its_message_cleared_runs_without_a_second_check_until_it_carries
     fake.check = {"verdict": "clear", "hold": False, "kind": "action", "repository": "acme/api",
                   "notice": "Checked against your team’s record: nothing stands against this.", "context": "Clear."}
     prompt(run, repo, "push this")
-    assert before_run(run, repo, "git push") == {} and len(fake.calls("/check")) == 1
+    # Its message cleared it: the push is sent as decided, for teammates to be told, never checked again.
+    assert before_run(run, repo, "git push") == {} and len(fake.calls("/check")) == 2
+    assert fake.calls("/check")[-1]["body"]["passed"] is True
     (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
     git(repo, "commit", "-qam", "Swap the order")
-    assert before_run(run, repo, "git push") == {} and len(fake.calls("/check")) == 2
+    # It carries a commit made since: checked again, as any push.
+    assert before_run(run, repo, "git push") == {} and len(fake.calls("/check")) == 3
+    assert "passed" not in fake.calls("/check")[-1]["body"]
 
 
 def test_a_push_of_committed_work_the_model_runs_by_itself_goes_to_the_check_with_its_commits(run, fake, repo):
