@@ -2244,8 +2244,8 @@ def relay(lines: list[str], reply: str = THIS_REPLY, then: str | None = None) ->
         # (What a reply after one of the plugin's own questions goes on with: after “Go ahead anyway”, the request.)
         how += f" {then}"
     elif reply in (THIS_REPLY, FIRST_REPLY):
-        # (A reply that opens with the lines goes on with what the developer asked.)
-        how += " Then go on with what the developer asked, in the same reply."
+        # (A reply that opens with the lines goes on with what the developer asked: the lines are not its answer.)
+        how += " They are not your answer: then go on with what the developer asked, in the same reply."
     marked = "".join(f"\n│ {line}" for line in lines)
     return f"{RELAY_TOP} Open {reply} with {how}{marked}\n{RELAY_END}"
 
@@ -2302,6 +2302,19 @@ def noted(tool: str | None, said: str, event: str = "SessionStart") -> dict:
     return {"systemMessage": said, "hookSpecificOutput": {"hookEventName": event, "additionalContext": relay(lines, reply)}}
 
 
+def codex_greeting(card: str) -> str:
+    """A session's greeting card as Codex's model is given it to open its first reply with: on one line, whom it is
+    signed in as after its header, without the bullets that only say Vyavasta does all it does here and how to sign
+    out; every other bullet as it is."""
+    lines = card.split("\n")
+    head = next(at for at, line in enumerate(lines) if line == "📋 व Vyavasta · Connected")
+    who = lines[head + 1].removeprefix("- ").removesuffix(".")
+    rest = [line for line in lines[head + 2:] if not line.startswith("- Requests are checked against your team’s "
+                                                                         "record before") and not line.startswith(
+        "- Next: Send “vyavasta sign out”")]
+    return "\n".join([f"{lines[head]} · {who}", *rest])
+
+
 def relayed(said: dict, reply: str = THIS_REPLY, then: str | None = None) -> list[str]:
     """The lines a hook's answer gives the tool's model to open its reply with, which come before anything else it is
     given, under the instruction that says how many there are, and closed by a line of their own: nothing marked after
@@ -2356,9 +2369,9 @@ def test_under_codex_a_session_opens_codexs_first_reply_with_its_lines_and_claud
         first = prompt(run, repo, "Fix the rounding", session=f"s-{tool}", tool=tool)
         if tool == "codex":
             opened = relayed(first)
-            assert opened == [*md(line), "", *md(INBOX_CARDS)], opened
+            assert opened == [*md(codex_greeting(line)), "", *md(INBOX_CARDS)], opened
             assert relayed(prompt(run, repo, "Fix the rounding again", session=f"s-{tool}",
-                                  tool=tool)).count(md(line)[0]) == 0
+                                  tool=tool)).count(md(codex_greeting(line))[0]) == 0
         else:
             assert relayed(first) == []
 
@@ -2423,7 +2436,7 @@ def test_under_codex_the_first_reply_opens_with_the_sessions_line_and_the_messag
     said = prompt(run, repo, "Change calc.py", session="first", tool="codex")
     context = said["hookSpecificOutput"]["additionalContext"]
     assert context.count("doesn’t see Vyavasta’s own lines") == 1
-    assert relayed(said) == [*md(line), "", *md("👀 व Vyavasta · Heads-up\n- " + LINES[1])]
+    assert relayed(said) == [*md(codex_greeting(line)), "", *md("👀 व Vyavasta · Heads-up\n- " + LINES[1])]
     assert ("Nothing else comes before them: write them before you run any command or change any file."
             in context.split("\n", 1)[0])
     # (Given once: the session's next message opens with neither.)
@@ -2435,7 +2448,9 @@ def test_under_codex_the_first_reply_opens_with_the_sessions_line_and_the_messag
                   "statements": [], "anyway": {"phrase": "Plan it anyway", "context": "Going ahead: the export."}}
     held = prompt(run, repo, "Remove the export", session="second", tool="codex")
     assert held["decision"] == "block"
-    assert held["reason"] == f"{started['systemMessage'].split(chr(10) * 2)[0]}\n\nOn hold: Priya said the export stays."
+    # (The session's card on one line, as Codex's first reply is given it: its app shows a held message's reason.)
+    greeting = codex_greeting(started['systemMessage'].split(chr(10) * 2)[0])
+    assert held["reason"] == f"{greeting}\n\nOn hold: Priya said the export stays."
     # Claude Code, which shows the session's line itself, is given nothing of the kind.
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="third")))
     assert "hookSpecificOutput" in started and "doesn’t see" not in started["hookSpecificOutput"]["additionalContext"]
@@ -5991,7 +6006,7 @@ def test_a_full_inbox_never_pushes_a_hooks_answer_past_what_the_tool_passes_on(r
     if tool == "codex":
         opened = relayed(said)
         # (The session's own card first, as Codex's Markdown: its header and its labels in bold.)
-        greeting = started["systemMessage"].split("\n\n")[0].split("\n")
+        greeting = codex_greeting(started["systemMessage"].split("\n\n")[0]).split("\n")
         marked = [f"**{greeting[0]}**", *(re.sub(r"^- (Next|Note|Summaries|Sharing): ", r"- **\1:** ", line)
                                           for line in greeting[1:])]
         assert opened[:len(marked) + 2] == [*marked, "",
@@ -6048,7 +6063,7 @@ def test_a_full_inbox_never_pushes_a_hooks_answer_past_what_the_tool_passes_on(r
     if tool == "codex":
         # (The banner left out: only the session's own line opens the reply to its first message, and then what came.)
         opened = relayed(prompt(run, repo, "Fix the rounding", session="updated", tool=tool))
-        card = line[line.index("📋 व Vyavasta · Connected"):]
+        card = codex_greeting(line[line.index("📋 व Vyavasta · Connected"):])
         assert opened[:len(md(card))] == md(card)
         shown = len([one for one in opened if one.startswith("**🔔 व Vyavasta · Message ")])
     else:
@@ -8791,7 +8806,7 @@ def test_under_codex_what_came_while_the_developer_was_away_opens_the_first_repl
     assert fake.calls("/me")[-1]["query"] == {"inbox": ["1"]}
     fake.inbox = []
     first = prompt(run, repo, "Fix the rounding", session="first", tool="codex")
-    assert relayed(first) == [*md(line), "", *md(ARRIVED_LISTING)]
+    assert relayed(first) == [*md(codex_greeting(line)), "", *md(ARRIVED_LISTING)]
     assert first["hookSpecificOutput"]["additionalContext"].count(RELAY_TOP) == 1
     assert relayed(prompt(run, repo, "Fix the rounding again", session="first", tool="codex")) == []
     # A first message that is held shows them in its reason, which Codex shows, after the session's line.
@@ -8801,7 +8816,8 @@ def test_under_codex_what_came_while_the_developer_was_away_opens_the_first_repl
     fake.check = {"verdict": "held", "hold": True, "notice": HOLD_CARD, "context": "", "statements": [],
                   "anyway": {"phrase": "Go ahead anyway", "context": "x"}}
     held = prompt(run, repo, "Make the theme red", session="second", tool="codex")
-    assert held["reason"] == f"{started['systemMessage'].split(chr(10) * 2)[0]}\n\n{ARRIVED_LISTING}\n\n{HOLD_CARD}"
+    greeting = codex_greeting(started['systemMessage'].split(chr(10) * 2)[0])
+    assert held["reason"] == f"{greeting}\n\n{ARRIVED_LISTING}\n\n{HOLD_CARD}"
     # Claude Code: given at the start, as before.
     fake.inbox = ARRIVED
     told = start(run, repo, None, "third")["hookSpecificOutput"]["additionalContext"]

@@ -2952,7 +2952,7 @@ relay_said() {
   # goes on with may be said ($3): after “Go ahead anyway”, the request gone ahead with, never those words.)
   if [ -n "${3:-}" ]; then relayed_how="$relayed_how $3"
   else
-    case "$1" in "$RELAY_NOW"|"$RELAY_FIRST") relayed_how="$relayed_how Then go on with what the developer asked, in the same reply." ;; esac
+    case "$1" in "$RELAY_NOW"|"$RELAY_FIRST") relayed_how="$relayed_how They are not your answer: then go on with what the developer asked, in the same reply." ;; esac
   fi
   printf '%s Open %s with %s\n%s\n%s' "$RELAY_TOP" "$1" "$relayed_how" "$relayed_lines" "$RELAY_END"
 }
@@ -2989,10 +2989,23 @@ start_said() {
 # them), kept in the session's folder ($1) for the reply to the session's first message to open with, before what that
 # message brings, or for that message's reason where it is held (`relay_take`): one instruction for the reply. Told both
 # at the start and with the message what to open a reply with, Codex's model follows the first and drops the rest.
+#
+# The greeting's card goes there on one line, whom it is signed in as after its header: the bullets that only say
+# what Vyavasta does where it does it all, and how to sign out, are left out, and every other bullet stays (requests not
+# checked in this folder, code sharing turned off, a newer plugin, what summaries and code sharing do). Given the whole
+# card, Codex's model twice wrote it as its whole reply and did nothing of the request (27 November 2026); a session's
+# line on one line, as before, it never did.
 relay_first() {
   [ -n "$1" ] && [ -d "$1" ] || return 0
   printf '%s\n' "$2" | LC_ALL=C awk -v RULE="$RULE" -v TITLE="$(banner_title)" -v NEWS="$WHATS_NEW" \
-    '$0 != "" && $0 != RULE && $0 != TITLE && $0 != NEWS' > "$1/relay-first"
+    -v HEAD="$CARD_LIST व Vyavasta · Connected" -v ROUTINE="- $REACH_CHECKED" -v OUT="- Next: $WAY_OUT" '
+    $0 == "" || $0 == RULE || $0 == TITLE || $0 == NEWS { next }
+    $0 == HEAD { head = $0; next }
+    head != "" && (index($0, "- Signed in as ") == 1 || index($0, "- Connected as ") == 1) {
+      who = substr($0, 3); sub(/\.$/, "", who); print head " · " who; head = ""; next
+    }
+    $0 == ROUTINE || $0 == OUT { next }
+    { print }' > "$1/relay-first"
   [ -s "$1/relay-first" ] || rm -f "$1/relay-first"
 }
 # What teammates sent the developer while they were away, as Codex's developer is to see it ($2: the 🔔 cards), kept in
@@ -3624,6 +3637,9 @@ sharing_note() {
 
 # What a session in this folder does, for the line a session starts with. $1 is /me's list of repositories, $2 its
 # `checks` (false where the server checks no request).
+# What a session's greeting says where Vyavasta checks requests in the folder and reads its repository: all of it as it
+# should be (the one bullet a greeting relayed to Codex leaves out, `relay_first`).
+REACH_CHECKED="Requests are checked against your team’s record before ${AGENT} changes code, and questions about your team are answered from it."
 reach_said() {
   if [ -n "$NOGIT" ]; then
     echo "Vyavasta needs git, which isn’t installed here, so requests aren’t checked; questions about your team are still answered."
@@ -3636,7 +3652,7 @@ reach_said() {
   elif [ "${2:-}" = "false" ]; then
     echo "$UNCHECKED Questions about your team are answered from its record."
   else
-    echo "Requests are checked against your team’s record before ${AGENT} changes code, and questions about your team are answered from it."
+    echo "$REACH_CHECKED"
   fi
 }
 
