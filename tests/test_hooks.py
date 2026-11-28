@@ -2211,9 +2211,9 @@ def test_a_held_request_under_codex_is_blocked_in_the_form_codex_reads(run, fake
                         tool="codex"))
     going = "✅ व Vyavasta · Going ahead\n- Codex was shown your request, what stands in the way, and that you chose to go on."
     assert anyway["systemMessage"] == going
-    # (Codex's app doesn't show the line: its model opens its reply with the card, then carries out the request.)
-    assert anyway["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit",
-                                            "additionalContext": f"{relay(md(going), then=GOING_ON)}\n\nGo on: c"}
+    # (Codex's model is not told to open its reply with the card, which the developer chose in their own words: told to,
+    # it was seen to write the card as its whole reply and carry out nothing.)
+    assert anyway["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit", "additionalContext": "Go on: c"}
 
 
 # -- what Codex's developer is shown --------------------------------------------------------------------------------
@@ -2223,7 +2223,6 @@ def test_a_held_request_under_codex_is_blocked_in_the_form_codex_reads(run, fake
 # there are, each stands marked as a quoted record's lines are, and a line of their own closes them.
 RELAY_TOP = "The developer doesn’t see Vyavasta’s own lines in Codex."
 RELAY_END = "(The lines for the developer end above. This line is not one of them: never write it.)"
-GOING_ON = "Then carry out the request they chose to go ahead with, as they asked it, in the same reply."
 FIRST_REPLY = "your first reply in this session"
 THIS_REPLY = "your reply to this message"
 
@@ -8289,10 +8288,9 @@ def test_a_push_that_couldnt_be_checked_runs_once_the_developer_says_go_ahead_an
     given = (f"The developer was told that Vyavasta couldn’t check the command below against the team’s record ({why}), "
              "and chose to run it without the check. The choice is theirs: run it again as it was, and don’t ask them "
              "again because of the check. Their command: “git push origin main”")
-    # (In Codex, whose app doesn't show the line, its model opens its reply with the card.)
-    assert going == {"systemMessage": card, "hookSpecificOutput": {
-        "hookEventName": "UserPromptSubmit", "additionalContext": f"{relay(md(card), then=GOING_ON)}\n\n{given}" if tool
-        else given}}
+    # (In Codex too its model is given what to do, and not told to open its reply with the card.)
+    assert going == {"systemMessage": card, "hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                                   "additionalContext": given}}
     checks = len(fake.calls("/check"))
     assert before_run(run, repo, "git push origin main", tool=tool, **kwargs) == {}
     assert all(call["body"]["passed"] is True for call in fake.calls("/check")[checks:])
@@ -8703,8 +8701,7 @@ def test_going_ahead_past_a_hold_that_may_be_kept_tells_the_server_and_says_what
             f"that you chose to go on.\n- Covers: {COVERS}")
     assert going["systemMessage"] == card
     given = "The developer chose to go ahead anyway."
-    assert going["hookSpecificOutput"]["additionalContext"] == (f"{relay(md(card), then=GOING_ON)}\n\n{given}" if tool
-                                                                else given)
+    assert going["hookSpecificOutput"]["additionalContext"] == given
     # Told once: the hold is gone past, and the next “Go ahead anyway” is a message like any other.
     fake.check = {"verdict": "clear", "hold": False, "notice": "✅ व Vyavasta · Clear", "context": "", "statements": []}
     prompt(run, repo, "Go ahead anyway", session="s-day", tool=tool)
