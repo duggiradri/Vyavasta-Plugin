@@ -49,7 +49,7 @@ git_read() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"; }
 # plain sentence instead.
 [ -n "${VYAVASTA_DEBUG:-}" ] || exec 2>/dev/null
 
-VERSION="0.7.0"
+VERSION="0.8.0"
 DEFAULT_SERVER="https://vyavasta.com"
 PHRASE="Plan it anyway"
 # What goes past a hold on something done besides a change: a push, a merge, a deploy, a command the tool runs. Either
@@ -234,11 +234,7 @@ guide_said() {
     printf '“vyavasta help” shows the commands any time.'
   fi
 }
-WHATS_NEW="each request is checked against your team’s record, pushes and commits too, and a push is checked again before it runs: “Go ahead anyway” goes past a hold. When you and a teammate change the same file, on any branch, you are each told in one line, and “vyavasta shared” and “vyavasta --<name>” show what you both change. New files, commits not pushed yet and nested repositories are sent too, and code sharing is on unless you turn it off. One account at a time: “vyavasta sign in” while signed in replaces it, and “vyavasta sign out” ends this computer’s connection."
-case "$CLIENT" in
-  claude-code) WHATS_NEW="New in $VERSION: $WHATS_NEW While a session waits for you, a teammate’s message wakes Claude to show it." ;;
-  *) WHATS_NEW="New in $VERSION: $WHATS_NEW" ;;
-esac
+WHATS_NEW="New in $VERSION: what Vyavasta tells you is a short card now, the same in Claude Code and Codex, and a teammate’s message comes with its number and how to answer it. Where your Vyavasta keeps it, “Go ahead anyway” lasts the rest of your day for the same thing on the same files, and a message to a teammate says which files you were changing."
 # How long a check may take (a real model reads the record), a report, and anything else.
 CHECK_SECONDS=75
 # How long the call for a push already decided may take (`hook_before_run`): nothing is checked, and the push runs

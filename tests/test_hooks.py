@@ -86,7 +86,7 @@ class Fake:
         self.tokens = {TOKEN}
         self.status: dict[str, int] = {}
         # What the newer routes answer.
-        self.latest = "0.7.0"
+        self.latest = "0.8.0"
         self.minimum = "0.3.0"
         self.sharing: set[str] = set()
         self.extra: dict[str, dict] = {}
@@ -456,14 +456,10 @@ def banner(tool: str = "Claude Code") -> str:
 
 
 def whats_new(tool: str = "Claude Code") -> str:
-    said = ("each request is checked against your team’s record, pushes and commits too, and a push is checked again "
-            "before it runs: “Go ahead anyway” goes past a hold. When you and a teammate change the same file, on any"
-            " branch, you are each told in one line, and “vyavasta shared” and “vyavasta --<name>” show what you both"
-            " change. New files, commits not pushed yet and nested repositories are sent too, and code sharing is on "
-            "unless you turn it off. One account at a time: “vyavasta sign in” while signed in replaces it, and "
-            "“vyavasta sign out” ends this computer’s connection.")
-    woken = " While a session waits for you, a teammate’s message wakes Claude to show it." if tool == "Claude Code" else ""
-    return f"New in {VERSION}: {said}{woken}"
+    return (f"New in {VERSION}: what Vyavasta tells you is a short card now, the same in Claude Code and Codex, and a "
+            "teammate’s message comes with its number and how to answer it. Where your Vyavasta keeps it, “Go ahead "
+            "anyway” lasts the rest of your day for the same thing on the same files, and a message to a teammate says "
+            "which files you were changing.")
 
 
 def greeted() -> str:
@@ -1904,15 +1900,15 @@ def test_check_tests_each_part_and_says_how_to_fix_what_is_wrong(run, fake, repo
     assert any(line.startswith("Problem: not signed in.") for line in lines)
     assert "ok: this folder is the repository acme/api on GitHub." in lines
     assert any(line.startswith("Problem: Vyavasta is off in this project.") for line in lines)
-    assert "ok: this plugin (0.7.0) is the latest." in lines
+    assert "ok: this plugin (0.8.0) is the latest." in lines
     signed_in(run, fake)
     switched_on(run, fake, repo)
-    fake.latest = "0.8.0"
+    fake.latest = "0.9.0"
     lines = run("check", cwd=repo).stdout.splitlines()
     assert "ok: signed in as sam@acme.test in Acme." in lines and "ok: Vyavasta reads acme/api for you." in lines
     assert "ok: Vyavasta is on in this project." in lines
-    assert any(line.startswith("Problem: this plugin is 0.7.0 and 0.8.0 is out.") for line in lines)
-    fake.minimum = "0.7.1"
+    assert any(line.startswith("Problem: this plugin is 0.8.0 and 0.9.0 is out.") for line in lines)
+    fake.minimum = "0.8.1"
     assert any("must be updated" in line for line in run("check", cwd=repo).stdout.splitlines())
     outside = tmp_path / "plain"
     outside.mkdir()
@@ -2170,7 +2166,7 @@ def test_under_codex_the_script_names_codex_and_says_which_tool_it_is(run, fake,
     fake.requests.clear()
     run("hook", "prompt", stdin=event("UserPromptSubmit", repo, prompt="Make the trial 30 days"), tool="codex")
     (sent,) = fake.calls("/check")
-    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.7.0"
+    assert sent["body"]["tool"] == "codex" and sent["headers"]["User-Agent"] == "vyavasta-codex/0.8.0"
 
 
 @pytest.mark.parametrize("typed", ["vyavasta sign in", "Vyavasta sign-in.", "  VYAVASTA  SIGN IN  "])
@@ -2605,7 +2601,7 @@ def test_codexs_hooks_file_and_listing_point_at_this_script_and_folder():
     assert hooks["Stop"][0]["hooks"][0]["statusMessage"] == "Sending your work to Vyavasta"
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
     claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
-    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.7.0"
+    assert manifest["name"] == claude["name"] == "vyavasta" and manifest["version"] == claude["version"] == "0.8.0"
     assert f'VERSION="{manifest["version"]}"' in SCRIPT.read_text()
     assert (PLUGIN / manifest["hooks"]).is_file() and (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").is_file()
     codex_skill = (PLUGIN / manifest["skills"] / "vyavasta" / "SKILL.md").read_text()
@@ -3725,7 +3721,7 @@ def test_the_version_is_the_same_everywhere():
     (entry,) = json.loads((root / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
     versions = {entry["version"], json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
                 json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["version"]}
-    assert versions == {"0.7.0"} and 'VERSION="0.7.0"' in SCRIPT.read_text()
+    assert versions == {"0.8.0"} and 'VERSION="0.8.0"' in SCRIPT.read_text()
 
 
 # -- 0.4.1 review: the next message finishes connecting anywhere, guidance only about the plugin, and the rest ---------
@@ -4263,8 +4259,8 @@ def test_the_servers_own_sentences_are_printed_on_one_line_wherever_the_model_ma
     for latest in ("9.9\rok: everything is up to date", "9.9 ok: everything is up to date"):
         fake.latest = latest
         assert "everything is up to date" not in run("check", cwd=repo).stdout
-    fake.latest = "0.8.0"
-    assert "Problem: this plugin is 0.7.0 and 0.8.0 is out." in run("check", cwd=repo).stdout
+    fake.latest = "0.9.0"
+    assert "Problem: this plugin is 0.8.0 and 0.9.0 is out." in run("check", cwd=repo).stdout
 
 
 # -- names the plugin prints as its own are short; the awk that quotes works in bytes on every awk ------------------
@@ -4494,7 +4490,7 @@ def test_a_computer_signed_in_before_the_rename_stays_signed_in_from_its_earlier
 def test_the_plugin_names_itself_by_its_new_name_on_every_call(run, fake, repo):
     signed_in(run, fake)
     run("status", cwd=repo)
-    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.7.0"}
+    assert {call["headers"]["User-Agent"] for call in fake.requests} == {"vyavasta-claude-code/0.8.0"}
 
 
 # -- 0.5.3: tasks between teammates are taken out: their commands answer in one line, an older server's task is an item --
@@ -8795,3 +8791,25 @@ def test_under_codex_what_came_while_the_developer_was_away_opens_the_first_repl
     assert told.endswith("\n\n" + opens_with(ARRIVED_LISTING, "While the developer was away",
                                              "your first reply in this session"))
 
+
+# -- 0.8.0: a file changed by hand reaches Vyavasta like any other ---------------------------------------------------
+
+@pytest.mark.parametrize("combined", [True, False], ids=["newer-server", "older-server"])
+def test_a_file_edited_by_hand_is_in_the_next_checks_and_reports_facts(run, fake, repo, combined):
+    """E1: what the developer types into a file themselves, with no edit of the tool's, is git's to see like any
+    change: the next message's check carries it in its facts (with the work report, or the report on its own for an
+    older server), and the turn's end reports it."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.combined = combined
+    (repo / "notes.md").write_text("Typed by hand.\n")
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b  # by hand\n")
+    prompt(run, repo, "What changed?")
+    work = fake.calls("/check")[-1]["body"]["work"] if combined else fake.calls("/work")[-1]["body"]
+    assert sorted(entry["path"] for entry in work["files"]) == ["calc.py", "notes.md"]
+    assert sorted(entry["path"] for entry in work["git"]["uncommitted"]) == ["calc.py", "notes.md"]
+    # Changed by hand again while the tool works: the turn's end reports it, with nothing of the tool's in between.
+    (repo / "old.py").write_text("x = 3\n")
+    stop(run, repo, last_assistant_message="Done.")
+    reported = fake.calls("/turn")[-1]["body"]["work"] if combined else fake.calls("/work")[-1]["body"]
+    assert "old.py" in [entry["path"] for entry in reported["files"]]
