@@ -902,6 +902,9 @@ writable() {
 }
 
 now() { date +%s; }
+# The developer's own calendar day, as this computer's clock and time zone have it: a check carries it (`day`), and a
+# go-ahead the server keeps lasts until it ends (`went_ahead`).
+today() { date +%Y-%m-%d; }
 
 # Whether the server was found out of reach a moment ago: nothing is tried again so soon, so the tool isn't slowed.
 offline() {
@@ -1993,6 +1996,20 @@ changed_files() {
   clean_utf8 "$TMP/files-raw" "$TMP/files"
   NFILES=$(cat "$TMP/files-count")
   [ -n "$NFILES" ] || NFILES=0
+}
+
+# The names of the files the session is changing now, as a JSON list of paths: those of git's own list that a work
+# report carries (`changed_files`, made once in a run), never a key file's. For a go-ahead the server keeps for the day
+# (`went_ahead`), and for what a message to a teammate was sent while changing (`tell`).
+changed_names() {
+  [ -f "$TMP/files" ] || changed_files
+  printf '[%s]' "$(cat "$TMP/files")" | LC_ALL=C awk "$JSON_AWK"'
+    BEGIN { RS = "\001" }
+    NR == 1 {
+      n = jsplit($0, one); printf "["; k = 0
+      for (i = 1; i <= n; i++) { jobj(one[i], f); if (substr(f["path"], 1, 1) == "\"") printf "%s%s", (k++ ? "," : ""), f["path"] }
+      printf "]"
+    }'
 }
 
 # -- the facts of the work: commits not pushed, the branch, nested repositories ----------------------------------------
@@ -3093,7 +3110,7 @@ tell_with_said() {
 $TELL_WITH \"<the teammate’s name>\" <<'MESSAGE'
 <the message>
 MESSAGE
-In place of the name, give several names with commas between them, or team for everyone else in the workspace: one command sends the one message to each of them. ${outside}Write the message in plain words that can be understood on their own: say what was done and where, never only “it” or “the changes”, and send only what is true by then. A teammate and their agent are one address. They see the message in Vyavasta at once, and in their own coding tool with their next message there, and answer it themselves. Reach a teammate this way before any chat tool, email or browser, unless the developer names one, and say in your reply what you sent."
+In place of the name, give several names with commas between them, or team for everyone else in the workspace: one command sends the one message to each of them. ${outside}Write the message in plain words that can be understood on their own: name the files and the branch you mean, never only “this file”, “it” or “the changes”, say what was done, and send only what is true by then. A teammate and their agent are one address. They see the message in Vyavasta at once, and in their own coding tool with their next message there, and answer it themselves. Reach a teammate this way before any chat tool, email or browser, unless the developer names one, and say in your reply what you sent."
 }
 
 # Said when a session starts: that Vyavasta carries messages between teammates at all, that the developer reaches a
@@ -4197,6 +4214,8 @@ hook_prompt() {
     # the reply to any message kept does (the turn's end, `turn_ready`).
     [ -s "$dir/held-kept" ] && mv -f "$dir/held-kept" "$dir/turn-waiting"
     rm -f "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept"
+    # (A hold the server may remember for the rest of the day: it is told, and says what the go-ahead covers.)
+    went_ahead "$dir"
     going=$(json_text "$(cat "$dir/held")")
     if [ -s "$dir/overlap-context" ]; then
       going=$(fitted "$going
@@ -4204,7 +4223,7 @@ hook_prompt() {
 $(cat "$dir/overlap-context")")
       rm -f "$dir/overlap-context"
     fi
-    chose_said "$(card "$CARD_CLEAR" "Going ahead" "" "" "$went_said")" "$going"
+    chose_said "$(card "$CARD_CLEAR" "Going ahead" "" "" "$went_said" Covers "$COVERS")" "$going"
     rm -f "$dir/held"
     return
   fi
@@ -4245,7 +4264,7 @@ The developer was told that something their team has said stands against the cha
         fi ;;
     esac
   fi
-  rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept"
+  rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept" "$dir/held-id"
   handle_message "$prompt" "$dir"
 }
 
@@ -4260,6 +4279,27 @@ chose_said() {
 $2")
   printf '{"systemMessage":%s,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' \
     "$(json_quote "$1")" "$(json_quote "$chose_given")"
+}
+
+# A go-ahead the server may keep for the rest of the developer's day: where the hold gone past came with its own id
+# (`held-id`), the server is told the developer went ahead (POST /went-ahead), with their day and the names of the
+# files the session is changing now, as a work report gives them (`changed_names`); until that day ends it doesn't hold
+# them again for the same statements on those files, and anything else still holds. It answers what the go-ahead
+# covers in one sentence (COVERS), for the card that says they go ahead. A server from before it (404), any other
+# failure, or a hold with no id: nothing more is said or done than before. $1 is the session folder.
+went_ahead() {
+  COVERS=""
+  [ -s "$1/held-id" ] || return 0
+  went_id=$(cat "$1/held-id")
+  rm -f "$1/held-id"
+  { [ -n "$TOKEN" ] && [ -z "$NOCURL" ]; } || return 0
+  held_off && return 0
+  if repository "$HERE"; then went_files=$(changed_names); else REMOTE=""; BRANCH=""; went_files="[]"; fi
+  printf '{"hold_id":%s,"day":"%s","session":%s,"remote":%s,"branch":%s,"files":%s}' "$(json_quote "$went_id")" \
+    "$(today)" "$(json_quote "$SESSION")" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$went_files" > "$TMP/went"
+  api POST /went-ahead "$TMP/went" "$QUICK_SECONDS"
+  { [ "$STATUS" = "200" ] && [ "$(answer recorded)" = "true" ]; } || return 0
+  COVERS=$(one_line "$(json_text "$(answer covers)")")
 }
 
 # One of the plugin's slash commands in Claude Code (“/vyavasta:status”), before Claude Code expands it: answered at
@@ -4470,9 +4510,9 @@ handle_message() {
   carried=""
   if [ -n "$ROOT" ] && [ -n "$REMOTE" ] && work_report "$dir" bare; then carried=1; fi
   {
-    printf '{"request_id":"%s","request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s,"ask_now":true' \
+    printf '{"request_id":"%s","request":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":%s,"ask_now":true,"day":"%s"' \
       "$(new_request_id)" "$prompt" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" "$(json_quote "$SESSION")" \
-      "$CLIENT" "$keep"
+      "$CLIENT" "$keep" "$(today)"
     if [ -n "$shared" ]; then printf ',"change":'; cat "$TMP/change"; fi
     if [ -n "$carried" ]; then printf ',"work":'; cat "$TMP/report"; fi
     printf '}'
@@ -4741,6 +4781,10 @@ handle_message() {
       json_text "$(answer kind)" | tr -cd 'a-z' > "$dir/held-kind"
       { [ -z "$ROOT" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD; } > "$dir/held-head"
       rm -f "$dir/held-unchecked"
+      # (A hold the server may remember for the rest of the developer's day, once they go ahead anyway, comes with its
+      # own id: `went_ahead` tells the server they did.)
+      json_text "$(answer hold_id)" | tr -cd 'A-Za-z0-9_.:-' | cut -c1-200 > "$dir/held-id"
+      [ -s "$dir/held-id" ] || rm -f "$dir/held-id"
       # (The message held, where its words were kept for the summary: the turn that carries it out once the developer
       # goes on files its reply under it, `hook_prompt`.)
       if [ -s "$dir/turn-waiting" ]; then cp "$dir/turn-waiting" "$dir/held-kept"; else rm -f "$dir/held-kept"; fi
@@ -5044,7 +5088,7 @@ refuse_unchecked() {
   echo action > "$dir/held-kind"
   printf '%s\n' "$head" > "$dir/held-head"
   true > "$dir/held-unchecked"
-  rm -f "$dir/held-kept"
+  rm -f "$dir/held-kept" "$dir/held-id"
   refuse_run "Vyavasta couldn’t check this command against the team’s record ($1), so it didn’t run. Ask the developer whether to run it anyway. If they choose to, they send “$GO_AHEAD”, and then you run it again." \
     "$(cards_joined "$(card "$CARD_WARN" "Push not checked" "it didn’t run" Why "$1" \
       Next "Send “$GO_AHEAD” to run it without the check")" "$pushed_line")"
@@ -5115,9 +5159,9 @@ hook_before_run() {
   fi
   if work_report "$dir" bare; then carried=1; fi
   {
-    printf '{"request_id":"%s","request":"","command":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":false' \
+    printf '{"request_id":"%s","request":"","command":%s,"remote":%s,"branch":%s,"session":%s,"tool":"%s","keep":false,"day":"%s"' \
       "$(new_request_id)" "$(json_quote "$ran")" "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" \
-      "$(json_quote "$SESSION")" "$CLIENT"
+      "$(json_quote "$SESSION")" "$CLIENT" "$(today)"
     if [ -n "$shared" ]; then printf ',"change":'; cat "$TMP/change"; fi
     if [ -n "$carried" ]; then printf ',"work":'; cat "$TMP/report"; fi
     [ -z "$passed" ] || printf ',"passed":true'
@@ -5184,8 +5228,8 @@ hook_before_run() {
         json_quote "$(json_text "$held")" > "$dir/held"
         echo action > "$dir/held-kind"
         printf '%s\n' "$head" > "$dir/held-head"
-        rm -f "$dir/held-unchecked" "$dir/held-kept" ;;
-      *) rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept" ;;
+        rm -f "$dir/held-unchecked" "$dir/held-kept" "$dir/held-id" ;;
+      *) rm -f "$dir/held" "$dir/held-kind" "$dir/held-head" "$dir/held-unchecked" "$dir/held-kept" "$dir/held-id" ;;
     esac
     # (Claude Code's developer reads the notice on the line, and its model may say what stands in words of its own.
     # Codex's model opens what it says next with the notice's lines themselves: `refuse_run`.)
@@ -6768,9 +6812,18 @@ tell() {
     return
   fi
   if repository "$HERE"; then :; else REMOTE=""; BRANCH=""; fi
+  # What the message was sent while changing, where Vyavasta is on here: the repository, the branch and the names of the
+  # files the session is changing now (`about`), so that a teammate who reads this repository can tell what “this file”
+  # means. The server says it to each of them who may read it, and to no one else.
+  about=""
+  if project_on && [ -n "$REMOTE" ]; then
+    about=$(printf '{"remote":%s,"branch":%s,"files":%s}' "$(json_quote "$REMOTE")" "$(json_quote "$BRANCH")" \
+      "$(changed_names)")
+  fi
   {
     printf '{"request_id":"%s","to":%s,"text":%s,"kind":"message"' "$(new_request_id)" "$(json_quote "$1")" \
       "$(json_quote "$2")"
+    [ -z "$about" ] || printf ',"about":%s' "$about"
     # (Several at once: the list the server gave, its names each a JSON string, sent back as it came.)
     [ -n "${TELL_MANY:-}" ] && printf ',"to_many":%s' "$TELL_MANY"
     [ -n "${3:-}" ] && printf ',"reply_to":%s' "$(json_quote "$3")"

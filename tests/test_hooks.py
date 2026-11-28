@@ -115,6 +115,9 @@ class Fake:
         self.documents = {"documents": [], "count": 0}
         self.searched = {"status": "none", "words": [], "passages": [], "matched": 0, "readable": 0}
         self.read = {"status": "not_found"}
+        # What POST /went-ahead answers (from 0.8.0: a go-ahead kept for the rest of the developer's day); None is a
+        # server from before it, which answers 404.
+        self.went: dict | None = None
         # The sentence a refusal carries (``status`` sets which routes refuse), and its code by route ("x" unless set).
         self.refused = "Refused."
         self.code: dict[str, str] = {}
@@ -259,6 +262,8 @@ class Fake:
                     return self._answer(200, turned)
                 if path == "/conflict":
                     return self._answer(200, {"ok": True})
+                if path == "/went-ahead" and fake.went is not None:
+                    return self._answer(200, fake.went)
                 if path == "/chat":
                     if "/chat" in fake.extra:
                         return self._answer(200, fake.extra["/chat"])
@@ -752,6 +757,9 @@ def test_a_clear_request_reaches_claude_with_the_facts_and_sends_only_what_the_c
     # (With code sharing on, as it is unless turned off, the change goes too: of a clean tree, none.)
     change = body.pop("change")
     assert change["diff"] == change["unpushed_diff"] == "" and change["copies"] == [] and change["files"] == 0
+    # (The developer's own calendar day, as their computer's clock has it: a go-ahead the server keeps lasts until it
+    # ends.)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", body.pop("day"))
     assert body == {"request": text, "remote": "https://github.com/acme/api.git", "branch": "main",
                     "session": "session-1", "tool": "claude-code", "keep": True}
     assert b"hunter2" not in sent["raw"] and b"transcript" not in sent["raw"] and str(repo).encode() not in sent["raw"]
@@ -2001,11 +2009,14 @@ def test_ask_a_teammates_agent_prints_both_headers_the_answer_and_who_sees_it(ru
     said = output(run("hook", "prompt", stdin=event("UserPromptSubmit", repo,
                                                      prompt="vyavasta ask Priya Raman: what is the export’s plan?")))
     assert said["decision"] == "block" and not fake.calls("/check")
+    # (Where Vyavasta is on, with what the developer was changing as they sent it: here, nothing yet.)
     assert {key: value for key, value in fake.calls("/tell")[0]["body"].items() if key != "request_id"} == {
                                               "to": "Priya Raman", "text": "what is the export’s plan?",
                                               "kind": "message", "session": "session-1",
                                               "remote": "https://github.com/acme/api.git", "branch": "main",
-                                              "tool": "claude-code"}
+                                              "tool": "claude-code",
+                                              "about": {"remote": "https://github.com/acme/api.git", "branch": "main",
+                                                        "files": []}}
     # (Only the developer reads it: each line marked, with no words for the model around them.)
     assert said["reason"].splitlines() == [
         "── To Priya Raman’s agent · from Sam Rivera · 18 Nov, 10:42 · through Vyavasta ──",
@@ -5107,7 +5118,8 @@ def test_the_model_tells_a_teammate_with_the_message_on_the_commands_input_taken
         assert re.fullmatch(r"[0-9a-f]{24}", body.pop("request_id"))
         assert body == {
             "to": "Rohan", "text": words, "kind": "message", "intent": "tell", "session": "session-7",
-            "remote": "https://github.com/acme/api.git", "branch": "main", "tool": tool or "claude-code"}
+            "remote": "https://github.com/acme/api.git", "branch": "main", "tool": tool or "claude-code",
+            "about": {"remote": "https://github.com/acme/api.git", "branch": "main", "files": []}}
         # Told the teammate: under a header that names them, never their agent, with where they see it.
         assert done.stdout.splitlines() == [
             "── To Rohan Mehta · from Sam Rivera · 23 November 2026, 00:23 · through Vyavasta ──",
@@ -8632,6 +8644,114 @@ def test_the_plugins_own_command_answers_are_cards_with_one_thing_on_each_line(r
         lines = prompt(run, repo, typed, tool="codex")["reason"].split("\n")
         assert lines[0] == f"📋 व Vyavasta · {title}", typed
         assert len(lines) >= 2 and all(line.startswith("- ") for line in lines[1:]), lines
+
+
+# -- 0.8.0: “Go ahead anyway” for the rest of the developer's day ---------------------------------------------------
+
+HELD_CHANGE = {"verdict": "held", "hold": True, "kind": "change", "notice": HOLD_CARD, "context": "c",
+               "statements": [], "hold_id": "hld_7", "anyway": {"phrase": "Go ahead anyway",
+                                                               "context": "The developer chose to go ahead anyway."}}
+COVERS = "Priya Raman’s Slack message, on globals.css and the files this turn changes, until the end of today."
+
+
+@pytest.mark.parametrize("tool", [None, "codex"])
+def test_going_ahead_past_a_hold_that_may_be_kept_tells_the_server_and_says_what_it_covers(run, fake, repo, tool):
+    """The call's case: after “Go ahead anyway”, a similar follow-up was held again. A hold the server may keep for the
+    developer's day comes with its id; going past it tells the server, with the developer's own day, the session and
+    the files it changes now, before the turn starts and never as a check of its own, and the card that says they go
+    ahead says what the go-ahead covers. The model is given what it always was."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "globals.css").write_text("body { color: red; }\n")
+    fake.check = dict(HELD_CHANGE)
+    fake.went = {"recorded": True, "covers": COVERS}
+    prompt(run, repo, "Make the theme red", session="s-day", tool=tool)
+    checked = len(fake.calls("/check"))
+    going = prompt(run, repo, "Go ahead anyway", session="s-day", tool=tool)
+    (went,) = fake.calls("/went-ahead")
+    assert went["body"] == {"hold_id": "hld_7", "day": fake.calls("/check")[-1]["body"]["day"], "session": "s-day",
+                            "remote": "https://github.com/acme/api.git", "branch": "main", "files": ["globals.css"]}
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", went["body"]["day"]) and len(fake.calls("/check")) == checked
+    card = (f"✅ व Vyavasta · Going ahead\n- {AGENTS[NAMED[tool]]} was shown your request, what stands in the way, and "
+            f"that you chose to go on.\n- Covers: {COVERS}")
+    assert going["systemMessage"] == card
+    given = "The developer chose to go ahead anyway."
+    assert going["hookSpecificOutput"]["additionalContext"] == (f"{relay(md(card))}\n\n{given}" if tool else given)
+    # Told once: the hold is gone past, and the next “Go ahead anyway” is a message like any other.
+    fake.check = {"verdict": "clear", "hold": False, "notice": "✅ व Vyavasta · Clear", "context": "", "statements": []}
+    prompt(run, repo, "Go ahead anyway", session="s-day", tool=tool)
+    assert len(fake.calls("/went-ahead")) == 1 and len(fake.calls("/check")) == checked + 1
+
+
+@pytest.mark.parametrize("went, hold_id", [(None, "hld_7"), ({"recorded": False, "covers": ""}, "hld_7"),
+                                           ({"recorded": True, "covers": COVERS}, None)],
+                         ids=["older-server", "not-recorded", "no-id"])
+def test_going_ahead_where_the_server_keeps_nothing_is_what_it_always_was(run, fake, repo, went, hold_id):
+    """A server from before it (404), one that keeps nothing (a day it doesn't take), or a hold that came with no id:
+    the go-ahead is what it always was, for the turn it starts, and says nothing of what it covers."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    fake.check = dict(HELD_CHANGE)
+    if not hold_id:
+        del fake.check["hold_id"]
+    fake.went = went
+    prompt(run, repo, "Make the theme red")
+    going = prompt(run, repo, "Go ahead anyway")
+    assert going == {"systemMessage": "✅ व Vyavasta · Going ahead\n- Claude was shown your request, what stands in the "
+                                      "way, and that you chose to go on.",
+                     "hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                            "additionalContext": "The developer chose to go ahead anyway."}}
+    assert len(fake.calls("/went-ahead")) == (1 if hold_id else 0)
+
+
+def test_the_push_go_ahead_and_every_check_carry_the_developers_day(run, fake, repo):
+    """Every check carries the day, a push's too; a push gone past runs without another check for 15 minutes, as
+    before, and no /went-ahead is called for a hold on something done."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("def add(a, b):\n    return b + a\n")
+    git(repo, "commit", "-qam", "Swap the order")
+    fake.check = dict(HELD_PUSH)
+    assert denied(before_run(run, repo, "git push origin main"))
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", fake.calls("/check")[-1]["body"]["day"])
+    fake.went = {"recorded": True, "covers": COVERS}
+    assert "Covers" not in prompt(run, repo, "Go ahead anyway")["systemMessage"]
+    assert fake.calls("/went-ahead") == []
+    assert before_run(run, repo, "git push origin main") == {}
+    assert fake.calls("/check")[-1]["body"]["passed"] is True
+
+
+# -- 0.8.0: a message to a teammate names the files it was sent while changing ---------------------------------------
+
+def test_a_message_to_a_teammate_says_what_the_developer_was_changing_where_vyavasta_is_on(run, fake, repo):
+    """A2, from the call: a message like “Dana is free to change this file now” named no file. Where Vyavasta is on,
+    every message to a teammate carries the repository, the branch and the names of the files the session is changing
+    now, for the server to say to those who may read them; from a project that is off, none of it."""
+    signed_in(run, fake)
+    switched_on(run, fake, repo)
+    (repo / "calc.py").write_text("def add(a, b):\n    return round(a + b, 2)\n")
+    about = {"remote": "https://github.com/acme/api.git", "branch": "main", "files": ["calc.py"]}
+    fake.tell = {**fake.tell, "status": "told", "answer": "", "notice": "Delivered."}
+    run("tell", "Priya", "You are free to change calc.py now.", cwd=repo)
+    assert fake.calls("/tell")[-1]["body"]["about"] == about
+    prompt(run, repo, "vyavasta tell priya: you are free to change calc.py now")
+    assert fake.calls("/tell")[-1]["body"]["about"] == about
+    fake.check = {"verdict": "teammate", "hold": False, "notice": "", "context": "", "statements": [],
+                  "tell": {"to": "priya", "text": "you are free to change calc.py now"}}
+    prompt(run, repo, "@priya you are free to change calc.py now")
+    assert fake.calls("/tell")[-1]["body"]["about"] == about
+    # Off here: nothing of the work goes with it.
+    run("off", cwd=repo)
+    run("tell", "Priya", "Done.", cwd=repo)
+    assert "about" not in fake.calls("/tell")[-1]["body"]
+    # The tool's model is told to name the files and the branch it means, in both tools and their skills.
+    switched_on(run, fake, repo)
+    for tool in (None, "codex"):
+        guide = start(run, repo, tool, f"t-{tool}")["hookSpecificOutput"]["additionalContext"]
+        assert "name the files and the branch you mean, never only “this file”, “it” or “the changes”" in guide
+    for skill in (PLUGIN / "codex" / "skills" / "vyavasta" / "SKILL.md", PLUGIN / "skills" / "guide" / "SKILL.md"):
+        said = " ".join(skill.read_text().split())
+        assert "name the files and the branch you mean, never “this file” or “it”" in said, skill
 
 
 # -- 0.8.0: what came while the developer was away opens Codex's first reply ----------------------------------------

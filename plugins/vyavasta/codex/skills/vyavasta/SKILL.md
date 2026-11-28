@@ -68,7 +68,8 @@ opens the file picker, and Enter then puts a file in its place: a space after th
 `codex exec` shows nothing the plugin says.
 
 When a request was held, the developer was told what stands in the way. They go ahead by sending `Go ahead anyway`
-(or `Plan it anyway`).
+(or `Plan it anyway`). Where their Vyavasta keeps it, a go-ahead on a change lasts the rest of their day for the same
+things the team said, on the same files; anything else still holds.
 When the plugin says something the team has said stands against the change being made, the developer answers
 `continue` or `stop`.
 
@@ -97,8 +98,8 @@ address. The developer reaches a teammate with “@” and their name. When a me
 other work (“push this, then tell @priya”), you send it, after any work it depends on is done, with the command the plugin gives you at the
 start of the session and again with such a message (the plugin’s script with `tell "<the teammate’s name>"` and
 the message on its input; several names with commas between them, or `team`, send the one message to each of them).
-Write the message in plain words that can be understood on their own, and send only what
-is true by then. Run that command outside Codex’s sandbox too, by asking for
+Write the message in plain words that can be understood on their own: name the files and the branch you mean, never
+“this file” or “it”, and send only what is true by then. Run that command outside Codex’s sandbox too, by asking for
 escalated permissions for it: it needs the internet to reach Vyavasta and its own settings folder, it sends only the
 message you give it, and it changes nothing in the project. If the request is refused, tell the developer that it was
 not sent, and that they can send it themselves with `vyavasta tell <name>: <their words>`. Do not look for a chat tool, email or a browser
