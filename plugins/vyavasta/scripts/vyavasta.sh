@@ -3386,6 +3386,8 @@ $WHATS_NEW
   # A new session has no message of its own waiting for its reply (one that goes on keeps it, to be kept with it).
   SUMMARIES_NOTE=""
   if [ -z "$again" ]; then rm -f "$dir/turn-waiting"; summaries_note; fi
+  # (Which of the two notes this start says, for the greeting's card to say each as a bullet of its own.)
+  SUMMARIES_FIRST=$SUMMARIES_NOTE; SHARING_FIRST=""
   # Where the tree stood when the session began, to tell later whether anything of it was kept.
   if repository "$folder"; then
     [ -f "$dir/start" ] || git_read -C "$ROOT" rev-parse -q --verify HEAD > "$dir/start"
@@ -3393,7 +3395,7 @@ $WHATS_NEW
   # (Said with whatever the session's start says, as the summaries' note is.)
   if [ -z "$again" ] && [ -n "$REMOTE" ] && sharing_note; then
     mark_sharing_said
-    SUMMARIES_NOTE="$SUMMARIES_NOTE$SHARING_NOTE"
+    SUMMARIES_NOTE="$SUMMARIES_NOTE$SHARING_NOTE"; SHARING_FIRST=1
   fi
   # Sessions over a week old are forgotten.
   find "$SESSIONS" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
@@ -3448,18 +3450,19 @@ $WHATS_NEW
   case "$STATUS" in
     200)
       [ -n "$quiet" ] || remember_me
-      if [ -n "$CONNECTED" ]; then who="connected as $(person "$(saved email)") in $(person "$(saved workspace)").${REPLACED_SAID:+ $REPLACED_SAID}"
-      else who="signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
-      # (Whom it is signed in as comes first, and how to sign out after what it does here.)
-      greeting="${BANNER}Vyavasta: $who $(reach_said "$(answer repositories)" "$checks") $WAY_OUT"
-      if [ -n "$SHARING_ENDED" ]; then
-        greeting="$greeting Code sharing was turned off for this repository in Vyavasta’s web app, so your changes are no longer sent. Send “vyavasta share code on” to turn it on again."
-      fi
+      if [ -n "$CONNECTED" ]; then who="Connected as $(person "$(saved email)") in $(person "$(saved workspace)").${REPLACED_SAID:+ $REPLACED_SAID}"
+      else who="Signed in as $(person "$(json_text "$(answer email)")") in $(person "$(json_text "$(json_get "$TMP/workspace" name)")")."; fi
+      ended=""
+      [ -z "$SHARING_ENDED" ] || ended="Code sharing was turned off for this repository in Vyavasta’s web app, so your changes are no longer sent. Send “vyavasta share code on” to turn it on again."
       # (A newer plugin is told of from /me's answer, at a start that asked for one: a session that goes on asks
       # nothing and greets nobody.)
       update=""; [ -n "$quiet" ] || update=$(update_said "$TMP/answer")
-      [ -z "$update" ] || greeting="$greeting $update"
-      greeting="$greeting$SUMMARIES_NOTE"
+      # The session's greeting is a card of its own, as every line the plugin shows is: whom it is signed in as first,
+      # what it does here, what changed (code sharing turned off in the web app, a newer plugin, what summaries and code
+      # sharing do, said once), and how to sign out last.
+      greeting="${BANNER}$(card "$CARD_LIST" "Connected" "" "" "$who" "" "$(reach_said "$(answer repositories)" "$checks")" \
+        Sharing "$ended" Note "$update" Summaries "${SUMMARIES_FIRST:+$SUMMARIES_SAID}" Sharing "${SHARING_FIRST:+$SHARING_SAID}" \
+        Next "$WAY_OUT")"
       # In Codex, whose app shows none of it, the tool's model opens its reply to the session's first message with
       # these lines, together with what that message brings, under one instruction (`relay_first`): told at the start
       # and again with the message what to open a reply with, Codex's model follows the first and drops the rest.

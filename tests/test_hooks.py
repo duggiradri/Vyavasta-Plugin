@@ -1949,7 +1949,7 @@ def test_a_session_starts_with_what_teammates_asked_while_away_each_under_its_he
     fake.inbox = INBOX
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo)))
     said, told = started["systemMessage"], started["hookSpecificOutput"]["additionalContext"]
-    assert said.startswith("Vyavasta: signed in as sam@acme.test in Acme.") and TOKEN not in said
+    assert said.startswith("📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.") and TOKEN not in said
     # The developer reads how many came, once: the tool's model shows them at the top of its first reply.
     assert said.endswith("\n\nWhile you were away, 2 messages came from your teammates. Claude shows them at the top "
                          "of its first reply, and “vyavasta inbox” shows them here.")
@@ -1970,9 +1970,9 @@ def test_whom_the_computer_is_signed_in_as_and_how_to_sign_out_are_said_at_every
                                          tool=tool))["systemMessage"]
     signed_in(run, fake)
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool=tool))["systemMessage"]
-    assert said == ("Vyavasta: signed in as sam@acme.test in Acme. Requests are checked against your team’s record "
-                    f"before {AGENTS[NAMED[tool]]} changes code, and questions about your team are answered from it. "
-                    f"{WAY_OUT}")
+    assert said == ("📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.\n- Requests are checked against your team’s record "
+                    f"before {AGENTS[NAMED[tool]]} changes code, and questions about your team are answered from it.\n"
+                    f"- Next: {WAY_OUT}")
     assert f"Signed in as sam@acme.test in Acme, on laptop. {WAY_OUT}" in run("status", cwd=repo, tool=tool).stdout
     assert ("1. Sign in: send “vyavasta sign in”. You’re signed in as sam@acme.test in Acme, one account at a time: "
             f"signing in as another replaces it. {WAY_OUT}") in run("help", cwd=repo, tool=tool).stdout
@@ -1987,8 +1987,8 @@ def test_a_server_that_checks_no_request_is_never_said_to_check_one(run, fake, r
     switched_on(run, fake, repo)
     fake.extra["/me"] = {"checks": False}
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo)))
-    assert started["systemMessage"] == (f"Vyavasta: signed in as sam@acme.test in Acme. {unchecked} Questions about "
-                                        f"your team are answered from its record. {WAY_OUT}")
+    assert started["systemMessage"] == (f"📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.\n- {unchecked} Questions about "
+                                        f"your team are answered from its record.\n- Next: {WAY_OUT}")
     assert "checked against the record before it reaches you" not in started["hookSpecificOutput"]["additionalContext"]
     for said in (run("on", cwd=repo).stdout, run("status", cwd=repo).stdout, run("check", cwd=repo).stdout):
         assert unchecked in said or unchecked[0].lower() + unchecked[1:] in said, said
@@ -2329,8 +2329,9 @@ def test_under_codex_a_session_opens_codexs_first_reply_with_its_lines_and_claud
         started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session=f"s-{tool}"),
                              tool=tool))
         line, away = started["systemMessage"].split("\n\n")
-        assert line.startswith("Vyavasta: signed in as sam@acme.test in Acme.") and WAY_OUT in line
-        assert "Code sharing is now on" in line and "Summaries are on" in line and "must be updated" in line
+        assert line.startswith("📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.") and f"\n- Next: {WAY_OUT}" in line
+        assert "\n- Sharing: Code sharing is now on" in line and "\n- Summaries: On in this project." in line
+        assert "must be updated" in line
         assert away.startswith("While you were away, 2 messages came from your teammates.")
         context = started["hookSpecificOutput"]["additionalContext"]
         # (In Codex the session's line waits for the session's first message, whose reply opens with it and with what
@@ -2348,8 +2349,9 @@ def test_under_codex_a_session_opens_codexs_first_reply_with_its_lines_and_claud
         first = prompt(run, repo, "Fix the rounding", session=f"s-{tool}", tool=tool)
         if tool == "codex":
             opened = relayed(first)
-            assert opened == [line, "", *md(INBOX_CARDS)], opened
-            assert relayed(prompt(run, repo, "Fix the rounding again", session=f"s-{tool}", tool=tool)).count(line) == 0
+            assert opened == [*md(line), "", *md(INBOX_CARDS)], opened
+            assert relayed(prompt(run, repo, "Fix the rounding again", session=f"s-{tool}",
+                                  tool=tool)).count(md(line)[0]) == 0
         else:
             assert relayed(first) == []
 
@@ -2407,14 +2409,14 @@ def test_under_codex_the_first_reply_opens_with_the_sessions_line_and_the_messag
     switched_on(run, fake, repo)
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="first"), tool="codex"))
     line = started["systemMessage"].split("\n\n")[0]
-    assert line.startswith("Vyavasta: signed in as sam@acme.test in Acme.")
+    assert line.startswith("📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.")
     assert relayed(started, FIRST_REPLY) == [] and "doesn’t see Vyavasta’s own lines" not in json.dumps(started)
     (repo / "calc.py").write_text("changed\n")
     fake.extra["/check"] = {"overlap": {**OVERLAP_LINES, "lines": LINES[1:]}}
     said = prompt(run, repo, "Change calc.py", session="first", tool="codex")
     context = said["hookSpecificOutput"]["additionalContext"]
     assert context.count("doesn’t see Vyavasta’s own lines") == 1
-    assert relayed(said) == [line, "", *md("👀 व Vyavasta · Heads-up\n- " + LINES[1])]
+    assert relayed(said) == [*md(line), "", *md("👀 व Vyavasta · Heads-up\n- " + LINES[1])]
     assert ("Nothing else comes before them: write them before you run any command or change any file."
             in context.split("\n", 1)[0])
     # (Given once: the session's next message opens with neither.)
@@ -2940,12 +2942,13 @@ def test_a_session_start_says_connected_once_and_what_a_folder_not_read_does(run
     run("sign-in", cwd=repo)
     fake.approved = True
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo)))["systemMessage"]
-    assert said.startswith("Vyavasta: connected as sam@acme.test in Acme. Requests are checked")
+    assert said.startswith("📋 व Vyavasta · Connected\n- Connected as sam@acme.test in Acme.\n- Requests are checked")
     assert said.count("onnected as") == 1
     git(repo, "remote", "set-url", "origin", "https://github.com/acme/web.git")
     said = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s2")))["systemMessage"]
-    assert said == ("Vyavasta: signed in as sam@acme.test in Acme. Vyavasta doesn’t read acme/web for you, so "
-                    f"requests here aren’t checked; questions about your team are still answered. {WAY_OUT}")
+    assert said == ("📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.\n- Vyavasta doesn’t read acme/web "
+                    "for you, so requests here aren’t checked; questions about your team are still answered.\n"
+                    f"- Next: {WAY_OUT}")
 
 
 def test_signing_out_says_nothing_is_sent_and_help_names_the_typed_only_commands(run, fake, repo):
@@ -3381,7 +3384,7 @@ def test_a_project_turned_on_before_summaries_is_told_once_and_that_first_messag
     for told in run.home.glob("projects/*/summaries-told"):
         told.unlink()
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="s2"), cwd=repo))
-    assert "Summaries are on in this project: from your next message" in started["systemMessage"]
+    assert "\n- Summaries: On in this project. From your next message" in started["systemMessage"]
     prompt(run, repo, "Change calc.py", session="s2")
     assert fake.calls("/check")[-1]["body"]["keep"] is True
     # With summaries off there is nothing to tell.
@@ -5359,16 +5362,16 @@ def test_the_plugin_greets_again_after_it_is_installed_again_or_updated_and_then
         (run.home / f"welcomed-{client}").write_text("0.5.4 1\n")
         said = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool=tool))
         named = NAMED[tool]
-        assert said["systemMessage"].startswith(f"{banner(named)}{whats_new(named)}\nVyavasta: signed in as "
-                                                "sam@acme.test in Acme.")
+        assert said["systemMessage"].startswith(f"{banner(named)}{whats_new(named)}\n📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.")
         again = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool=tool))
-        assert again["systemMessage"].startswith("Vyavasta: signed in as sam@acme.test in Acme.")
+        assert again["systemMessage"].startswith("📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.")
         assert "V Y A V A S T A" not in again["systemMessage"]
-    assert usual["systemMessage"].startswith("Vyavasta: signed in as") and "V Y A V A S T A" not in usual["systemMessage"]
+    assert usual["systemMessage"].startswith("📋 व Vyavasta · Connected\n- Signed in as") \
+        and "V Y A V A S T A" not in usual["systemMessage"]
     # The first session ever in a project that is on (nothing greeted here before): the banner, and nothing "new".
     (run.home / "welcomed-codex").unlink()
     fresh = output(run("hook", "session-start", stdin=event("SessionStart", repo), tool="codex"))["systemMessage"]
-    assert fresh.startswith(banner("Codex") + "Vyavasta: signed in as") and "New in" not in fresh
+    assert fresh.startswith(banner("Codex") + "📋 व Vyavasta · Connected\n- Signed in as") and "New in" not in fresh
 
 
 def test_vyavasta_open_opens_the_web_app_or_one_of_its_pages_in_the_browser(run, fake, repo):
@@ -5980,10 +5983,14 @@ def test_a_full_inbox_never_pushes_a_hooks_answer_past_what_the_tool_passes_on(r
     context = said["hookSpecificOutput"]["additionalContext"]
     if tool == "codex":
         opened = relayed(said)
-        assert opened[:3] == [started["systemMessage"].split("\n\n")[0], "",
-                              "**🔔 व Vyavasta · Question 1 from Priya Raman · 23 Nov, 09:00**"]
+        # (The session's own card first, as Codex's Markdown: its header and its labels in bold.)
+        greeting = started["systemMessage"].split("\n\n")[0].split("\n")
+        marked = [f"**{greeting[0]}**", *(re.sub(r"^- (Next|Note|Summaries|Sharing): ", r"- **\1:** ", line)
+                                          for line in greeting[1:])]
+        assert opened[:len(marked) + 2] == [*marked, "",
+                                            "**🔔 व Vyavasta · Question 1 from Priya Raman · 23 Nov, 09:00**"]
         # (Then what the check brought: what came while away ends with the card that says how many more wait.)
-        rest = opened[2:]
+        rest = opened[len(marked) + 1:]
         more = next(at for at, one in enumerate(rest) if " more messages from your teammates" in one)
         away = "\n".join(unmarkdown(rest[:more + 2]))
         context = context.split(f"\n{RELAY_END}\n\n", 1)[1]
@@ -6026,15 +6033,16 @@ def test_a_full_inbox_never_pushes_a_hooks_answer_past_what_the_tool_passes_on(r
     started = output(run("hook", "session-start", stdin=event("SessionStart", repo, session="updated"), tool=tool))
     fits(started, tool)
     line, away = started["systemMessage"].split("\n\n")
-    assert line.startswith(banner(NAMED[tool]) + whats_new(NAMED[tool]) + "\nVyavasta: signed in as sam@acme.test")
-    assert "Code sharing is now on" in line and "Summaries are on" in line
+    assert line.startswith(banner(NAMED[tool]) + whats_new(NAMED[tool]) + "\n📋 व Vyavasta · Connected\n- Signed in as sam@acme.test in Acme.")
+    assert "\n- Sharing: Code sharing is now on" in line and "\n- Summaries: On in this project." in line
     told = started["hookSpecificOutput"]["additionalContext"]
     assert relayed(started, FIRST_REPLY) == []
     assert told.startswith("Vyavasta is connected for this developer.")
     if tool == "codex":
         # (The banner left out: only the session's own line opens the reply to its first message, and then what came.)
         opened = relayed(prompt(run, repo, "Fix the rounding", session="updated", tool=tool))
-        assert opened[0] == line.split("\n")[-1]
+        card = line[line.index("📋 व Vyavasta · Connected"):]
+        assert opened[:len(md(card))] == md(card)
         shown = len([one for one in opened if one.startswith("**🔔 व Vyavasta · Message ")])
     else:
         assert told.endswith(RELAY_END)
@@ -8774,7 +8782,7 @@ def test_under_codex_what_came_while_the_developer_was_away_opens_the_first_repl
     assert fake.calls("/me")[-1]["query"] == {"inbox": ["1"]}
     fake.inbox = []
     first = prompt(run, repo, "Fix the rounding", session="first", tool="codex")
-    assert relayed(first) == [line, "", *md(ARRIVED_LISTING)]
+    assert relayed(first) == [*md(line), "", *md(ARRIVED_LISTING)]
     assert first["hookSpecificOutput"]["additionalContext"].count(RELAY_TOP) == 1
     assert relayed(prompt(run, repo, "Fix the rounding again", session="first", tool="codex")) == []
     # A first message that is held shows them in its reason, which Codex shows, after the session's line.

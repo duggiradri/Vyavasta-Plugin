@@ -302,7 +302,7 @@ def main() -> int:
 
         step("SessionStart")
         said = hook("session-start", "SessionStart", repo, source="startup")
-        expect("signed in as sam@northwind.dev" in said.get("systemMessage", ""), "the session says it is signed in")
+        expect("signed in as sam@northwind.dev" in said.get("systemMessage", "").lower(), "the session says it is signed in")
 
         step("UserPromptSubmit: a request for a change")
         said = hook("prompt", "UserPromptSubmit", repo, prompt="Remove customer_plan from the API response")
